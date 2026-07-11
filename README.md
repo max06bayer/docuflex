@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="github/LogoBranding.png" alt="Docuflex" width="760" />
+  <img src="github/LogoBranding.png" alt="Docuflex" width="800" />
 </p>
 
 <h1 align="center">Docuflex</h1>
