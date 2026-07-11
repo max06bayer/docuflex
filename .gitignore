@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# SvelteKit and build output
+.svelte-kit/
+build/
+dist/
+
+# Generated Java output
+backend/out/
+*.class
+
+# Local runtime and test artifacts
+tmp/
+*.log
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+
+# Test and coverage output
+coverage/
+playwright-report/
+test-results/
