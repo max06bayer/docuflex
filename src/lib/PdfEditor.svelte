@@ -9,10 +9,24 @@
   /** @type {import('pdfjs-dist').PDFDocumentProxy | null} */
   let pdfDocument = null;
   let pageCount = 0;
+  /** @type {number | null} */
+  let activePage = null;
   let status = 'Rendering PDF…';
   let loadGeneration = 0;
 
-  onMount(loadPdf);
+  onMount(() => {
+    loadPdf();
+
+    /** @param {MouseEvent} event */
+    function clearPageSelection(event) {
+      if (!(event.target instanceof Element) || !event.target.closest('.thumbnail-page')) {
+        activePage = null;
+      }
+    }
+
+    document.addEventListener('click', clearPageSelection);
+    return () => document.removeEventListener('click', clearPageSelection);
+  });
 
   async function loadPdf() {
     const generation = ++loadGeneration;
@@ -108,6 +122,7 @@
 
   /** @param {number} pageIndex */
   function scrollToPage(pageIndex) {
+    activePage = pageIndex;
     viewer?.querySelectorAll('.pdf-page')[pageIndex]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
@@ -121,7 +136,13 @@
   <div class="thumbnail-list">
     {#each Array(pageCount) as _, index}
       <div class="thumbnail-entry">
-        <button class="thumbnail-page" aria-label={`Go to page ${index + 1}`} onclick={() => scrollToPage(index)}>
+        <button
+          class:page-selected={activePage === index}
+          class="thumbnail-page"
+          aria-label={`Go to page ${index + 1}`}
+          aria-pressed={activePage === index}
+          onclick={() => scrollToPage(index)}
+        >
           <span class="page-pill">{index + 1}/{pageCount}</span>
           <canvas></canvas>
         </button>
@@ -191,6 +212,13 @@
 
   .thumbnail-page:active {
     border-color: #bfbfbf;
+  }
+
+  .thumbnail-page.page-selected,
+  .thumbnail-page.page-selected:hover,
+  .thumbnail-page.page-selected:active {
+    border: 2px solid #529dff;
+    box-shadow: 3px 9px 22px rgba(82, 157, 255, 0.48);
   }
 
   .thumbnail-page canvas {
