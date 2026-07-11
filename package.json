@@ -9,10 +9,12 @@
     "backend:dev": "npm run backend:compile && java -cp backend/out:backend/lib/pdfbox-app-3.0.3.jar DocuflexPdfServer",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
-    "check": "svelte-kit sync && svelte-check --tsconfig ./jsconfig.json"
+    "check": "svelte-kit sync && svelte-check --tsconfig ./jsconfig.json",
+    "start": "node build"
   },
   "devDependencies": {
     "@sveltejs/adapter-auto": "^6.0.0",
+    "@sveltejs/adapter-node": "^5.5.7",
     "@sveltejs/kit": "^2.22.0",
     "@sveltejs/vite-plugin-svelte": "^6.0.0",
     "svelte": "^5.0.0",
