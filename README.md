@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="github/LogoBranding.png" alt="Docuflex" width="720" />
+  <img src="github/LogoBranding.png" alt="Docuflex" width="760" />
 </p>
 
 <h1 align="center">Docuflex</h1>
@@ -41,6 +41,7 @@ Core product principles:
 - [SvelteKit](https://svelte.dev/docs/kit) and Svelte 5
 - [Vite](https://vite.dev/)
 - [PDF.js](https://mozilla.github.io/pdf.js/) for direct PDF rendering
+- [Tauri](https://v1.tauri.app) for later offline Desktop App
 - Java with [Apache PDFBox](https://pdfbox.apache.org/) for native PDF operations
 - Geist variable font, self-hosted through Fontsource
 
@@ -73,38 +74,6 @@ Compile and run the PDFBox backend:
 ```bash
 npm run backend:dev
 ```
-
-## Project structure
-
-```text
-src/routes/              Main application shell and home workspace
-src/lib/PdfEditor.svelte Direct PDF.js editor view
-public/                  Product and interface assets
-backend/src/             Java PDFBox service
-backend/prototype/       Preserved prototype implementation
-github/                  Repository branding and product notes
-```
-
-## Architecture direction
-
-The frontend displays PDFs through PDF.js. Editing operations are intended to be described as structured changes and applied natively by the Java/PDFBox backend, preserving the PDF format rather than converting documents into HTML.
-
-```text
-PDF.js frontend
-    -> structured page, rectangle, and content edits
-    -> Java PDFBox service
-    -> updated native PDF
-```
-
-## Near-term roadmap
-
-- Editor-specific tool sidebar
-- Native text editing and layout operations
-- Redaction, blur, shapes, images, and signatures
-- Page reordering, merging, and splitting
-- Search, filtering, and recent-file persistence
-- Desktop packaging for macOS and Windows
-- Local export and save workflows
 
 ## Repository status
 
