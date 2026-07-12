@@ -1,5 +1,6 @@
 <script>
   import { onDestroy, onMount, tick } from 'svelte';
+  import EditorToolbar from '$lib/EditorToolbar.svelte';
 
   /** @type {File} */
   export let file;
@@ -9,8 +10,10 @@
   /** @type {import('pdfjs-dist').PDFDocumentProxy | null} */
   let pdfDocument = null;
   let pageCount = 0;
+  /** @type {Set<number>} */
+  let selectedPages = new Set();
   /** @type {number | null} */
-  let activePage = null;
+  let selectionAnchor = null;
   let status = 'Rendering PDF…';
   let loadGeneration = 0;
 
@@ -20,7 +23,8 @@
     /** @param {MouseEvent} event */
     function clearPageSelection(event) {
       if (!(event.target instanceof Element) || !event.target.closest('.thumbnail-page')) {
-        activePage = null;
+        selectedPages = new Set();
+        selectionAnchor = null;
       }
     }
 
@@ -32,6 +36,8 @@
     const generation = ++loadGeneration;
     status = 'Rendering PDF…';
     pageCount = 0;
+    selectedPages = new Set();
+    selectionAnchor = null;
     pdfDocument?.destroy?.();
     pdfDocument = null;
 
@@ -120,9 +126,23 @@
     }
   }
 
-  /** @param {number} pageIndex */
-  function scrollToPage(pageIndex) {
-    activePage = pageIndex;
+  /** @param {number} pageIndex @param {MouseEvent} event */
+  function selectPage(pageIndex, event) {
+    if (event.shiftKey && selectionAnchor !== null) {
+      const start = Math.min(selectionAnchor, pageIndex);
+      const end = Math.max(selectionAnchor, pageIndex);
+      selectedPages = new Set(Array.from({ length: end - start + 1 }, (_, offset) => start + offset));
+    } else if (event.metaKey || event.ctrlKey) {
+      const nextSelection = new Set(selectedPages);
+      if (nextSelection.has(pageIndex)) nextSelection.delete(pageIndex);
+      else nextSelection.add(pageIndex);
+      selectedPages = nextSelection;
+      selectionAnchor = pageIndex;
+    } else {
+      selectedPages = new Set([pageIndex]);
+      selectionAnchor = pageIndex;
+    }
+
     viewer?.querySelectorAll('.pdf-page')[pageIndex]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
@@ -137,11 +157,11 @@
     {#each Array(pageCount) as _, index}
       <div class="thumbnail-entry">
         <button
-          class:page-selected={activePage === index}
+          class:page-selected={selectedPages.has(index)}
           class="thumbnail-page"
           aria-label={`Go to page ${index + 1}`}
-          aria-pressed={activePage === index}
-          onclick={() => scrollToPage(index)}
+          aria-pressed={selectedPages.has(index)}
+          onclick={(event) => selectPage(index, event)}
         >
           <span class="page-pill">{index + 1}/{pageCount}</span>
           <canvas></canvas>
@@ -160,6 +180,7 @@
       </div>
     {/each}
   </div>
+  <EditorToolbar />
 </section>
 
 <style>
@@ -218,7 +239,7 @@
   .thumbnail-page.page-selected:hover,
   .thumbnail-page.page-selected:active {
     border: 2px solid #529dff;
-    box-shadow: 3px 9px 22px rgba(82, 157, 255, 0.48);
+    box-shadow: 2px 6px 15px rgba(82, 157, 255, 0.16);
   }
 
   .thumbnail-page canvas {
