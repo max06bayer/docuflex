@@ -44,12 +44,14 @@ import org.apache.pdfbox.pdmodel.graphics.PDXObject;
 import org.apache.pdfbox.pdmodel.graphics.form.PDFormXObject;
 import org.apache.pdfbox.pdmodel.graphics.blend.BlendMode;
 import org.apache.pdfbox.pdmodel.graphics.state.PDExtendedGraphicsState;
+import org.apache.pdfbox.util.Matrix;
 import org.apache.pdfbox.Loader;
 
 public class DocuflexPdfServer {
   private static final int PORT = environmentInt("PDF_BACKEND_PORT", 8080);
   private static final String HOST = environmentString("PDF_BACKEND_HOST", "127.0.0.1");
   private static final int MAX_REQUEST_BYTES = 150 * 1024 * 1024;
+  private static final float EDITOR_PAGE_SCALE = 1.35f;
 
   public static void main(String[] args) throws IOException {
     HttpServer server = HttpServer.create(new InetSocketAddress(HOST, PORT), 0);
@@ -152,6 +154,7 @@ public class DocuflexPdfServer {
       document.setAllSecurityToBeRemoved(true);
       for (int pageIndex = 0; pageIndex < document.getNumberOfPages(); pageIndex += 1) {
         List<AnnotationStroke> markers = new ArrayList<>();
+        List<AnnotationStroke> highlights = new ArrayList<>();
         List<AnnotationStroke> pens = new ArrayList<>();
         List<AnnotationStroke> shapes = new ArrayList<>();
         for (AnnotationStroke annotation : annotations) {
@@ -160,6 +163,8 @@ public class DocuflexPdfServer {
           }
           if ("marker".equals(annotation.type)) {
             if (!annotation.points.isEmpty()) markers.add(annotation);
+          } else if ("highlight".equals(annotation.type)) {
+            highlights.add(annotation);
           } else if ("pen".equals(annotation.type)) {
             if (!annotation.points.isEmpty()) pens.add(annotation);
           } else {
@@ -170,6 +175,9 @@ public class DocuflexPdfServer {
         PDPage page = document.getPage(pageIndex);
         if (!markers.isEmpty()) {
           drawAnnotationLayer(document, page, markers, true);
+        }
+        if (!highlights.isEmpty()) {
+          drawTextHighlightLayer(document, page, highlights);
         }
         if (!shapes.isEmpty()) {
           drawShapeLayer(document, page, shapes);
@@ -182,6 +190,33 @@ public class DocuflexPdfServer {
       ByteArrayOutputStream output = new ByteArrayOutputStream();
       document.save(output);
       return output.toByteArray();
+    }
+  }
+
+  private static void drawTextHighlightLayer(
+      PDDocument document,
+      PDPage page,
+      List<AnnotationStroke> highlights) throws IOException {
+    try (PDPageContentStream content = new PDPageContentStream(
+        document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
+      PDExtendedGraphicsState graphicsState = new PDExtendedGraphicsState();
+      graphicsState.setNonStrokingAlphaConstant(1f);
+      graphicsState.setBlendMode(BlendMode.MULTIPLY);
+      content.setGraphicsStateParameters(graphicsState);
+      content.setNonStrokingColor(1f, 0.894f, 0.231f);
+      for (AnnotationStroke highlight : highlights) {
+        if (highlight.width <= 0 || highlight.height <= 0) continue;
+        PdfPoint topLeft = shapePoint(page, highlight, 0, 0);
+        PdfPoint topRight = shapePoint(page, highlight, 1, 0);
+        PdfPoint bottomRight = shapePoint(page, highlight, 1, 1);
+        PdfPoint bottomLeft = shapePoint(page, highlight, 0, 1);
+        content.moveTo(topLeft.x, topLeft.y);
+        content.lineTo(topRight.x, topRight.y);
+        content.lineTo(bottomRight.x, bottomRight.y);
+        content.lineTo(bottomLeft.x, bottomLeft.y);
+        content.closePath();
+        content.fill();
+      }
     }
   }
 
@@ -198,7 +233,10 @@ public class DocuflexPdfServer {
 
       for (AnnotationStroke shape : shapes) {
         if (shape.width <= 0 || shape.height <= 0) continue;
-        if ("check".equals(shape.type)) {
+        if ("textfield".equals(shape.type)) {
+          drawTextField(content, page, shape);
+          continue;
+        } else if ("check".equals(shape.type)) {
           content.setLineWidth(1.25f);
           PdfPoint start = shapePoint(page, shape, 0.08, 0.54);
           PdfPoint middle = shapePoint(page, shape, 0.38, 0.82);
@@ -253,6 +291,79 @@ public class DocuflexPdfServer {
         content.fillAndStroke();
       }
     }
+  }
+
+  private static void drawTextField(
+      PDPageContentStream content,
+      PDPage page,
+      AnnotationStroke shape) throws IOException {
+    String text = sanitizeWinAnsi(shape.text == null ? "" : shape.text)
+        .replace("\r\n", "\n")
+        .replace('\r', '\n');
+    if (text.isBlank()) return;
+
+    PDFont font = new PDType1Font(Standard14Fonts.FontName.HELVETICA);
+    PdfPoint topLeft = shapePoint(page, shape, 0, 0);
+    PdfPoint bottomLeft = shapePoint(page, shape, 0, 1);
+    PdfPoint leftCenter = shapePoint(page, shape, 0, 0.5);
+    PdfPoint rightCenter = shapePoint(page, shape, 1, 0.5);
+    double physicalHeight = Math.hypot(bottomLeft.x - topLeft.x, bottomLeft.y - topLeft.y);
+    double physicalWidth = Math.hypot(rightCenter.x - leftCenter.x, rightCenter.y - leftCenter.y);
+    // PDF.js renders page coordinates at 1.35 CSS units per PDF point. Convert
+    // every text metric back to PDF points so export matches the SVG editor.
+    float fontSize = 16f / EDITOR_PAGE_SCALE;
+    float horizontalPadding = 6f / EDITOR_PAGE_SCALE;
+    float availableWidth = (float) Math.max(1, physicalWidth - horizontalPadding * 2);
+    List<String> lines = wrapTextFieldLines(font, fontSize, availableWidth, text);
+
+    double angle = Math.atan2(rightCenter.y - leftCenter.y, rightCenter.x - leftCenter.x);
+    float cosine = (float) Math.cos(angle);
+    float sine = (float) Math.sin(angle);
+    content.setNonStrokingColor(0.09f, 0.09f, 0.09f);
+    float lineHeight = 19.2f / EDITOR_PAGE_SCALE;
+    double localX = horizontalPadding / Math.max(1, physicalWidth);
+    for (int lineIndex = 0; lineIndex < lines.size(); lineIndex += 1) {
+      double baselineDistance = 15.2 / EDITOR_PAGE_SCALE + lineIndex * lineHeight;
+      PdfPoint baseline = shapePoint(page, shape, localX, baselineDistance / Math.max(1, physicalHeight));
+      content.beginText();
+      content.setFont(font, fontSize);
+      content.setTextMatrix(new Matrix(cosine, sine, -sine, cosine, baseline.x, baseline.y));
+      if (!lines.get(lineIndex).isEmpty()) content.showText(lines.get(lineIndex));
+      content.endText();
+    }
+    content.setNonStrokingColor(1f, 0.302f, 0.333f);
+  }
+
+  private static List<String> wrapTextFieldLines(
+      PDFont font,
+      float fontSize,
+      float availableWidth,
+      String text) throws IOException {
+    List<String> lines = new ArrayList<>();
+    for (String paragraph : text.split("\n", -1)) {
+      if (paragraph.isEmpty()) {
+        lines.add("");
+        continue;
+      }
+      String remaining = paragraph;
+      while (!remaining.isEmpty()) {
+        int fittingLength = 0;
+        for (int index = 1; index <= remaining.length(); index += 1) {
+          if (font.getStringWidth(remaining.substring(0, index)) / 1000f * fontSize > availableWidth) break;
+          fittingLength = index;
+        }
+        if (fittingLength == 0) fittingLength = 1;
+        if (fittingLength >= remaining.length()) {
+          lines.add(remaining.stripTrailing());
+          break;
+        }
+        int breakAt = remaining.lastIndexOf(' ', fittingLength - 1);
+        if (breakAt <= 0) breakAt = fittingLength;
+        lines.add(remaining.substring(0, breakAt).stripTrailing());
+        remaining = remaining.substring(breakAt).stripLeading();
+      }
+    }
+    return lines;
   }
 
   private static void appendArrowHead(
@@ -2494,7 +2605,8 @@ public class DocuflexPdfServer {
       String type = asString(annotation.get("type"));
       boolean isStroke = "marker".equals(type) || "pen".equals(type);
       boolean isShape = "triangle".equals(type) || "rectangle".equals(type) || "circle".equals(type) ||
-          "check".equals(type) || "cross".equals(type) || "arrow".equals(type) || "line".equals(type);
+          "check".equals(type) || "cross".equals(type) || "arrow".equals(type) || "line".equals(type) ||
+          "textfield".equals(type) || "highlight".equals(type);
       if (!isStroke && !isShape) {
         throw new IllegalArgumentException("Unsupported annotation type: " + type);
       }
@@ -2516,7 +2628,8 @@ public class DocuflexPdfServer {
         }
         annotations.add(new AnnotationStroke(
             asInt(annotation.get("page")), type, List.of(),
-            x, y, width, height, rotation, Math.max(0, radiusX), Math.max(0, radiusY)));
+            x, y, width, height, rotation, Math.max(0, radiusX), Math.max(0, radiusY),
+            optionalString(annotation.get("text"))));
         continue;
       }
       List<NormalizedPoint> points = new ArrayList<>();
@@ -2534,7 +2647,7 @@ public class DocuflexPdfServer {
         }
       }
       annotations.add(new AnnotationStroke(
-          asInt(annotation.get("page")), type, points, 0, 0, 0, 0, 0, 0, 0));
+          asInt(annotation.get("page")), type, points, 0, 0, 0, 0, 0, 0, 0, ""));
     }
     return annotations;
   }
@@ -2735,7 +2848,8 @@ public class DocuflexPdfServer {
       double height,
       double rotation,
       double radiusX,
-      double radiusY) {}
+      double radiusY,
+      String text) {}
 
   private record NormalizedPoint(double x, double y) {}
 

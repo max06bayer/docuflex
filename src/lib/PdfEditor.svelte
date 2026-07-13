@@ -4,7 +4,8 @@
 
   /** @typedef {{ x: number; y: number; pressure: number }} StrokePoint */
   /** @typedef {{ id: number; type: 'marker' | 'pen'; points: StrokePoint[] }} AnnotationStroke */
-  /** @typedef {{ id: number; type: 'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line'; x: number; y: number; width: number; height: number; rotation: number }} AnnotationShape */
+  /** @typedef {{ id: number; type: 'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'textfield'; x: number; y: number; width: number; height: number; rotation: number; text?: string }} AnnotationShape */
+  /** @typedef {{ id: number; rects: { x: number; y: number; width: number; height: number }[] }} TextHighlight */
 
   /** @type {File} */
   export let file;
@@ -42,6 +43,8 @@
   let annotations = {};
   /** @type {Record<number, AnnotationShape[]>} */
   let shapes = {};
+  /** @type {Record<number, TextHighlight[]>} */
+  let textHighlights = {};
   /** @type {Record<number, { width: number; height: number }>} */
   let pageSizes = {};
   /** @type {{ pointerId: number; pageIndex: number; stroke: AnnotationStroke } | null} */
@@ -57,9 +60,15 @@
   let eraserCursorSize = 34;
   /** @type {{ pageIndex: number; id: number } | null} */
   let selectedShape = null;
+  /** @type {Set<number>} */
+  let selectedShapeIds = new Set();
+  /** @type {{ pageIndex: number; x: number; y: number; width: number; height: number; rotation: number } | null} */
+  let multiSelectionFrame = null;
+  /** @type {{ pageIndex: number; id: number } | null} */
+  let editingTextShape = null;
   /** @type {{ pointerId: number; pageIndex: number; id: number; start: StrokePoint } | null} */
   let drawingShape = null;
-  /** @type {null | { pointerId: number; kind: 'move'; pageIndex: number; id: number; start: StrokePoint; initial: AnnotationShape } | { pointerId: number; kind: 'resize'; pageIndex: number; id: number; handleX: -1 | 0 | 1; handleY: -1 | 0 | 1; initial: AnnotationShape } | { pointerId: number; kind: 'rotate'; pageIndex: number; id: number; initial: AnnotationShape; startAngle: number } | { pointerId: number; kind: 'line-endpoint'; pageIndex: number; id: number; endpoint: 'start' | 'end'; initial: AnnotationShape }} */
+  /** @type {any} */
   let shapeInteraction = null;
   /** @type {{ pageIndex: number; x: number | null; y: number | null; shape: AnnotationShape } | null} */
   let shapeGuides = null;
@@ -70,11 +79,15 @@
   const CLICK_ZOOM_FACTOR = 1.25;
   const MAX_CANVAS_PIXELS = 24_000_000;
   const ERASER_RADIUS = 17;
-  const SHAPE_TOOLS = new Set(['triangle', 'rectangle', 'circle', 'check', 'cross', 'arrow', 'line']);
+  const SHAPE_TOOLS = new Set(['triangle', 'rectangle', 'circle', 'check', 'cross', 'arrow', 'line', 'textfield']);
   const LINE_SHAPE_TOOLS = new Set(['arrow', 'line']);
   const MIN_SHAPE_SIZE = 8;
 
   $: if (activeTool !== 'eraser') eraserCursorVisible = false;
+
+  function isTextSelectionTool() {
+    return activeTool === 'select' || activeTool === 'highlight';
+  }
 
   onMount(() => {
     loadPdf();
@@ -95,7 +108,7 @@
 
     /** @param {MouseEvent} event */
     function beginProductionCharacterDrag(event) {
-      if (!import.meta.env.PROD || activeTool !== 'select' || event.button !== 0 || event.detail !== 1) return;
+      if (!import.meta.env.PROD || !isTextSelectionTool() || event.button !== 0 || event.detail !== 1) return;
       const target = event.target;
       if (!(target instanceof Element) || !target.closest('.textLayer span')) {
         // A drag beginning on the canvas has no legitimate text anchor.
@@ -251,7 +264,7 @@
 
     /** @param {MouseEvent} event */
     function suppressProductionBlankDrag(event) {
-      if (!import.meta.env.PROD || activeTool !== 'select' || event.button !== 0) return;
+      if (!import.meta.env.PROD || !isTextSelectionTool() || event.button !== 0) return;
       const target = event.target;
       if (target instanceof Element && target.closest('.pdf-page') && !target.closest('.textLayer span')) {
         event.preventDefault();
@@ -260,13 +273,13 @@
 
     /** @param {MouseEvent} event */
     function rememberPointerStart(event) {
-      if (activeTool !== 'select') return;
+      if (!isTextSelectionTool()) return;
       pointerStart = { x: event.clientX, y: event.clientY };
     }
 
     /** @param {MouseEvent} event */
     function beginWordDrag(event) {
-      if (activeTool !== 'select') return;
+      if (!isTextSelectionTool()) return;
       const target = event.target;
       if (event.detail !== 2 || !(target instanceof Element) || !target.closest('.textLayer span')) return;
 
@@ -321,7 +334,7 @@
 
     /** @param {MouseEvent} event */
     function extendWordDrag(event) {
-      if (activeTool !== 'select' || !wordDrag || (event.buttons & 1) === 0) return;
+      if (!isTextSelectionTool() || !wordDrag || (event.buttons & 1) === 0) return;
       const hit = document.elementFromPoint(event.clientX, event.clientY);
       const hitSpan = hit instanceof Element ? hit.closest('.textLayer span:not(.markedContent)') : null;
       const hitRect = hitSpan?.getBoundingClientRect();
@@ -373,7 +386,7 @@
     function beginTextSelectionCursor(event) {
       const target = event.target;
       if (
-        activeTool === 'select' &&
+        isTextSelectionTool() &&
         event.button === 0 &&
         target instanceof Element &&
         target.closest('.textLayer span')
@@ -426,6 +439,7 @@
     document.addEventListener('mouseup', endTextSelectionCursor, true);
     document.addEventListener('mouseup', finishProductionCharacterDrag, true);
     document.addEventListener('mouseup', endWordDrag);
+    document.addEventListener('mouseup', commitTextHighlight);
     document.addEventListener('dragstart', suppressProductionBlankDrag);
     document.addEventListener('click', clearPageSelection);
     window.addEventListener('keydown', updateZoomCursor);
@@ -443,6 +457,7 @@
       document.removeEventListener('mouseup', endTextSelectionCursor, true);
       document.removeEventListener('mouseup', finishProductionCharacterDrag, true);
       document.removeEventListener('mouseup', endWordDrag);
+      document.removeEventListener('mouseup', commitTextHighlight);
       document.removeEventListener('dragstart', suppressProductionBlankDrag);
       document.removeEventListener('click', clearPageSelection);
       window.removeEventListener('keydown', updateZoomCursor);
@@ -500,6 +515,82 @@
     zoomAt(zoomLevel * factor, event.clientX, event.clientY);
   }
 
+  /** @param {{ x: number; y: number; width: number; height: number }[]} rects */
+  function mergeTextHighlightRects(rects) {
+    const sorted = rects
+      .map((rect) => ({ ...rect }))
+      .sort((left, right) => left.y - right.y || left.x - right.x);
+    /** @type {{ x: number; y: number; width: number; height: number }[]} */
+    const merged = [];
+    for (const rect of sorted) {
+      const previous = merged.at(-1);
+      const previousCenterY = previous ? previous.y + previous.height / 2 : 0;
+      const centerY = rect.y + rect.height / 2;
+      const sameLine = previous && Math.abs(previousCenterY - centerY) <= Math.max(2, Math.min(previous.height, rect.height) * 0.35);
+      const touchesHorizontally = previous && rect.x <= previous.x + previous.width + 3 && rect.x + rect.width >= previous.x - 3;
+      if (sameLine && touchesHorizontally) {
+        const left = Math.min(previous.x, rect.x);
+        const right = Math.max(previous.x + previous.width, rect.x + rect.width);
+        const top = Math.min(previous.y, rect.y);
+        const bottom = Math.max(previous.y + previous.height, rect.y + rect.height);
+        previous.x = left;
+        previous.y = top;
+        previous.width = right - left;
+        previous.height = bottom - top;
+      } else {
+        merged.push({ ...rect });
+      }
+    }
+    return merged;
+  }
+
+  function commitTextHighlight() {
+    if (activeTool !== 'highlight') return;
+    queueMicrotask(() => {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || selection.rangeCount === 0 || !viewer) return;
+      const range = selection.getRangeAt(0);
+      const clientRects = [...range.getClientRects()].filter((rect) => rect.width > 0.5 && rect.height > 0.5);
+      if (!clientRects.length) return;
+      const pages = [...viewer.querySelectorAll('.pdf-page')];
+      pages.forEach((shell, pageIndex) => {
+        if (!(shell instanceof HTMLElement)) return;
+        const pageRect = shell.getBoundingClientRect();
+        const pageWidth = Number.parseFloat(shell.style.width) || shell.offsetWidth;
+        const pageHeight = Number.parseFloat(shell.style.height) || shell.offsetHeight;
+        const rects = clientRects
+          .filter((rect) => {
+            const centerX = rect.left + rect.width / 2;
+            const centerY = rect.top + rect.height / 2;
+            return centerX >= pageRect.left && centerX <= pageRect.right && centerY >= pageRect.top && centerY <= pageRect.bottom;
+          })
+          .map((rect) => ({
+            x: ((rect.left - pageRect.left) / pageRect.width) * pageWidth,
+            y: ((rect.top - pageRect.top) / pageRect.height) * pageHeight,
+            width: (rect.width / pageRect.width) * pageWidth,
+            height: (rect.height / pageRect.height) * pageHeight
+          }))
+          .sort((left, right) => left.y - right.y || left.x - right.x);
+        const merged = mergeTextHighlightRects(rects);
+        if (merged.length) {
+          // Keep a single non-overlapping rectangle set per page. Drawing the
+          // same selection again therefore never stacks translucent ink.
+          const combinedRects = mergeTextHighlightRects([
+            ...(textHighlights[pageIndex] ?? []).flatMap((highlight) => highlight.rects),
+            ...merged
+          ]);
+          const highlight = { id: nextAnnotationId++, rects: combinedRects };
+          textHighlights = {
+            ...textHighlights,
+            [pageIndex]: [highlight]
+          };
+        }
+      });
+      selection.removeAllRanges();
+      viewer?.classList.remove('text-selecting');
+    });
+  }
+
   /** @param {StrokePoint[]} points */
   function strokePath(points) {
     if (points.length === 0) return '';
@@ -549,6 +640,86 @@
         candidate.id === shape.id ? shape : candidate
       )
     };
+  }
+
+  /** @type {CanvasRenderingContext2D | null} */
+  let textMeasureContext = null;
+
+  /** @param {string} text */
+  function textFieldTextWidth(text) {
+    if (!textMeasureContext && typeof document !== 'undefined') {
+      textMeasureContext = document.createElement('canvas').getContext('2d');
+    }
+    if (!textMeasureContext) return text.length * 8;
+    textMeasureContext.font = '400 16px Helvetica, Arial, sans-serif';
+    return textMeasureContext.measureText(text).width;
+  }
+
+  /** @param {string} text @param {number} width */
+  function textFieldLines(text, width) {
+    const availableWidth = Math.max(1, width - 12);
+    /** @type {string[]} */
+    const lines = [];
+    for (const paragraph of text.replace(/\r\n?/g, '\n').split('\n')) {
+      if (!paragraph) {
+        lines.push('');
+        continue;
+      }
+      let remaining = paragraph;
+      while (remaining) {
+        let fittingLength = 0;
+        for (let index = 1; index <= remaining.length; index += 1) {
+          if (textFieldTextWidth(remaining.slice(0, index)) > availableWidth) break;
+          fittingLength = index;
+        }
+        if (fittingLength === 0) fittingLength = 1;
+        if (fittingLength >= remaining.length) {
+          lines.push(remaining.trimEnd());
+          break;
+        }
+        let breakAt = remaining.lastIndexOf(' ', fittingLength - 1);
+        if (breakAt <= 0) breakAt = fittingLength;
+        lines.push(remaining.slice(0, breakAt).trimEnd());
+        remaining = remaining.slice(breakAt).trimStart();
+      }
+    }
+    return lines;
+  }
+
+  /** @param {number} id @param {boolean} [selectAll] */
+  function focusTextEditor(id, selectAll = false) {
+    const editor = viewer?.querySelector(`textarea[data-text-editor="${id}"]`);
+    if (!(editor instanceof HTMLTextAreaElement)) return;
+    editor.style.height = 'auto';
+    editor.style.height = `${Math.max(editor.parentElement?.clientHeight ?? 0, editor.scrollHeight)}px`;
+    editor.focus();
+    if (selectAll) editor.select();
+  }
+
+  /** @param {MouseEvent} event @param {number} pageIndex @param {number} id */
+  function startTextEditing(event, pageIndex, id) {
+    event.preventDefault();
+    event.stopPropagation();
+    setShapeSelection(pageIndex, [id]);
+    editingTextShape = { pageIndex, id };
+    tick().then(() => focusTextEditor(id, true));
+  }
+
+  /** @param {Event} event @param {number} pageIndex @param {number} id */
+  function updateTextField(event, pageIndex, id) {
+    const shape = findShape(pageIndex, id);
+    const input = event.currentTarget;
+    if (!shape || !(input instanceof HTMLTextAreaElement)) return;
+    replaceShape(pageIndex, { ...shape, text: input.value });
+    input.style.height = 'auto';
+    input.style.height = `${Math.max(input.parentElement?.clientHeight ?? 0, input.scrollHeight)}px`;
+  }
+
+  /** @param {KeyboardEvent} event */
+  function handleTextFieldKeydown(event) {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    if (event.currentTarget instanceof HTMLTextAreaElement) event.currentTarget.blur();
   }
 
   /** @param {number} value @param {number} minimum @param {number} maximum */
@@ -616,6 +787,60 @@
         shape: center.y < pageSize.height / 2 ? shape.y : shape.y + shape.height
       }
     };
+  }
+
+  /** @param {AnnotationShape} shape */
+  function shapeVisualPoints(shape) {
+    if (isLinearShape(shape)) return Object.values(linearEndpoints(shape));
+    const center = shapeCenter(shape);
+    const angle = (shape.rotation * Math.PI) / 180;
+    return [
+      [-shape.width / 2, -shape.height / 2],
+      [shape.width / 2, -shape.height / 2],
+      [shape.width / 2, shape.height / 2],
+      [-shape.width / 2, shape.height / 2]
+    ].map(([x, y]) => {
+      const rotated = rotateVector(x, y, angle);
+      return { x: center.x + rotated.x, y: center.y + rotated.y };
+    });
+  }
+
+  /** @param {AnnotationShape[]} selected */
+  function selectionBounds(selected) {
+    const points = selected.flatMap(shapeVisualPoints);
+    if (!points.length) return null;
+    const left = Math.min(...points.map((point) => point.x));
+    const right = Math.max(...points.map((point) => point.x));
+    const top = Math.min(...points.map((point) => point.y));
+    const bottom = Math.max(...points.map((point) => point.y));
+    return { x: left, y: top, width: Math.max(0.01, right - left), height: Math.max(0.01, bottom - top), rotation: 0 };
+  }
+
+  /** @param {number} pageIndex */
+  function selectedShapesOnPage(pageIndex) {
+    return (shapes[pageIndex] ?? []).filter((shape) => selectedShapeIds.has(shape.id));
+  }
+
+  /** @param {number} pageIndex @param {number[]} ids */
+  function setShapeSelection(pageIndex, ids) {
+    selectedShapeIds = new Set(ids);
+    selectedShape = ids.length ? { pageIndex, id: ids[ids.length - 1] } : null;
+    const bounds = selectionBounds(selectedShapesOnPage(pageIndex));
+    multiSelectionFrame = ids.length > 1 && bounds ? { pageIndex, ...bounds } : null;
+  }
+
+  /** @param {number} pageIndex @param {AnnotationShape[]} replacements */
+  function replaceShapes(pageIndex, replacements) {
+    const replacementMap = new Map(replacements.map((shape) => [shape.id, shape]));
+    shapes = {
+      ...shapes,
+      [pageIndex]: (shapes[pageIndex] ?? []).map((shape) => replacementMap.get(shape.id) ?? shape)
+    };
+  }
+
+  /** @param {NonNullable<typeof multiSelectionFrame>} frame @param {number} id */
+  function frameAsShape(frame, id) {
+    return /** @type {AnnotationShape} */ ({ id, type: 'rectangle', ...frame });
   }
 
   /** @param {AnnotationShape} shape @param {{ x: number; y: number }} start @param {{ x: number; y: number }} end */
@@ -691,10 +916,11 @@
     if (!selectedShape) return;
     const target = event.target;
     if (target instanceof HTMLElement && (target.matches('input, textarea, select') || target.isContentEditable)) return;
-    const shape = findShape(selectedShape.pageIndex, selectedShape.id);
-    if (!shape) return;
+    const pageIndex = selectedShape.pageIndex;
+    const selected = selectedShapesOnPage(pageIndex);
+    if (!selected.length) return;
     if (event.key === 'Escape') {
-      selectedShape = null;
+      setShapeSelection(pageIndex, []);
       shapeGuides = null;
       return;
     }
@@ -702,11 +928,11 @@
       event.preventDefault();
       shapes = {
         ...shapes,
-        [selectedShape.pageIndex]: (shapes[selectedShape.pageIndex] ?? []).filter(
-          (candidate) => candidate.id !== selectedShape?.id
+        [pageIndex]: (shapes[pageIndex] ?? []).filter(
+          (candidate) => !selectedShapeIds.has(candidate.id)
         )
       };
-      selectedShape = null;
+      setShapeSelection(pageIndex, []);
       shapeGuides = null;
       return;
     }
@@ -718,13 +944,16 @@
     }[event.key];
     if (!direction) return;
     event.preventDefault();
-    const pageSize = pageSizes[selectedShape.pageIndex];
+    const pageSize = pageSizes[pageIndex];
     const amount = event.shiftKey ? 10 : 1;
-    replaceShape(selectedShape.pageIndex, {
-      ...shape,
-      x: clamp(shape.x + direction.x * amount, 0, Math.max(0, pageSize.width - shape.width)),
-      y: clamp(shape.y + direction.y * amount, 0, Math.max(0, pageSize.height - shape.height))
-    });
+    const bounds = multiSelectionFrame ?? selectionBounds(selected);
+    if (!bounds) return;
+    const deltaX = clamp(direction.x * amount, -bounds.x, pageSize.width - bounds.x - bounds.width);
+    const deltaY = clamp(direction.y * amount, -bounds.y, pageSize.height - bounds.y - bounds.height);
+    replaceShapes(pageIndex, selected.map((shape) => ({ ...shape, x: shape.x + deltaX, y: shape.y + deltaY })));
+    if (multiSelectionFrame) {
+      multiSelectionFrame = { ...multiSelectionFrame, x: multiSelectionFrame.x + deltaX, y: multiSelectionFrame.y + deltaY };
+    }
   }
 
   /** @param {PointerEvent} event @param {HTMLElement} shell @param {number} pageIndex */
@@ -732,15 +961,16 @@
     const start = pointOnPage(event, shell);
     const shape = {
       id: nextAnnotationId++,
-      type: /** @type {'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line'} */ (activeTool),
+      type: /** @type {'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'textfield'} */ (activeTool),
       x: start.x,
       y: start.y,
       width: 0.01,
       height: 0.01,
-      rotation: 0
+      rotation: 0,
+      text: activeTool === 'textfield' ? '' : undefined
     };
     shapes = { ...shapes, [pageIndex]: [...(shapes[pageIndex] ?? []), shape] };
-    selectedShape = { pageIndex, id: shape.id };
+    setShapeSelection(pageIndex, [shape.id]);
     drawingShape = { pointerId: event.pointerId, pageIndex, id: shape.id, start };
     shapeGuides = { pageIndex, x: null, y: null, shape };
   }
@@ -796,6 +1026,106 @@
     const interaction = shapeInteraction;
     const pageSize = pageSizes[interaction.pageIndex];
     if (!pageSize) return;
+
+    if (interaction.kind === 'multi-move') {
+      const frame = interaction.initialFrame;
+      const deltaX = clamp(point.x - interaction.start.x, -frame.x, pageSize.width - frame.x - frame.width);
+      const deltaY = clamp(point.y - interaction.start.y, -frame.y, pageSize.height - frame.y - frame.height);
+      replaceShapes(interaction.pageIndex, interaction.initialShapes.map((/** @type {AnnotationShape} */ shape) => ({
+        ...shape,
+        x: shape.x + deltaX,
+        y: shape.y + deltaY
+      })));
+      multiSelectionFrame = { ...frame, x: frame.x + deltaX, y: frame.y + deltaY };
+      shapeGuides = null;
+      return;
+    }
+
+    if (interaction.kind === 'multi-rotate') {
+      const frame = interaction.initialFrame;
+      const center = { x: frame.x + frame.width / 2, y: frame.y + frame.height / 2 };
+      const pointerAngle = Math.atan2(point.y - center.y, point.x - center.x);
+      let delta = ((pointerAngle - interaction.startAngle) * 180) / Math.PI;
+      if (event.shiftKey) delta = Math.round(delta / 15) * 15;
+      const radians = (delta * Math.PI) / 180;
+      const nextShapes = interaction.initialShapes.map((/** @type {AnnotationShape} */ shape) => {
+        const originalCenter = shapeCenter(shape);
+        const offset = rotateVector(originalCenter.x - center.x, originalCenter.y - center.y, radians);
+        const nextCenter = { x: center.x + offset.x, y: center.y + offset.y };
+        return {
+          ...shape,
+          x: nextCenter.x - shape.width / 2,
+          y: nextCenter.y - shape.height / 2,
+          rotation: shape.rotation + delta
+        };
+      });
+      replaceShapes(interaction.pageIndex, nextShapes);
+      multiSelectionFrame = { ...frame, rotation: frame.rotation + delta };
+      shapeGuides = null;
+      return;
+    }
+
+    if (interaction.kind === 'multi-resize') {
+      const frame = interaction.initialFrame;
+      const center = { x: frame.x + frame.width / 2, y: frame.y + frame.height / 2 };
+      const angle = (frame.rotation * Math.PI) / 180;
+      const localPointer = rotateVector(point.x - center.x, point.y - center.y, -angle);
+      let width = interaction.handleX === 0
+        ? frame.width
+        : Math.max(MIN_SHAPE_SIZE, interaction.handleX * localPointer.x + frame.width / 2);
+      let height = interaction.handleY === 0
+        ? frame.height
+        : Math.max(MIN_SHAPE_SIZE, interaction.handleY * localPointer.y + frame.height / 2);
+      if (event.altKey) {
+        if (interaction.handleX !== 0) width = Math.max(MIN_SHAPE_SIZE, Math.abs(localPointer.x) * 2);
+        if (interaction.handleY !== 0) height = Math.max(MIN_SHAPE_SIZE, Math.abs(localPointer.y) * 2);
+      }
+      if (event.shiftKey && interaction.handleX !== 0 && interaction.handleY !== 0) {
+        const ratio = frame.width / frame.height;
+        if (width / height > ratio) height = width / ratio;
+        else width = height * ratio;
+      }
+      let nextCenter = center;
+      if (!event.altKey) {
+        const localShift = {
+          x: interaction.handleX === 0 ? 0 : interaction.handleX * (width - frame.width) / 2,
+          y: interaction.handleY === 0 ? 0 : interaction.handleY * (height - frame.height) / 2
+        };
+        const worldShift = rotateVector(localShift.x, localShift.y, angle);
+        nextCenter = { x: center.x + worldShift.x, y: center.y + worldShift.y };
+      }
+      const scaleX = width / frame.width;
+      const scaleY = height / frame.height;
+      const transformPoint = (/** @type {{ x: number; y: number }} */ source) => {
+        const local = rotateVector(source.x - center.x, source.y - center.y, -angle);
+        const scaled = rotateVector(local.x * scaleX, local.y * scaleY, angle);
+        return { x: nextCenter.x + scaled.x, y: nextCenter.y + scaled.y };
+      };
+      const nextShapes = interaction.initialShapes.map((/** @type {AnnotationShape} */ shape) => {
+        if (isLinearShape(shape)) {
+          const endpoints = linearEndpoints(shape);
+          return shapeFromEndpoints(shape, transformPoint(endpoints.start), transformPoint(endpoints.end));
+        }
+        const transformedCenter = transformPoint(shapeCenter(shape));
+        return {
+          ...shape,
+          x: transformedCenter.x - shape.width * scaleX / 2,
+          y: transformedCenter.y - shape.height * scaleY / 2,
+          width: shape.width * scaleX,
+          height: shape.height * scaleY
+        };
+      });
+      replaceShapes(interaction.pageIndex, nextShapes);
+      multiSelectionFrame = {
+        ...frame,
+        x: nextCenter.x - width / 2,
+        y: nextCenter.y - height / 2,
+        width,
+        height
+      };
+      shapeGuides = null;
+      return;
+    }
 
     if (interaction.kind === 'move') {
       const proposed = {
@@ -994,6 +1324,9 @@
   /** @param {PointerEvent} event */
   function handleViewerPointerDown(event) {
     if (!viewer) return;
+    const pointerTarget = event.target;
+    if (pointerTarget instanceof Element && pointerTarget.closest('[data-text-editor]')) return;
+    if (editingTextShape) editingTextShape = null;
 
     const shapeHit = shapeTarget(event);
     if (event.button === 0 && shapeHit && activeTool === 'select') {
@@ -1001,14 +1334,69 @@
       const pages = [...viewer.querySelectorAll('.pdf-page')];
       const shell = pages[shapeHit.pageIndex];
       if (!shape || !(shell instanceof HTMLElement)) return;
+      if (
+        event.detail >= 2 &&
+        shape.type === 'textfield' &&
+        !event.shiftKey &&
+        shapeHit.element.dataset.shapeHandle === undefined &&
+        shapeHit.element.dataset.shapeRotate === undefined
+      ) {
+        startTextEditing(event, shapeHit.pageIndex, shape.id);
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
       window.getSelection()?.removeAllRanges();
-      selectedShape = { pageIndex: shapeHit.pageIndex, id: shapeHit.id };
+      if (event.shiftKey) {
+        const ids = selectedShape?.pageIndex === shapeHit.pageIndex ? new Set(selectedShapeIds) : new Set();
+        if (ids.has(shapeHit.id)) ids.delete(shapeHit.id);
+        else ids.add(shapeHit.id);
+        setShapeSelection(shapeHit.pageIndex, [...ids]);
+        shapeGuides = null;
+        return;
+      }
+      if (selectedShape?.pageIndex !== shapeHit.pageIndex || !selectedShapeIds.has(shapeHit.id)) {
+        setShapeSelection(shapeHit.pageIndex, [shapeHit.id]);
+      }
       const point = pointOnPage(event, shell);
       const handle = shapeHit.element.dataset.shapeHandle;
       const endpoint = shapeHit.element.dataset.shapeEndpoint;
-      if (endpoint === 'start' || endpoint === 'end') {
+      const selected = selectedShapesOnPage(shapeHit.pageIndex);
+      if (selected.length > 1 && multiSelectionFrame) {
+        const initialFrame = { ...multiSelectionFrame };
+        const initialShapes = selected.map((candidate) => ({ ...candidate }));
+        if (shapeHit.element.dataset.shapeRotate !== undefined) {
+          const center = { x: initialFrame.x + initialFrame.width / 2, y: initialFrame.y + initialFrame.height / 2 };
+          shapeInteraction = {
+            pointerId: event.pointerId,
+            kind: 'multi-rotate',
+            pageIndex: shapeHit.pageIndex,
+            initialFrame,
+            initialShapes,
+            startAngle: Math.atan2(point.y - center.y, point.x - center.x)
+          };
+        } else if (handle) {
+          const [handleX, handleY] = handle.split(',').map(Number);
+          shapeInteraction = {
+            pointerId: event.pointerId,
+            kind: 'multi-resize',
+            pageIndex: shapeHit.pageIndex,
+            initialFrame,
+            initialShapes,
+            handleX,
+            handleY
+          };
+        } else {
+          shapeInteraction = {
+            pointerId: event.pointerId,
+            kind: 'multi-move',
+            pageIndex: shapeHit.pageIndex,
+            initialFrame,
+            initialShapes,
+            start: point
+          };
+        }
+      } else if (endpoint === 'start' || endpoint === 'end') {
         shapeInteraction = {
           pointerId: event.pointerId,
           kind: 'line-endpoint',
@@ -1061,7 +1449,7 @@
 
     const pageHit = pageAtPoint(event.clientX, event.clientY);
     if (event.button === 0 && activeTool === 'select' && !pageHit) {
-      selectedShape = null;
+      if (selectedShape) setShapeSelection(selectedShape.pageIndex, []);
       shapeGuides = null;
     }
     if (event.button === 0 && pageHit && SHAPE_TOOLS.has(activeTool)) {
@@ -1073,7 +1461,7 @@
     }
 
     if (event.button === 0 && activeTool === 'select' && pageHit && !shapeHit) {
-      selectedShape = null;
+      if (selectedShape) setShapeSelection(selectedShape.pageIndex, []);
       shapeGuides = null;
     }
 
@@ -1181,6 +1569,7 @@
   function endPan(event) {
     if (!viewer) return;
     if (drawingShape && event.pointerId === drawingShape.pointerId) {
+      const finishedPageIndex = drawingShape.pageIndex;
       const shell = viewer.querySelectorAll('.pdf-page')[drawingShape.pageIndex];
       if (shell instanceof HTMLElement) updateShapeCreation(event, shell);
       const shape = findShape(drawingShape.pageIndex, drawingShape.id);
@@ -1192,19 +1581,25 @@
         };
         replaceShape(drawingShape.pageIndex, shapeFromEndpoints(shape, drawingShape.start, end));
       } else if (shape && pageSize && !isLinearShape(shape) && (shape.width < 3 || shape.height < 3)) {
-        const preferredSize = shape.type === 'check' || shape.type === 'cross' ? 48 : 120;
-        const defaultSize = Math.min(preferredSize, pageSize.width / 4, pageSize.height / 4);
+        const preferredWidth = shape.type === 'textfield' ? 180 : shape.type === 'check' || shape.type === 'cross' ? 48 : 120;
+        const preferredHeight = shape.type === 'textfield' ? 40 : preferredWidth;
+        const defaultWidth = Math.min(preferredWidth, pageSize.width / 3);
+        const defaultHeight = Math.min(preferredHeight, pageSize.height / 4);
         replaceShape(drawingShape.pageIndex, {
           ...shape,
-          x: clamp(drawingShape.start.x, 0, pageSize.width - defaultSize),
-          y: clamp(drawingShape.start.y, 0, pageSize.height - defaultSize),
-          width: defaultSize,
-          height: defaultSize
+          x: clamp(drawingShape.start.x, 0, pageSize.width - defaultWidth),
+          y: clamp(drawingShape.start.y, 0, pageSize.height - defaultHeight),
+          width: defaultWidth,
+          height: defaultHeight
         });
       }
       drawingShape = null;
       shapeGuides = null;
       activeTool = 'select';
+      if (shape?.type === 'textfield') {
+        editingTextShape = { pageIndex: finishedPageIndex, id: shape.id };
+        tick().then(() => focusTextEditor(shape.id));
+      }
     }
     if (shapeInteraction && event.pointerId === shapeInteraction.pointerId) {
       shapeInteraction = null;
@@ -1326,8 +1721,12 @@
     pdfReady = false;
     cancelSharpRenders();
     annotations = {};
+    textHighlights = {};
     shapes = {};
     selectedShape = null;
+    editingTextShape = null;
+    selectedShapeIds = new Set();
+    multiSelectionFrame = null;
     drawingShape = null;
     shapeInteraction = null;
     shapeGuides = null;
@@ -1576,11 +1975,28 @@
           height: shape.height / pageSize.height,
           rotation: shape.rotation,
           radiusX: 0,
-          radiusY: 0
+          radiusY: 0,
+          text: shape.text ?? ''
         };
       });
     });
-    return [...strokes, ...exportedShapes];
+    const exportedHighlights = Object.entries(textHighlights).flatMap(([page, highlights]) => {
+      const pageSize = pageSizes[Number(page)];
+      if (!pageSize?.width || !pageSize.height) return [];
+      return highlights.flatMap((highlight) => highlight.rects.map((rect) => ({
+        page: Number(page),
+        type: 'highlight',
+        x: rect.x / pageSize.width,
+        y: rect.y / pageSize.height,
+        width: rect.width / pageSize.width,
+        height: rect.height / pageSize.height,
+        rotation: 0,
+        radiusX: 0,
+        radiusY: 0,
+        text: ''
+      })));
+    });
+    return [...strokes, ...exportedShapes, ...exportedHighlights];
   }
 
   export async function downloadPdf() {
@@ -1644,6 +2060,7 @@
     class:zoom-out={zoomingOut}
     class:drawing-mode={activeTool === 'marker' || activeTool === 'pen'}
     class:shape-mode={SHAPE_TOOLS.has(activeTool)}
+    class:highlight-mode={activeTool === 'highlight'}
     class:eraser-mode={activeTool === 'eraser'}
     class="pdf-viewer"
     role="region"
@@ -1660,7 +2077,9 @@
   >
     <div class="pdf-document" style:--zoom-level={zoomLevel}>
       {#each Array(pageCount) as _, index}
-        {@const currentSelection = selectedShape?.pageIndex === index ? (shapes[index] ?? []).find((shape) => shape.id === selectedShape?.id) ?? null : null}
+        {@const currentSelectedShapes = selectedShape?.pageIndex === index ? (shapes[index] ?? []).filter((shape) => selectedShapeIds.has(shape.id)) : []}
+        {@const singleSelection = currentSelectedShapes.length === 1 ? currentSelectedShapes[0] : null}
+        {@const currentSelection = currentSelectedShapes.length > 1 && multiSelectionFrame?.pageIndex === index && selectedShape ? frameAsShape(multiSelectionFrame, selectedShape.id) : singleSelection}
         <div class="pdf-page" aria-label={`Page ${index + 1}`}>
           <canvas></canvas>
           <svg
@@ -1675,14 +2094,80 @@
             {/each}
           </svg>
           <svg
+            class="annotation-layer text-highlight-layer"
+            viewBox={`0 0 ${pageSizes[index]?.width ?? 1} ${pageSizes[index]?.height ?? 1}`}
+            preserveAspectRatio="none"
+            aria-hidden="true"
+          >
+            {#each (textHighlights[index] ?? []) as highlight (highlight.id)}
+              {#each highlight.rects as rect}
+                <rect
+                  x={rect.x}
+                  y={rect.y}
+                  width={rect.width}
+                  height={rect.height}
+                  rx={Math.min(2, rect.height * 0.12)}
+                />
+              {/each}
+            {/each}
+          </svg>
+          <svg
             class="annotation-layer shape-layer"
             viewBox={`0 0 ${pageSizes[index]?.width ?? 1} ${pageSizes[index]?.height ?? 1}`}
             preserveAspectRatio="none"
             aria-label={`Shapes on page ${index + 1}`}
           >
             {#each (shapes[index] ?? []) as shape (shape.id)}
+              {@const wrappedTextLines = shape.type === 'textfield' ? textFieldLines(shape.text ?? '', shape.width) : []}
               <g transform={`rotate(${shape.rotation} ${shape.x + shape.width / 2} ${shape.y + shape.height / 2})`}>
-                {#if shape.type === 'rectangle'}
+                {#if shape.type === 'textfield'}
+                  {#if editingTextShape?.pageIndex === index && editingTextShape.id === shape.id}
+                    <foreignObject
+                      class="pdf-text-field"
+                      role="group"
+                      aria-label="Text field"
+                      data-shape-id={shape.id}
+                      data-shape-page={index}
+                      x={shape.x}
+                      y={shape.y}
+                      width={shape.width}
+                      height={Math.max(shape.height, Math.max(1, wrappedTextLines.length) * 19.2)}
+                    >
+                      <div class="pdf-text-field-content">
+                        <textarea
+                          data-text-editor={shape.id}
+                          aria-label="Edit text field"
+                          rows="1"
+                          wrap="soft"
+                          value={shape.text ?? ''}
+                          oninput={(event) => updateTextField(event, index, shape.id)}
+                          onkeydown={handleTextFieldKeydown}
+                          onblur={() => editingTextShape = null}
+                        ></textarea>
+                      </div>
+                    </foreignObject>
+                  {:else}
+                    {@const displayedLines = shape.text ? wrappedTextLines : ['Type here']}
+                    {@const displayedHeight = Math.max(shape.height, Math.max(1, displayedLines.length) * 19.2)}
+                    <g
+                      class="pdf-text-field-display"
+                      class:placeholder={!shape.text}
+                      data-shape-id={shape.id}
+                      data-shape-page={index}
+                    >
+                      <rect
+                        class="pdf-text-field-hit"
+                        x={shape.x}
+                        y={shape.y}
+                        width={shape.width}
+                        height={displayedHeight}
+                      />
+                      {#each displayedLines as line, lineIndex}
+                        <text x={shape.x + 6} y={shape.y + 15.2 + lineIndex * 19.2}>{line}</text>
+                      {/each}
+                    </g>
+                  {/if}
+                {:else if shape.type === 'rectangle'}
                   <rect
                     class="pdf-shape"
                     data-shape-id={shape.id}
@@ -2109,6 +2594,10 @@
     user-select: none;
   }
 
+  .pdf-viewer.highlight-mode {
+    cursor: text;
+  }
+
   .pdf-viewer.eraser-mode {
     cursor: none;
     touch-action: none;
@@ -2167,12 +2656,78 @@
     opacity: 0.34;
   }
 
+  .text-highlight-layer {
+    z-index: 1;
+    mix-blend-mode: multiply;
+  }
+
+  .text-highlight-layer rect {
+    fill: #ffe43b;
+    opacity: 1;
+  }
+
   .pen-layer {
     z-index: 4;
   }
 
   .shape-layer {
     z-index: 3;
+  }
+
+  .pdf-text-field {
+    overflow: visible;
+    pointer-events: all;
+    cursor: move;
+  }
+
+  .pdf-text-field-content {
+    box-sizing: border-box;
+    display: flex;
+    align-items: flex-start;
+    width: 100%;
+    height: 100%;
+    padding: 0 6px;
+    overflow: visible;
+    color: #171717;
+    font-family: Helvetica, Arial, sans-serif;
+    font-size: 16px;
+    font-weight: 400;
+    line-height: 1.2;
+    white-space: normal;
+  }
+
+  .pdf-text-field-content textarea {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 100%;
+    padding: 0;
+    border: 0;
+    outline: 0;
+    overflow: hidden;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    line-height: inherit;
+    overflow-wrap: anywhere;
+    resize: none;
+  }
+
+  .pdf-text-field-display text {
+    fill: #171717;
+    font-family: Helvetica, Arial, sans-serif;
+    font-size: 16px;
+    font-weight: 400;
+    pointer-events: none;
+  }
+
+  .pdf-text-field-display.placeholder text {
+    fill: #898989;
+  }
+
+  .pdf-text-field-hit {
+    fill: transparent;
+    pointer-events: all;
+    cursor: move;
   }
 
   .pdf-shape {
