@@ -45,6 +45,181 @@
     let pointerStart = null;
     /** @type {{ node: Text; start: number; end: number } | null} */
     let wordDrag = null;
+    /** @type {-1 | 0 | 1} */
+    let wordDragDirection = 0;
+    /** @type {ReturnType<typeof lineBoundsForCaret>} */
+    let wordDragLineBounds = null;
+    /** @type {{ node: Text; offset: number } | null} */
+    let productionCharacterDrag = null;
+    /** @type {-1 | 0 | 1} */
+    let productionDragDirection = 0;
+    /** @type {ReturnType<typeof lineBoundsForCaret>} */
+    let productionLineBounds = null;
+
+    /** @param {MouseEvent} event */
+    function beginProductionCharacterDrag(event) {
+      if (!import.meta.env.PROD || activeTool !== 'select' || event.button !== 0 || event.detail !== 1) return;
+      const target = event.target;
+      if (!(target instanceof Element) || !target.closest('.textLayer span')) {
+        // A drag beginning on the canvas has no legitimate text anchor.
+        // Prevent browsers from anchoring it at the start of the PDF.
+        if (target instanceof Element && target.closest('.pdf-page')) event.preventDefault();
+        productionCharacterDrag = null;
+        productionDragDirection = 0;
+        productionLineBounds = null;
+        return;
+      }
+
+      const caret = caretFromPoint(event.clientX, event.clientY);
+      if (!caret) return;
+      event.preventDefault();
+      productionCharacterDrag = caret;
+      productionDragDirection = 0;
+      productionLineBounds = lineBoundsForCaret(caret.node, target);
+      const selection = window.getSelection();
+      selection?.setBaseAndExtent(caret.node, caret.offset, caret.node, caret.offset);
+    }
+
+    /** @param {Element} element @param {boolean} fromEnd */
+    function edgeTextNode(element, fromEnd) {
+      const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+      let node = walker.nextNode();
+      if (!(node instanceof Text)) return null;
+      if (!fromEnd) return node;
+      let last = node;
+      while ((node = walker.nextNode())) {
+        if (node instanceof Text) last = node;
+      }
+      return last;
+    }
+
+    /** @param {Text} caretNode @param {Element} hit */
+    function lineBoundsForCaret(caretNode, hit) {
+      const textLayer = hit.closest('.textLayer') ?? caretNode.parentElement?.closest('.textLayer');
+      if (!textLayer) return null;
+      const visibleSpans = [...textLayer.querySelectorAll('span:not(.markedContent)')].filter((span) => {
+        const rect = span.getBoundingClientRect();
+        return Boolean(span.textContent) && rect.width > 0 && rect.height > 0;
+      });
+      const hitSpan = hit.closest('span:not(.markedContent)');
+      const caretSpan =
+        (hitSpan && visibleSpans.includes(hitSpan) ? hitSpan : null) ??
+        visibleSpans.find((span) => span.contains(caretNode));
+      if (!caretSpan) return null;
+      const caretRect = caretSpan.getBoundingClientRect();
+      const centerY = caretRect.top + caretRect.height / 2;
+      const tolerance = Math.max(2, caretRect.height * 0.55);
+      const lineSpans = visibleSpans
+        .filter((span) => {
+          const rect = span.getBoundingClientRect();
+          return Math.abs(rect.top + rect.height / 2 - centerY) <= tolerance;
+        })
+        .sort((left, right) => left.getBoundingClientRect().left - right.getBoundingClientRect().left);
+      const firstSpan = lineSpans[0] ?? caretSpan;
+      const lastSpan = lineSpans.at(-1) ?? caretSpan;
+      const startNode = edgeTextNode(firstSpan, false) ?? caretNode;
+      const endNode = edgeTextNode(lastSpan, true) ?? caretNode;
+      const lineTop = Math.min(...lineSpans.map((span) => span.getBoundingClientRect().top));
+      const lineBottom = Math.max(...lineSpans.map((span) => span.getBoundingClientRect().bottom));
+      return {
+        startNode,
+        startOffset: 0,
+        endNode,
+        endOffset: endNode.data.length,
+        centerY,
+        snapTop: Math.max(lineTop, centerY - caretRect.height * 0.35),
+        snapBottom: Math.min(lineBottom, centerY + caretRect.height * 0.35),
+        tolerance
+      };
+    }
+
+    /** @param {{ node: Text; offset: number }} anchor @param {{ node: Text; offset: number }} caret */
+    function caretDirection(anchor, caret) {
+      if (caret.node === anchor.node) {
+        return /** @type {-1 | 0 | 1} */ (Math.sign(caret.offset - anchor.offset));
+      }
+      return caret.node.compareDocumentPosition(anchor.node) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+    }
+
+    /**
+     * @param {NonNullable<typeof wordDrag>} anchor
+     * @param {{ node: Text; offset: number }} caret
+     */
+    function wordCaretDirection(anchor, caret) {
+      if (caret.node !== anchor.node) {
+        return caret.node.compareDocumentPosition(anchor.node) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+      }
+      if (caret.offset < anchor.start) return -1;
+      if (caret.offset > anchor.end) return 1;
+      return 0;
+    }
+
+    /**
+     * @param {NonNullable<ReturnType<typeof lineBoundsForCaret>>} bounds
+     * @param {number} pointerY
+     * @param {-1 | 0 | 1} direction
+     */
+    function verticalLineBoundary(bounds, pointerY, direction) {
+      if (pointerY >= bounds.snapTop && pointerY <= bounds.snapBottom) return null;
+      const towardStart = direction < 0 || (direction === 0 && pointerY < bounds.centerY);
+      if (towardStart) return { node: bounds.startNode, offset: bounds.startOffset };
+      if (pointerY > bounds.snapBottom || direction > 0) {
+        return { node: bounds.endNode, offset: bounds.endOffset };
+      }
+      return null;
+    }
+
+    /** @param {MouseEvent} event */
+    function extendProductionCharacterDrag(event) {
+      if (!import.meta.env.PROD || !productionCharacterDrag || wordDrag || (event.buttons & 1) === 0) return;
+      const hit = document.elementFromPoint(event.clientX, event.clientY);
+      const hitSpan = hit instanceof Element ? hit.closest('.textLayer span:not(.markedContent)') : null;
+      const hitRect = hitSpan?.getBoundingClientRect();
+      const hitCenterY = hitRect ? hitRect.top + hitRect.height / 2 : null;
+      const hitIsDifferentLine =
+        hitCenterY !== null &&
+        productionLineBounds !== null &&
+        Math.abs(hitCenterY - productionLineBounds.centerY) > productionLineBounds.tolerance;
+      const verticalBoundary = productionLineBounds
+        ? verticalLineBoundary(productionLineBounds, event.clientY, productionDragDirection)
+        : null;
+
+      let caret = null;
+      if (hitSpan && (!verticalBoundary || hitIsDifferentLine)) {
+        caret = caretFromPoint(event.clientX, event.clientY);
+        if (caret) {
+          productionLineBounds = lineBoundsForCaret(caret.node, hitSpan);
+          const direction = caretDirection(productionCharacterDrag, caret);
+          if (direction) productionDragDirection = direction;
+        }
+      } else if (verticalBoundary) {
+        caret = verticalBoundary;
+      }
+      if (!caret) return;
+
+      const selection = window.getSelection();
+      const anchor = productionCharacterDrag;
+      if (anchor.node.isConnected && caret.node.isConnected) {
+        selection?.setBaseAndExtent(anchor.node, anchor.offset, caret.node, caret.offset);
+      }
+    }
+
+    function finishProductionCharacterDrag() {
+      if (import.meta.env.PROD) {
+        productionCharacterDrag = null;
+        productionDragDirection = 0;
+        productionLineBounds = null;
+      }
+    }
+
+    /** @param {MouseEvent} event */
+    function suppressProductionBlankDrag(event) {
+      if (!import.meta.env.PROD || activeTool !== 'select' || event.button !== 0) return;
+      const target = event.target;
+      if (target instanceof Element && target.closest('.pdf-page') && !target.closest('.textLayer span')) {
+        event.preventDefault();
+      }
+    }
 
     /** @param {MouseEvent} event */
     function rememberPointerStart(event) {
@@ -67,6 +242,8 @@
 
       event.preventDefault();
       wordDrag = { node, start: word.start, end: word.end };
+      wordDragDirection = 0;
+      wordDragLineBounds = lineBoundsForCaret(node, target);
       setSelection(node, word.start, node, word.end);
     }
 
@@ -109,8 +286,28 @@
     function extendWordDrag(event) {
       if (activeTool !== 'select' || !wordDrag || (event.buttons & 1) === 0) return;
       const hit = document.elementFromPoint(event.clientX, event.clientY);
-      if (!(hit instanceof Element) || !hit.closest('.textLayer span')) return;
-      const caret = caretFromPoint(event.clientX, event.clientY);
+      const hitSpan = hit instanceof Element ? hit.closest('.textLayer span:not(.markedContent)') : null;
+      const hitRect = hitSpan?.getBoundingClientRect();
+      const hitCenterY = hitRect ? hitRect.top + hitRect.height / 2 : null;
+      const hitIsDifferentLine =
+        hitCenterY !== null &&
+        wordDragLineBounds !== null &&
+        Math.abs(hitCenterY - wordDragLineBounds.centerY) > wordDragLineBounds.tolerance;
+      const verticalBoundary = wordDragLineBounds
+        ? verticalLineBoundary(wordDragLineBounds, event.clientY, wordDragDirection)
+        : null;
+
+      let caret = null;
+      if (hitSpan && (!verticalBoundary || hitIsDifferentLine)) {
+        caret = caretFromPoint(event.clientX, event.clientY);
+        if (caret) {
+          wordDragLineBounds = lineBoundsForCaret(caret.node, hitSpan);
+          const direction = wordCaretDirection(wordDrag, caret);
+          if (direction) wordDragDirection = direction;
+        }
+      } else if (verticalBoundary) {
+        caret = verticalBoundary;
+      }
       if (!caret) return;
 
       const { node: anchorNode, start, end } = wordDrag;
@@ -131,6 +328,25 @@
 
     function endWordDrag() {
       wordDrag = null;
+      wordDragDirection = 0;
+      wordDragLineBounds = null;
+    }
+
+    /** @param {MouseEvent} event */
+    function beginTextSelectionCursor(event) {
+      const target = event.target;
+      if (
+        activeTool === 'select' &&
+        event.button === 0 &&
+        target instanceof Element &&
+        target.closest('.textLayer span')
+      ) {
+        viewer?.classList.add('text-selecting');
+      }
+    }
+
+    function endTextSelectionCursor() {
+      viewer?.classList.remove('text-selecting');
     }
 
     /** @param {MouseEvent} event */
@@ -164,23 +380,38 @@
       zoomingOut = false;
     }
 
+    document.addEventListener('mousedown', beginTextSelectionCursor, true);
+    document.addEventListener('mousedown', beginProductionCharacterDrag, true);
     document.addEventListener('mousedown', beginWordDrag, true);
     document.addEventListener('mousedown', rememberPointerStart);
+    document.addEventListener('mousemove', extendProductionCharacterDrag);
     document.addEventListener('mousemove', extendWordDrag);
+    document.addEventListener('mouseup', endTextSelectionCursor, true);
+    document.addEventListener('mouseup', finishProductionCharacterDrag, true);
     document.addEventListener('mouseup', endWordDrag);
+    document.addEventListener('dragstart', suppressProductionBlankDrag);
     document.addEventListener('click', clearPageSelection);
     window.addEventListener('keydown', updateZoomCursor);
     window.addEventListener('keyup', updateZoomCursor);
     window.addEventListener('blur', resetZoomCursor);
+    window.addEventListener('blur', endTextSelectionCursor);
     return () => {
+      document.removeEventListener('mousedown', beginTextSelectionCursor, true);
+      document.removeEventListener('mousedown', beginProductionCharacterDrag, true);
       document.removeEventListener('mousedown', beginWordDrag, true);
       document.removeEventListener('mousedown', rememberPointerStart);
+      document.removeEventListener('mousemove', extendProductionCharacterDrag);
       document.removeEventListener('mousemove', extendWordDrag);
+      document.removeEventListener('mouseup', endTextSelectionCursor, true);
+      document.removeEventListener('mouseup', finishProductionCharacterDrag, true);
       document.removeEventListener('mouseup', endWordDrag);
+      document.removeEventListener('dragstart', suppressProductionBlankDrag);
       document.removeEventListener('click', clearPageSelection);
       window.removeEventListener('keydown', updateZoomCursor);
       window.removeEventListener('keyup', updateZoomCursor);
       window.removeEventListener('blur', resetZoomCursor);
+      window.removeEventListener('blur', endTextSelectionCursor);
+      endTextSelectionCursor();
     };
   });
 
@@ -376,8 +607,10 @@
     pdfDocument = null;
 
     try {
-      const [pdfjs, pdfViewer, worker] = await Promise.all([
-        import('pdfjs-dist'),
+      // pdf_viewer.mjs reads globalThis.pdfjsLib during module evaluation, so
+      // the core module must finish first in optimized production chunks.
+      const pdfjs = await import('pdfjs-dist');
+      const [pdfViewer, worker] = await Promise.all([
         import('pdfjs-dist/web/pdf_viewer.mjs'),
         import('pdfjs-dist/build/pdf.worker.mjs?url')
       ]);
@@ -763,6 +996,14 @@
 
   .pdf-viewer.zoom-mode.zoom-out {
     cursor: zoom-out;
+  }
+
+  :global(.pdf-viewer.text-selecting),
+  :global(.pdf-viewer.text-selecting .pdf-page),
+  :global(.pdf-viewer.text-selecting canvas),
+  :global(.pdf-viewer.text-selecting .textLayer),
+  :global(.pdf-viewer.text-selecting .textLayer *) {
+    cursor: text !important;
   }
 
   .pdf-viewer::-webkit-scrollbar {
