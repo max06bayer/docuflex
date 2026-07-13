@@ -1,6 +1,7 @@
 <script>
   import { onDestroy, onMount, tick } from 'svelte';
   import EditorToolbar from '$lib/EditorToolbar.svelte';
+  import HtmlPdfEditor from '$lib/HtmlPdfEditor.svelte';
 
   /** @typedef {{ x: number; y: number; pressure: number }} StrokePoint */
   /** @typedef {{ id: number; type: 'marker' | 'pen'; points: StrokePoint[] }} AnnotationStroke */
@@ -9,6 +10,7 @@
 
   /** @type {File} */
   export let file;
+  let workingFile = file;
 
   /** @type {HTMLDivElement | undefined} */
   let viewer;
@@ -28,6 +30,15 @@
   /** @type {AbortController | null} */
   let textLayerAbortController = null;
   let activeTool = 'select';
+  /** @type {any} */
+  let htmlEditor;
+  let htmlEditorStarted = false;
+  let htmlEditorReady = false;
+  let htmlViewportMode = false;
+  let htmlViewportVisible = false;
+  let observedTool = 'select';
+  let editorTransition = '';
+  let editorTransitionGeneration = 0;
   let zoomLevel = 1;
   let zoomingOut = false;
   let isPanning = false;
@@ -82,12 +93,72 @@
   const ERASER_RADIUS = 17;
   const SHAPE_TOOLS = new Set(['triangle', 'rectangle', 'circle', 'check', 'cross', 'arrow', 'line', 'textfield']);
   const LINE_SHAPE_TOOLS = new Set(['arrow', 'line']);
+  const HTML_VIEW_TOOLS = new Set(['edit', 'pan', 'zoom']);
   const MIN_SHAPE_SIZE = 8;
 
   $: if (activeTool !== 'eraser') eraserCursorVisible = false;
+  $: if (activeTool !== observedTool) {
+    const previousTool = observedTool;
+    observedTool = activeTool;
+    void handleToolTransition(previousTool, activeTool);
+  }
+  $: htmlViewportVisible = htmlEditorStarted && htmlEditorReady && htmlViewportMode && HTML_VIEW_TOOLS.has(activeTool);
 
   function isTextSelectionTool() {
     return activeTool === 'select' || activeTool === 'highlight';
+  }
+
+  function htmlViewportActive() {
+    return htmlViewportVisible;
+  }
+
+  /** @param {string} previousTool @param {string} nextTool */
+  async function handleToolTransition(previousTool, nextTool) {
+    const generation = ++editorTransitionGeneration;
+    if (nextTool === 'edit') {
+      if (htmlEditorStarted && htmlViewportMode) return;
+      editorTransition = 'Preparing Document for Editing';
+      htmlEditorReady = false;
+      htmlEditorStarted = true;
+      htmlViewportMode = true;
+      return;
+    }
+    if (HTML_VIEW_TOOLS.has(nextTool) && htmlEditorStarted && htmlViewportMode) return;
+    if (!htmlEditorStarted || !htmlViewportMode || !HTML_VIEW_TOOLS.has(previousTool)) {
+      htmlViewportMode = false;
+      return;
+    }
+
+    editorTransition = 'Applying Changes to Document';
+    try {
+      const sourceBytes = await workingFile.arrayBuffer();
+      const editedBytes = htmlEditor?.applyTextEdits
+        ? await htmlEditor.applyTextEdits(sourceBytes)
+        : sourceBytes;
+      if (generation !== editorTransitionGeneration) return;
+      workingFile = new File([editedBytes], workingFile.name, {
+        type: 'application/pdf',
+        lastModified: Date.now()
+      });
+      htmlViewportMode = false;
+      htmlEditorStarted = false;
+      htmlEditorReady = false;
+      await tick();
+      await loadPdf(false);
+    } catch (error) {
+      console.error(error);
+      status = error instanceof Error ? error.message : 'Could not apply the edited PDF text.';
+      htmlViewportMode = false;
+      htmlEditorStarted = false;
+      htmlEditorReady = false;
+    } finally {
+      if (generation === editorTransitionGeneration) editorTransition = '';
+    }
+  }
+
+  function handleHtmlEditorReady() {
+    htmlEditorReady = true;
+    if (editorTransition === 'Preparing Document for Editing') editorTransition = '';
   }
 
   onMount(() => {
@@ -1754,14 +1825,17 @@
     }
   }
 
-  async function loadPdf() {
+  /** @param {boolean} [resetAnnotations] */
+  async function loadPdf(resetAnnotations = true) {
     const generation = ++loadGeneration;
     status = 'Rendering PDF…';
     pdfReady = false;
     cancelSharpRenders();
-    annotations = {};
-    textHighlights = {};
-    shapes = {};
+    if (resetAnnotations) {
+      annotations = {};
+      textHighlights = {};
+      shapes = {};
+    }
     selectedShape = null;
     editingTextShape = null;
     selectedShapeIds = new Set();
@@ -1777,6 +1851,7 @@
     textLayerBuilders = [];
     textLayerAbortController?.abort();
     textLayerAbortController = new AbortController();
+    viewer?.querySelectorAll('.textLayer').forEach((layer) => layer.remove());
     pdfDocument?.destroy?.();
     pdfDocument = null;
 
@@ -1789,7 +1864,7 @@
         import('pdfjs-dist/build/pdf.worker.mjs?url')
       ]);
       pdfjs.GlobalWorkerOptions.workerSrc = worker.default;
-      const bytes = await file.arrayBuffer();
+      const bytes = await workingFile.arrayBuffer();
       const document = await pdfjs.getDocument({ data: bytes }).promise;
       if (generation !== loadGeneration) {
         document.destroy();
@@ -1972,7 +2047,8 @@
       selectionAnchor = pageIndex;
     }
 
-    viewer?.querySelectorAll('.pdf-page')[pageIndex]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (htmlViewportActive()) htmlEditor?.scrollToPage?.(pageIndex);
+    else viewer?.querySelectorAll('.pdf-page')[pageIndex]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
   /** @param {ArrayBuffer} buffer */
@@ -2039,11 +2115,15 @@
   }
 
   export async function downloadPdf() {
+    let sourcePdf = await workingFile.arrayBuffer();
+    if (htmlEditorStarted && htmlEditor?.applyTextEdits) {
+      sourcePdf = await htmlEditor.applyTextEdits(sourcePdf);
+    }
     const response = await fetch('/api/pdf/export', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        pdfBase64: arrayBufferToBase64(await file.arrayBuffer()),
+        pdfBase64: arrayBufferToBase64(sourcePdf),
         annotations: exportableAnnotations()
       })
     });
@@ -2055,7 +2135,7 @@
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
-    const baseName = file.name.replace(/\.pdf$/i, '') || 'document';
+    const baseName = workingFile.name.replace(/\.pdf$/i, '') || 'document';
     anchor.href = url;
     anchor.download = `${baseName}-edited.pdf`;
     anchor.click();
@@ -2091,8 +2171,21 @@
   </div>
 </aside>
 
-<section class="pdf-workspace" aria-label={`PDF editor for ${file.name}`} bind:this={workspace}>
+<section class="pdf-workspace" aria-label={`PDF editor for ${workingFile.name}`} bind:this={workspace}>
+  {#if htmlEditorStarted}
+    <div class:active={htmlViewportVisible} class="html-editor-layer">
+      <HtmlPdfEditor
+        bind:this={htmlEditor}
+        bind:zoomLevel
+        {activeTool}
+        {zoomingOut}
+        file={workingFile}
+        onEditorReady={handleHtmlEditorReady}
+      />
+    </div>
+  {/if}
   <div
+    class:editor-hidden={htmlViewportVisible}
     class:pan-mode={activeTool === 'pan'}
     class:panning={isPanning}
     class:zoom-mode={activeTool === 'zoom'}
@@ -2483,6 +2576,14 @@
     ></div>
   {/if}
   <EditorToolbar bind:activeTool />
+  {#if editorTransition}
+    <div class="preparation-overlay" role="presentation">
+      <div class="preparation-dialog" role="dialog" aria-modal="true" aria-label={editorTransition}>
+        <img class="preparation-spinner" src="/spinner.svg" alt="" />
+        <span class="preparation-text">{editorTransition}</span>
+      </div>
+    </div>
+  {/if}
 </section>
 
 <style>
@@ -2596,6 +2697,109 @@
     padding: 36px 48px 80px;
     overflow: auto;
     scrollbar-width: none;
+  }
+
+  .pdf-viewer.editor-hidden {
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  .html-editor-layer {
+    position: absolute;
+    z-index: 2;
+    top: 0;
+    left: 0;
+    width: 117.6470588%;
+    height: 117.6470588%;
+    overflow: hidden;
+    background: #e9e9e9;
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  .html-editor-layer.active {
+    visibility: visible;
+    pointer-events: auto;
+  }
+
+  .preparation-overlay {
+    position: absolute;
+    z-index: 1000;
+    display: grid;
+    place-items: center;
+    inset: 0;
+    background: rgba(245, 245, 245, 0.48);
+    backdrop-filter: blur(7px) saturate(0.88);
+    -webkit-backdrop-filter: blur(7px) saturate(0.88);
+    animation: preparation-overlay-in 150ms ease-out both;
+  }
+
+  .preparation-dialog {
+    position: relative;
+    width: 430px;
+    height: 68px;
+    overflow: hidden;
+    border: 1px solid rgba(0, 0, 0, 0.12);
+    border-radius: 13px;
+    background: rgba(107, 107, 107, 0.05);
+    box-shadow: 0 10px 35px rgba(0, 0, 0, 0.08);
+    animation: preparation-dialog-in 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .preparation-spinner {
+    position: absolute;
+    top: 22px;
+    left: 19px;
+    width: 24px;
+    height: 24px;
+    transform-origin: center;
+    animation: spinner-squish 760ms linear infinite;
+  }
+
+  .preparation-text {
+    position: absolute;
+    top: 23px;
+    left: 60px;
+    width: 350px;
+    height: 20px;
+    padding-left: 2px;
+    background: linear-gradient(90deg, #474747 0%, #9e9e9e 31.877%, #474747 72.516%);
+    background-position: 140% 50%;
+    background-size: 230% 100%;
+    color: transparent;
+    font-family: Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 20px;
+    font-weight: 400;
+    line-height: 1;
+    letter-spacing: -0.2px;
+    white-space: nowrap;
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-font-smoothing: antialiased;
+    animation: preparation-shimmer 720ms linear infinite;
+  }
+
+  @keyframes spinner-squish {
+    0% { transform: rotate(0deg) scale(1, 0.82); }
+    25% { transform: rotate(90deg) scale(0.82, 1.08); }
+    50% { transform: rotate(180deg) scale(1.08, 0.84); }
+    75% { transform: rotate(270deg) scale(0.84, 1.06); }
+    100% { transform: rotate(360deg) scale(1, 0.82); }
+  }
+
+  @keyframes preparation-shimmer {
+    from { background-position: 140% 50%; }
+    to { background-position: -120% 50%; }
+  }
+
+  @keyframes preparation-overlay-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  @keyframes preparation-dialog-in {
+    from { opacity: 0; transform: scale(0.96) translateY(5px); }
+    to { opacity: 1; transform: scale(1) translateY(0); }
   }
 
   .pdf-document {

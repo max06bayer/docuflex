@@ -47,11 +47,6 @@
   /** @type {{ downloadPdf: () => Promise<void> } | undefined} */
   let pdfEditor;
   let isDownloading = false;
-  let isPreparing = false;
-  /** @type {File | null} */
-  let pendingFile = null;
-  /** @type {ReturnType<typeof setTimeout> | undefined} */
-  let preparationTimer;
 
   /** @param {MouseEvent | KeyboardEvent} event @param {number} id */
   function closeTab(event, id) {
@@ -106,7 +101,7 @@
     const input = /** @type {HTMLInputElement} */ (event.currentTarget);
     const file = input.files?.[0];
     if (!file || (!file.name.toLowerCase().endsWith('.pdf') && file.type !== 'application/pdf')) return;
-    beginPreparing(file);
+    addFileTab(file);
     input.value = '';
   }
 
@@ -115,28 +110,7 @@
     event.preventDefault();
     const file = event.dataTransfer?.files?.[0];
     if (!file || (!file.name.toLowerCase().endsWith('.pdf') && file.type !== 'application/pdf')) return;
-    beginPreparing(file);
-  }
-
-  /** @param {File} file */
-  function beginPreparing(file) {
-    closePreparation();
-    pendingFile = file;
-    isPreparing = true;
-    preparationTimer = setTimeout(() => {
-      const preparedFile = pendingFile;
-      isPreparing = false;
-      preparationTimer = undefined;
-      pendingFile = null;
-      if (preparedFile) addFileTab(preparedFile);
-    }, 2000);
-  }
-
-  function closePreparation() {
-    if (preparationTimer) clearTimeout(preparationTimer);
-    preparationTimer = undefined;
-    isPreparing = false;
-    pendingFile = null;
+    addFileTab(file);
   }
 
   /** @param {File} file */
@@ -179,7 +153,6 @@
   });
 
   onDestroy(() => {
-    closePreparation();
     if (shortcutTimer) clearTimeout(shortcutTimer);
   });
 </script>
@@ -335,17 +308,6 @@
 
   <input bind:this={fileInput} class="file-input" type="file" accept="application/pdf,.pdf" onchange={handleFileSelection} />
 
-  {#if isPreparing}
-    <div class="preparation-overlay" role="presentation">
-      <div class="preparation-dialog" role="dialog" aria-modal="true" aria-label="Preparing document for editing">
-        <img class="preparation-spinner" src="/spinner.svg" alt="" />
-        <span class="preparation-text">Preparing Document for Editing</span>
-        <button class="preparation-close" aria-label="Cancel preparation" onclick={closePreparation}>
-          <img src="/close.svg" alt="" />
-        </button>
-      </div>
-    </div>
-  {/if}
 </main>
 
 <style>
@@ -1224,114 +1186,6 @@
 
   .file-input {
     display: none;
-  }
-
-  .preparation-overlay {
-    position: fixed;
-    z-index: 1000;
-    display: grid;
-    place-items: center;
-    inset: 0;
-    background: rgba(245, 245, 245, 0.48);
-    backdrop-filter: blur(7px) saturate(0.88);
-    -webkit-backdrop-filter: blur(7px) saturate(0.88);
-    animation: preparation-overlay-in 150ms ease-out both;
-  }
-
-  .preparation-dialog {
-    position: relative;
-    width: 430px;
-    height: 68px;
-    overflow: hidden;
-    border: 1px solid rgba(0, 0, 0, 0.12);
-    border-radius: 13px;
-    background: rgba(107, 107, 107, 0.05);
-    box-shadow: 0 10px 35px rgba(0, 0, 0, 0.08);
-    animation: preparation-dialog-in 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
-  }
-
-  .preparation-spinner {
-    position: absolute;
-    top: 22px;
-    left: 19px;
-    width: 24px;
-    height: 24px;
-    transform-origin: center;
-    animation: spinner-squish 760ms linear infinite;
-  }
-
-  .preparation-text {
-    position: absolute;
-    top: 23px;
-    left: 60px;
-    width: 322px;
-    height: 20px;
-    padding-left: 2px;
-    background: linear-gradient(90deg, #474747 0%, #9e9e9e 31.877%, #474747 72.516%);
-    background-position: 140% 50%;
-    background-size: 230% 100%;
-    color: transparent;
-    font-family: Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    font-size: 20px;
-    font-weight: 400;
-    line-height: 1;
-    letter-spacing: -0.2px;
-    white-space: nowrap;
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-font-smoothing: antialiased;
-    animation: preparation-shimmer 720ms linear infinite;
-  }
-
-  .preparation-close {
-    position: absolute;
-    top: 18px;
-    right: 13px;
-    display: grid;
-    place-items: center;
-    width: 32px;
-    height: 32px;
-    padding: 0;
-    border: 0;
-    background: transparent;
-    cursor: pointer;
-  }
-
-  .preparation-close img {
-    width: 13px;
-    height: 13px;
-    transition: filter 150ms ease, transform 150ms ease;
-  }
-
-  .preparation-close:hover img {
-    filter: brightness(0.62);
-  }
-
-  .preparation-close:active img {
-    transform: scale(0.9);
-  }
-
-  @keyframes spinner-squish {
-    0% { transform: rotate(0deg) scale(1, 0.82); }
-    25% { transform: rotate(90deg) scale(0.82, 1.08); }
-    50% { transform: rotate(180deg) scale(1.08, 0.84); }
-    75% { transform: rotate(270deg) scale(0.84, 1.06); }
-    100% { transform: rotate(360deg) scale(1, 0.82); }
-  }
-
-  @keyframes preparation-shimmer {
-    from { background-position: 140% 50%; }
-    to { background-position: -120% 50%; }
-  }
-
-  @keyframes preparation-overlay-in {
-    from { opacity: 0; }
-    to { opacity: 1; }
-  }
-
-  @keyframes preparation-dialog-in {
-    from { opacity: 0; transform: scale(0.96) translateY(5px); }
-    to { opacity: 1; transform: scale(1) translateY(0); }
   }
 
   @media (max-width: 935px) {

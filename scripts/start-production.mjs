@@ -8,13 +8,17 @@ const javaEnvironment = {
     process.env.JAVA_TOOL_OPTIONS ??
     '-Xms64m -XX:MaxRAMPercentage=50 -XX:+ExitOnOutOfMemoryError'
 };
+const frontendEnvironment = {
+  ...process.env,
+  BODY_SIZE_LIMIT: process.env.BODY_SIZE_LIMIT ?? String(150 * 1024 * 1024)
+};
 
 const backend = spawn(
   'java',
   ['-cp', 'backend/out:backend/lib/pdfbox-app-3.0.3.jar', 'DocuflexPdfServer'],
   { stdio: 'inherit', env: javaEnvironment }
 );
-const frontend = spawn(process.execPath, ['build'], { stdio: 'inherit', env: process.env });
+const frontend = spawn(process.execPath, ['build'], { stdio: 'inherit', env: frontendEnvironment });
 const children = [backend, frontend];
 let shuttingDown = false;
 
