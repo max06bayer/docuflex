@@ -30,6 +30,7 @@ import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPageContentStream;
 import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.pdmodel.PDResources;
+import org.apache.pdfbox.pdmodel.common.PDRectangle;
 import org.apache.pdfbox.pdmodel.common.PDStream;
 import org.apache.pdfbox.pdmodel.font.PDFont;
 import org.apache.pdfbox.pdmodel.font.PDFontDescriptor;
@@ -41,18 +42,23 @@ import org.apache.pdfbox.pdmodel.font.encoding.Encoding;
 import org.apache.pdfbox.pdmodel.font.encoding.GlyphList;
 import org.apache.pdfbox.pdmodel.graphics.PDXObject;
 import org.apache.pdfbox.pdmodel.graphics.form.PDFormXObject;
+import org.apache.pdfbox.pdmodel.graphics.blend.BlendMode;
+import org.apache.pdfbox.pdmodel.graphics.state.PDExtendedGraphicsState;
 import org.apache.pdfbox.Loader;
 
 public class DocuflexPdfServer {
-  private static final int PORT = 8080;
+  private static final int PORT = environmentInt("PDF_BACKEND_PORT", 8080);
+  private static final String HOST = environmentString("PDF_BACKEND_HOST", "127.0.0.1");
+  private static final int MAX_REQUEST_BYTES = 150 * 1024 * 1024;
 
   public static void main(String[] args) throws IOException {
-    HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", PORT), 0);
+    HttpServer server = HttpServer.create(new InetSocketAddress(HOST, PORT), 0);
     server.createContext("/health", DocuflexPdfServer::handleHealth);
     server.createContext("/edit", DocuflexPdfServer::handleEdit);
     server.createContext("/fonts", DocuflexPdfServer::handleFonts);
+    server.createContext("/export", DocuflexPdfServer::handleExport);
     server.start();
-    System.out.println("Docuflex PDFBox server listening on http://127.0.0.1:" + PORT);
+    System.out.println("Docuflex PDFBox server listening on http://" + HOST + ":" + PORT);
   }
 
   private static void handleHealth(HttpExchange exchange) throws IOException {
@@ -115,6 +121,119 @@ public class DocuflexPdfServer {
       error.printStackTrace();
       sendJson(exchange, 400, "{\"error\":\"" + escapeJson(error.getMessage()) + "\"}");
     }
+  }
+
+  private static void handleExport(HttpExchange exchange) throws IOException {
+    addCors(exchange);
+    if ("OPTIONS".equals(exchange.getRequestMethod())) {
+      sendNoContent(exchange);
+      return;
+    }
+    if (!"POST".equals(exchange.getRequestMethod())) {
+      sendJson(exchange, 405, "{\"error\":\"POST required\"}");
+      return;
+    }
+
+    try {
+      String body = readRequestBody(exchange);
+      Map<String, Object> payload = asObject(new JsonParser(body).parse());
+      byte[] pdfBytes = Base64.getDecoder().decode(asString(payload.get("pdfBase64")));
+      List<AnnotationStroke> annotations = parseAnnotations(asArray(payload.get("annotations")));
+      byte[] exported = annotations.isEmpty() ? pdfBytes : applyAnnotations(pdfBytes, annotations);
+      sendPdf(exchange, exported);
+    } catch (Exception error) {
+      error.printStackTrace();
+      sendJson(exchange, 400, "{\"error\":\"" + escapeJson(error.getMessage()) + "\"}");
+    }
+  }
+
+  private static byte[] applyAnnotations(byte[] pdfBytes, List<AnnotationStroke> annotations) throws IOException {
+    try (PDDocument document = Loader.loadPDF(pdfBytes)) {
+      document.setAllSecurityToBeRemoved(true);
+      for (int pageIndex = 0; pageIndex < document.getNumberOfPages(); pageIndex += 1) {
+        List<AnnotationStroke> markers = new ArrayList<>();
+        List<AnnotationStroke> pens = new ArrayList<>();
+        for (AnnotationStroke annotation : annotations) {
+          if (annotation.page != pageIndex || annotation.points.isEmpty()) {
+            continue;
+          }
+          if ("marker".equals(annotation.type)) {
+            markers.add(annotation);
+          } else if ("pen".equals(annotation.type)) {
+            pens.add(annotation);
+          }
+        }
+
+        PDPage page = document.getPage(pageIndex);
+        if (!markers.isEmpty()) {
+          drawAnnotationLayer(document, page, markers, true);
+        }
+        if (!pens.isEmpty()) {
+          drawAnnotationLayer(document, page, pens, false);
+        }
+      }
+
+      ByteArrayOutputStream output = new ByteArrayOutputStream();
+      document.save(output);
+      return output.toByteArray();
+    }
+  }
+
+  private static void drawAnnotationLayer(
+      PDDocument document,
+      PDPage page,
+      List<AnnotationStroke> strokes,
+      boolean markerLayer) throws IOException {
+    // Marker strokes are appended with Multiply blending. This keeps black text
+    // visually above the ink while avoiding disappearance behind PDFs that draw
+    // an explicit white page background.
+    try (PDPageContentStream content = new PDPageContentStream(
+        document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
+      PDExtendedGraphicsState graphicsState = new PDExtendedGraphicsState();
+      graphicsState.setStrokingAlphaConstant(markerLayer ? 0.34f : 0.94f);
+      graphicsState.setBlendMode(markerLayer ? BlendMode.MULTIPLY : BlendMode.NORMAL);
+      content.setGraphicsStateParameters(graphicsState);
+      content.setLineCapStyle(1);
+      content.setLineJoinStyle(1);
+      content.setLineWidth(markerLayer ? 11.85f : 1.52f);
+      if (markerLayer) {
+        content.setStrokingColor(1f, 0.894f, 0.231f);
+      } else {
+        content.setStrokingColor(0.886f, 0.114f, 0.196f);
+      }
+
+      for (AnnotationStroke stroke : strokes) {
+        PdfPoint first = normalizedToPdfPoint(page, stroke.points.get(0));
+        content.moveTo(first.x, first.y);
+        if (stroke.points.size() == 1) {
+          content.lineTo(first.x + 0.01f, first.y + 0.01f);
+        } else {
+          for (int index = 1; index < stroke.points.size(); index += 1) {
+            PdfPoint point = normalizedToPdfPoint(page, stroke.points.get(index));
+            content.lineTo(point.x, point.y);
+          }
+        }
+        content.stroke();
+      }
+    }
+  }
+
+  private static PdfPoint normalizedToPdfPoint(PDPage page, NormalizedPoint point) {
+    PDRectangle box = page.getCropBox();
+    float x = (float) clamp(point.x, 0, 1);
+    float y = (float) clamp(point.y, 0, 1);
+    float left = box.getLowerLeftX();
+    float bottom = box.getLowerLeftY();
+    float width = box.getWidth();
+    float height = box.getHeight();
+    int rotation = ((page.getRotation() % 360) + 360) % 360;
+
+    return switch (rotation) {
+      case 90 -> new PdfPoint(left + y * width, bottom + x * height);
+      case 180 -> new PdfPoint(left + (1 - x) * width, bottom + y * height);
+      case 270 -> new PdfPoint(left + (1 - y) * width, bottom + (1 - x) * height);
+      default -> new PdfPoint(left + x * width, bottom + (1 - y) * height);
+    };
   }
 
   private static FontExtractResult extractFonts(byte[] pdfBytes) throws IOException {
@@ -2169,6 +2288,37 @@ public class DocuflexPdfServer {
     return edits;
   }
 
+  private static List<AnnotationStroke> parseAnnotations(List<Object> rawAnnotations) {
+    if (rawAnnotations.size() > 10_000) {
+      throw new IllegalArgumentException("Too many annotation strokes.");
+    }
+    List<AnnotationStroke> annotations = new ArrayList<>();
+    int pointCount = 0;
+    for (Object raw : rawAnnotations) {
+      Map<String, Object> annotation = asObject(raw);
+      String type = asString(annotation.get("type"));
+      if (!"marker".equals(type) && !"pen".equals(type)) {
+        throw new IllegalArgumentException("Unsupported annotation type: " + type);
+      }
+      List<NormalizedPoint> points = new ArrayList<>();
+      for (Object rawPoint : asArray(annotation.get("points"))) {
+        Map<String, Object> point = asObject(rawPoint);
+        double x = asDouble(point.get("x"));
+        double y = asDouble(point.get("y"));
+        if (!Double.isFinite(x) || !Double.isFinite(y)) {
+          throw new IllegalArgumentException("Annotation coordinates must be finite numbers.");
+        }
+        points.add(new NormalizedPoint(x, y));
+        pointCount += 1;
+        if (pointCount > 2_000_000) {
+          throw new IllegalArgumentException("Too many annotation points.");
+        }
+      }
+      annotations.add(new AnnotationStroke(asInt(annotation.get("page")), type, points));
+    }
+    return annotations;
+  }
+
   private static List<String> parseStringList(Object value) {
     if (value == null) {
       return List.of();
@@ -2219,11 +2369,30 @@ public class DocuflexPdfServer {
     exchange.getResponseHeaders().add("Vary", "Origin");
     exchange.getResponseHeaders().add("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
     exchange.getResponseHeaders().add("Access-Control-Allow-Headers", "Content-Type");
+    exchange.getResponseHeaders().add("Access-Control-Expose-Headers", "Content-Disposition");
+  }
+
+  private static String readRequestBody(HttpExchange exchange) throws IOException {
+    byte[] bytes = exchange.getRequestBody().readNBytes(MAX_REQUEST_BYTES + 1);
+    if (bytes.length > MAX_REQUEST_BYTES) {
+      throw new IllegalArgumentException("Request is too large.");
+    }
+    return new String(bytes, StandardCharsets.UTF_8);
   }
 
   private static void sendJson(HttpExchange exchange, int status, String body) throws IOException {
     exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
     send(exchange, status, body);
+  }
+
+  private static void sendPdf(HttpExchange exchange, byte[] bytes) throws IOException {
+    exchange.getResponseHeaders().set("Content-Type", "application/pdf");
+    exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=docuflex-export.pdf");
+    exchange.getResponseHeaders().set("Cache-Control", "no-store");
+    exchange.sendResponseHeaders(200, bytes.length);
+    try (OutputStream response = exchange.getResponseBody()) {
+      response.write(bytes);
+    }
   }
 
   private static void send(HttpExchange exchange, int status, String body) throws IOException {
@@ -2269,6 +2438,34 @@ public class DocuflexPdfServer {
     throw new IllegalArgumentException("Expected JSON number.");
   }
 
+  private static double asDouble(Object value) {
+    if (value instanceof Number number) {
+      return number.doubleValue();
+    }
+    throw new IllegalArgumentException("Expected JSON number.");
+  }
+
+  private static double clamp(double value, double minimum, double maximum) {
+    return Math.max(minimum, Math.min(maximum, value));
+  }
+
+  private static int environmentInt(String name, int fallback) {
+    String value = System.getenv(name);
+    if (value == null || value.isBlank()) {
+      return fallback;
+    }
+    try {
+      return Integer.parseInt(value);
+    } catch (NumberFormatException error) {
+      throw new IllegalArgumentException(name + " must be an integer.", error);
+    }
+  }
+
+  private static String environmentString(String name, String fallback) {
+    String value = System.getenv(name);
+    return value == null || value.isBlank() ? fallback : value;
+  }
+
   private static int optionalInt(Object value, int fallback) {
     return value instanceof Number number ? number.intValue() : fallback;
   }
@@ -2307,6 +2504,12 @@ public class DocuflexPdfServer {
       boolean moved,
       boolean overlay,
       String alignment) {}
+
+  private record AnnotationStroke(int page, String type, List<NormalizedPoint> points) {}
+
+  private record NormalizedPoint(double x, double y) {}
+
+  private record PdfPoint(float x, float y) {}
 
   private record EmbeddedFont(String pdfJsName, String family, String baseName, String css) {}
 

@@ -1,0 +1,8 @@
+[phases.setup]
+nixPkgs = ["...", "jdk21_headless"]
+
+[phases.build]
+cmds = ["npm run build", "npm run backend:compile"]
+
+[start]
+cmd = "npm run start"

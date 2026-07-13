@@ -1066,6 +1066,58 @@
     viewer?.querySelectorAll('.pdf-page')[pageIndex]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
+  /** @param {ArrayBuffer} buffer */
+  function arrayBufferToBase64(buffer) {
+    const bytes = new Uint8Array(buffer);
+    const chunkSize = 0x8000;
+    let binary = '';
+    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+    }
+    return btoa(binary);
+  }
+
+  function exportableAnnotations() {
+    return Object.entries(annotations).flatMap(([page, strokes]) => {
+      const pageSize = pageSizes[Number(page)];
+      if (!pageSize?.width || !pageSize.height) return [];
+      return strokes
+        .filter((stroke) => stroke.points.length > 0)
+        .map((stroke) => ({
+          page: Number(page),
+          type: stroke.type,
+          points: stroke.points.map((point) => ({
+            x: point.x / pageSize.width,
+            y: point.y / pageSize.height
+          }))
+        }));
+    });
+  }
+
+  export async function downloadPdf() {
+    const response = await fetch('/api/pdf/export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        pdfBase64: arrayBufferToBase64(await file.arrayBuffer()),
+        annotations: exportableAnnotations()
+      })
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => null);
+      throw new Error(error?.error ?? `PDF export failed (${response.status}).`);
+    }
+
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    const baseName = file.name.replace(/\.pdf$/i, '') || 'document';
+    anchor.href = url;
+    anchor.download = `${baseName}-edited.pdf`;
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
   onDestroy(() => {
     loadGeneration += 1;
     cancelSharpRenders();

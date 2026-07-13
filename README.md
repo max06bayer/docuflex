@@ -30,6 +30,7 @@ Core product principles:
 - Animated document preparation flow
 - Real filenames and multi-document navbar tabs
 - Direct PDF.js canvas rendering without HTML conversion
+- PDFBox export of marker and pen annotations through the editor Download button
 - High-resolution main-page rendering
 - Page-thumbnail sidebar with navigation
 - Dynamic recent-document list
@@ -69,11 +70,55 @@ npm run check
 npm run build
 ```
 
-Compile and run the PDFBox backend:
+Run the PDFBox backend in a second terminal when testing downloads locally:
 
 ```bash
 npm run backend:dev
 ```
+
+The frontend sends export requests to its same-origin `/api/pdf/export` route, which proxies to
+`http://127.0.0.1:8080/export` by default. The existing `/edit` and `/fonts` PDFBox endpoints remain
+available for the later text-editing workflow; the current editor does not call them.
+
+To test the production processes together:
+
+```bash
+npm run build
+npm run backend:compile
+npm start
+```
+
+`npm start` launches the SvelteKit server and the private Java PDFBox service in the same process
+group. Stop it once with `Ctrl+C` to stop both.
+
+## Coolify deployment
+
+This repository includes `nixpacks.toml`. It adds a headless JDK, builds both runtimes, and starts
+the SvelteKit and Java processes together. Configure the Coolify application as follows:
+
+- Build pack: **Nixpacks**
+- Base directory: `/`
+- Static site: **off**
+- Exposed port: `3000`
+- Health-check path: `/`
+- Recommended container memory: at least `1 GB`
+
+Useful runtime environment variables:
+
+```text
+PORT=3000
+HOST=0.0.0.0
+ORIGIN=https://your-docuflex-domain.example
+JAVA_TOOL_OPTIONS=-Xms64m -Xmx512m -XX:+ExitOnOutOfMemoryError
+```
+
+The Java service listens only inside the container on `127.0.0.1:8080`; do not expose port 8080
+in Coolify. `PDF_BACKEND_URL` is only needed if the Java service is moved to a separate container.
+
+Java does need memory, but it does not need the whole container. For ordinary PDFs, a `1 GB`
+container with a `512 MB` Java heap leaves room for Node and operating-system overhead. For large
+or image-heavy PDFs, use a `2 GB` container and consider raising `-Xmx` to `1g`. Coolify's resource
+memory limit is the hard ceiling; `-Xmx` limits only the Java heap inside that ceiling.
 
 ## Repository status
 

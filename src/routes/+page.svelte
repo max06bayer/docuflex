@@ -44,6 +44,9 @@
   $: activeDocument = tabs.find((tab) => tab.id === activeTab);
   /** @type {HTMLInputElement | undefined} */
   let fileInput;
+  /** @type {{ downloadPdf: () => Promise<void> } | undefined} */
+  let pdfEditor;
+  let isDownloading = false;
   let isPreparing = false;
   /** @type {File | null} */
   let pendingFile = null;
@@ -83,6 +86,19 @@
 
   function openFilePicker() {
     fileInput?.click();
+  }
+
+  async function downloadActiveDocument() {
+    if (!pdfEditor || isDownloading) return;
+    isDownloading = true;
+    try {
+      await pdfEditor.downloadPdf();
+    } catch (error) {
+      console.error(error);
+      window.alert(error instanceof Error ? error.message : 'Could not export this PDF.');
+    } finally {
+      isDownloading = false;
+    }
   }
 
   /** @param {Event} event */
@@ -222,7 +238,13 @@
 
     <nav class="utilities" aria-label="Editor utilities">
       {#if activeTab !== null}
-        <button class="utility-button" aria-label="Download" title="Download">
+        <button
+          class="utility-button"
+          aria-label={isDownloading ? 'Exporting PDF' : 'Download'}
+          title={isDownloading ? 'Exporting PDF…' : 'Download'}
+          disabled={isDownloading}
+          onclick={downloadActiveDocument}
+        >
           <img src="/download.svg" alt="" />
         </button>
       {/if}
@@ -307,7 +329,7 @@
   </section>
   {:else}
     {#key activeDocument.id}
-      <PdfEditor file={activeDocument.file} />
+      <PdfEditor file={activeDocument.file} bind:this={pdfEditor} />
     {/key}
   {/if}
 
@@ -577,6 +599,11 @@
   .utility-button:hover {
     border-color: #c8c8c8;
     background: #eee;
+  }
+
+  .utility-button:disabled {
+    cursor: progress;
+    opacity: 0.55;
   }
 
   .utility-button img {

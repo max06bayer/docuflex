@@ -3,14 +3,19 @@
   "private": true,
   "version": "0.0.1",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "backend:compile": "javac -cp backend/lib/pdfbox-app-3.0.3.jar -d backend/out backend/src/DocuflexPdfServer.java",
     "backend:dev": "npm run backend:compile && java -cp backend/out:backend/lib/pdfbox-app-3.0.3.jar DocuflexPdfServer",
+    "backend:start": "java -cp backend/out:backend/lib/pdfbox-app-3.0.3.jar DocuflexPdfServer",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
     "check": "svelte-kit sync && svelte-check --tsconfig ./jsconfig.json",
-    "start": "node build"
+    "frontend:start": "node build",
+    "start": "node scripts/start-production.mjs"
   },
   "devDependencies": {
     "@sveltejs/adapter-auto": "^6.0.0",
