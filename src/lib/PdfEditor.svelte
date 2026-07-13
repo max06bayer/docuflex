@@ -66,6 +66,7 @@
   let multiSelectionFrame = null;
   /** @type {{ pageIndex: number; id: number } | null} */
   let editingTextShape = null;
+  let textEditorPointerActive = false;
   /** @type {{ pointerId: number; pageIndex: number; id: number; start: StrokePoint } | null} */
   let drawingShape = null;
   /** @type {any} */
@@ -430,6 +431,14 @@
       zoomingOut = false;
     }
 
+    /** @param {PointerEvent} event */
+    function commitTextFieldOnOutsidePointer(event) {
+      if (!editingTextShape) return;
+      const target = event.target;
+      if (target instanceof Element && target.closest('[data-text-editor]')) return;
+      commitActiveTextField();
+    }
+
     document.addEventListener('mousedown', beginTextSelectionCursor, true);
     document.addEventListener('mousedown', beginProductionCharacterDrag, true);
     document.addEventListener('mousedown', beginWordDrag, true);
@@ -442,6 +451,7 @@
     document.addEventListener('mouseup', commitTextHighlight);
     document.addEventListener('dragstart', suppressProductionBlankDrag);
     document.addEventListener('click', clearPageSelection);
+    document.addEventListener('pointerdown', commitTextFieldOnOutsidePointer, true);
     window.addEventListener('keydown', updateZoomCursor);
     window.addEventListener('keydown', handleShapeKeyboard);
     window.addEventListener('keyup', updateZoomCursor);
@@ -460,6 +470,7 @@
       document.removeEventListener('mouseup', commitTextHighlight);
       document.removeEventListener('dragstart', suppressProductionBlankDrag);
       document.removeEventListener('click', clearPageSelection);
+      document.removeEventListener('pointerdown', commitTextFieldOnOutsidePointer, true);
       window.removeEventListener('keydown', updateZoomCursor);
       window.removeEventListener('keydown', handleShapeKeyboard);
       window.removeEventListener('keyup', updateZoomCursor);
@@ -691,35 +702,58 @@
     const editor = viewer?.querySelector(`textarea[data-text-editor="${id}"]`);
     if (!(editor instanceof HTMLTextAreaElement)) return;
     editor.style.height = 'auto';
-    editor.style.height = `${Math.max(editor.parentElement?.clientHeight ?? 0, editor.scrollHeight)}px`;
+    editor.style.height = `${Math.max(Number(editor.dataset.minHeight) || 0, editor.scrollHeight)}px`;
     editor.focus();
     if (selectAll) editor.select();
+    else editor.setSelectionRange(editor.value.length, editor.value.length);
   }
 
-  /** @param {MouseEvent} event @param {number} pageIndex @param {number} id */
-  function startTextEditing(event, pageIndex, id) {
-    event.preventDefault();
-    event.stopPropagation();
+  /** @param {number} pageIndex @param {number} id */
+  function openTextEditor(pageIndex, id) {
     setShapeSelection(pageIndex, [id]);
     editingTextShape = { pageIndex, id };
-    tick().then(() => focusTextEditor(id, true));
+    tick().then(() => setTimeout(() => focusTextEditor(id), 0));
   }
 
-  /** @param {Event} event @param {number} pageIndex @param {number} id */
-  function updateTextField(event, pageIndex, id) {
-    const shape = findShape(pageIndex, id);
+  /** @param {Event} event */
+  function updateTextField(event) {
     const input = event.currentTarget;
-    if (!shape || !(input instanceof HTMLTextAreaElement)) return;
-    replaceShape(pageIndex, { ...shape, text: input.value });
+    if (!(input instanceof HTMLTextAreaElement)) return;
     input.style.height = 'auto';
-    input.style.height = `${Math.max(input.parentElement?.clientHeight ?? 0, input.scrollHeight)}px`;
+    input.style.height = `${Math.max(Number(input.dataset.minHeight) || 0, input.scrollHeight)}px`;
+  }
+
+  function commitActiveTextField() {
+    if (!editingTextShape) return;
+    const { pageIndex, id } = editingTextShape;
+    const input = viewer?.querySelector(`textarea[data-text-editor="${id}"]`);
+    const shape = findShape(pageIndex, id);
+    if (shape && input instanceof HTMLTextAreaElement) replaceShape(pageIndex, { ...shape, text: input.value });
+    editingTextShape = null;
+  }
+
+  /** @param {FocusEvent} event @param {number} id */
+  function retainTextEditorFocus(event, id) {
+    const input = event.currentTarget;
+    if (!(input instanceof HTMLTextAreaElement)) return;
+    setTimeout(() => {
+      if (!textEditorPointerActive || editingTextShape?.id !== id || !input.isConnected || document.activeElement === input) return;
+      input.focus({ preventScroll: true });
+    }, 0);
+  }
+
+  /** @param {PointerEvent} event */
+  function handleTextEditorPointerDown(event) {
+    textEditorPointerActive = true;
+    event.stopPropagation();
+    setTimeout(() => (textEditorPointerActive = false), 200);
   }
 
   /** @param {KeyboardEvent} event */
   function handleTextFieldKeydown(event) {
     if (event.key !== 'Escape') return;
     event.preventDefault();
-    if (event.currentTarget instanceof HTMLTextAreaElement) event.currentTarget.blur();
+    commitActiveTextField();
   }
 
   /** @param {number} value @param {number} minimum @param {number} maximum */
@@ -1326,7 +1360,6 @@
     if (!viewer) return;
     const pointerTarget = event.target;
     if (pointerTarget instanceof Element && pointerTarget.closest('[data-text-editor]')) return;
-    if (editingTextShape) editingTextShape = null;
 
     const shapeHit = shapeTarget(event);
     if (event.button === 0 && shapeHit && activeTool === 'select') {
@@ -1341,7 +1374,13 @@
         shapeHit.element.dataset.shapeHandle === undefined &&
         shapeHit.element.dataset.shapeRotate === undefined
       ) {
-        startTextEditing(event, shapeHit.pageIndex, shape.id);
+        event.preventDefault();
+        event.stopPropagation();
+        const pageIndex = shapeHit.pageIndex;
+        const shapeId = shape.id;
+        // Wait until Safari has completed the full second-click sequence before
+        // inserting and focusing the textarea.
+        setTimeout(() => openTextEditor(pageIndex, shapeId), 0);
         return;
       }
       event.preventDefault();
@@ -2080,6 +2119,7 @@
         {@const currentSelectedShapes = selectedShape?.pageIndex === index ? (shapes[index] ?? []).filter((shape) => selectedShapeIds.has(shape.id)) : []}
         {@const singleSelection = currentSelectedShapes.length === 1 ? currentSelectedShapes[0] : null}
         {@const currentSelection = currentSelectedShapes.length > 1 && multiSelectionFrame?.pageIndex === index && selectedShape ? frameAsShape(multiSelectionFrame, selectedShape.id) : singleSelection}
+        {@const activeTextEditorShape = editingTextShape?.pageIndex === index ? findShape(index, editingTextShape.id) : null}
         <div class="pdf-page" aria-label={`Page ${index + 1}`}>
           <canvas></canvas>
           <svg
@@ -2121,32 +2161,7 @@
               {@const wrappedTextLines = shape.type === 'textfield' ? textFieldLines(shape.text ?? '', shape.width) : []}
               <g transform={`rotate(${shape.rotation} ${shape.x + shape.width / 2} ${shape.y + shape.height / 2})`}>
                 {#if shape.type === 'textfield'}
-                  {#if editingTextShape?.pageIndex === index && editingTextShape.id === shape.id}
-                    <foreignObject
-                      class="pdf-text-field"
-                      role="group"
-                      aria-label="Text field"
-                      data-shape-id={shape.id}
-                      data-shape-page={index}
-                      x={shape.x}
-                      y={shape.y}
-                      width={shape.width}
-                      height={Math.max(shape.height, Math.max(1, wrappedTextLines.length) * 19.2)}
-                    >
-                      <div class="pdf-text-field-content">
-                        <textarea
-                          data-text-editor={shape.id}
-                          aria-label="Edit text field"
-                          rows="1"
-                          wrap="soft"
-                          value={shape.text ?? ''}
-                          oninput={(event) => updateTextField(event, index, shape.id)}
-                          onkeydown={handleTextFieldKeydown}
-                          onblur={() => editingTextShape = null}
-                        ></textarea>
-                      </div>
-                    </foreignObject>
-                  {:else}
+                  {#if editingTextShape?.pageIndex !== index || editingTextShape.id !== shape.id}
                     {@const displayedLines = shape.text ? wrappedTextLines : ['Type here']}
                     {@const displayedHeight = Math.max(shape.height, Math.max(1, displayedLines.length) * 19.2)}
                     <g
@@ -2414,6 +2429,34 @@
               </g>
             </svg>
           {/if}
+          {#if activeTextEditorShape?.type === 'textfield'}
+            <div
+              class="pdf-text-editor-overlay"
+              data-shape-id={activeTextEditorShape.id}
+              data-shape-page={index}
+              style:left={`${activeTextEditorShape.x}px`}
+              style:top={`${activeTextEditorShape.y}px`}
+              style:width={`${activeTextEditorShape.width}px`}
+              style:min-height={`${activeTextEditorShape.height}px`}
+              style:transform={`rotate(${activeTextEditorShape.rotation}deg)`}
+              style:transform-origin={`${activeTextEditorShape.width / 2}px ${activeTextEditorShape.height / 2}px`}
+            >
+              <textarea
+                data-text-editor={activeTextEditorShape.id}
+                data-min-height={activeTextEditorShape.height}
+                aria-label="Edit text field"
+                rows="1"
+                wrap="soft"
+                value={activeTextEditorShape.text ?? ''}
+                oninput={updateTextField}
+                onkeydown={handleTextFieldKeydown}
+                onpointerdown={handleTextEditorPointerDown}
+                onmousedown={(event) => event.stopPropagation()}
+                onclick={(event) => event.stopPropagation()}
+                onblur={(event) => retainTextEditorFocus(event, activeTextEditorShape.id)}
+              ></textarea>
+            </div>
+          {/if}
           <svg
             class="annotation-layer pen-layer"
             viewBox={`0 0 ${pageSizes[index]?.width ?? 1} ${pageSizes[index]?.height ?? 1}`}
@@ -2674,18 +2717,10 @@
     z-index: 3;
   }
 
-  .pdf-text-field {
-    overflow: visible;
-    pointer-events: all;
-    cursor: move;
-  }
-
-  .pdf-text-field-content {
+  .pdf-text-editor-overlay {
+    position: absolute;
+    z-index: 6;
     box-sizing: border-box;
-    display: flex;
-    align-items: flex-start;
-    width: 100%;
-    height: 100%;
     padding: 0 6px;
     overflow: visible;
     color: #171717;
@@ -2696,7 +2731,7 @@
     white-space: normal;
   }
 
-  .pdf-text-field-content textarea {
+  .pdf-text-editor-overlay textarea {
     box-sizing: border-box;
     width: 100%;
     min-height: 100%;
