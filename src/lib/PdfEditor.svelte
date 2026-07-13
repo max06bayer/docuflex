@@ -2,11 +2,16 @@
   import { onDestroy, onMount, tick } from 'svelte';
   import EditorToolbar from '$lib/EditorToolbar.svelte';
 
+  /** @typedef {{ x: number; y: number; pressure: number }} StrokePoint */
+  /** @typedef {{ id: number; type: 'marker' | 'pen'; points: StrokePoint[] }} AnnotationStroke */
+
   /** @type {File} */
   export let file;
 
   /** @type {HTMLDivElement | undefined} */
   let viewer;
+  /** @type {HTMLElement | undefined} */
+  let workspace;
   /** @type {import('pdfjs-dist').PDFDocumentProxy | null} */
   let pdfDocument = null;
   let pageCount = 0;
@@ -32,12 +37,30 @@
   let sharpRenderTimer;
   /** @type {Set<import('pdfjs-dist').RenderTask>} */
   let sharpRenderTasks = new Set();
+  /** @type {Record<number, AnnotationStroke[]>} */
+  let annotations = {};
+  /** @type {Record<number, { width: number; height: number }>} */
+  let pageSizes = {};
+  /** @type {{ pointerId: number; pageIndex: number; stroke: AnnotationStroke } | null} */
+  let drawingStroke = null;
+  /** @type {number | null} */
+  let erasingPointerId = null;
+  /** @type {{ pageIndex: number; point: StrokePoint } | null} */
+  let lastEraserPoint = null;
+  let nextAnnotationId = 1;
+  let eraserCursorVisible = false;
+  let eraserCursorX = 0;
+  let eraserCursorY = 0;
+  let eraserCursorSize = 34;
 
   const BASE_PAGE_SCALE = 1.35;
   const MIN_ZOOM = 0.5;
   const MAX_ZOOM = 4;
   const CLICK_ZOOM_FACTOR = 1.25;
   const MAX_CANVAS_PIXELS = 24_000_000;
+  const ERASER_RADIUS = 17;
+
+  $: if (activeTool !== 'eraser') eraserCursorVisible = false;
 
   onMount(() => {
     loadPdf();
@@ -461,6 +484,158 @@
     zoomAt(zoomLevel * factor, event.clientX, event.clientY);
   }
 
+  /** @param {StrokePoint[]} points */
+  function strokePath(points) {
+    if (points.length === 0) return '';
+    if (points.length === 1) return `M ${points[0].x} ${points[0].y} l 0.01 0.01`;
+    let path = `M ${points[0].x} ${points[0].y}`;
+    for (let index = 1; index < points.length - 1; index += 1) {
+      const point = points[index];
+      const next = points[index + 1];
+      path += ` Q ${point.x} ${point.y} ${(point.x + next.x) / 2} ${(point.y + next.y) / 2}`;
+    }
+    const last = points[points.length - 1];
+    return `${path} L ${last.x} ${last.y}`;
+  }
+
+  /** @param {number} clientX @param {number} clientY */
+  function pageAtPoint(clientX, clientY) {
+    const hit = document.elementFromPoint(clientX, clientY);
+    const shell = hit instanceof Element ? hit.closest('.pdf-page') : null;
+    if (!(shell instanceof HTMLElement) || !viewer) return null;
+    const pages = [...viewer.querySelectorAll('.pdf-page')];
+    const pageIndex = pages.indexOf(shell);
+    return pageIndex < 0 ? null : { shell, pageIndex };
+  }
+
+  /** @param {PointerEvent} event @param {HTMLElement} shell */
+  function pointOnPage(event, shell) {
+    const rect = shell.getBoundingClientRect();
+    const width = Number.parseFloat(shell.style.width) || shell.offsetWidth;
+    const height = Number.parseFloat(shell.style.height) || shell.offsetHeight;
+    return {
+      x: Math.max(0, Math.min(width, ((event.clientX - rect.left) / rect.width) * width)),
+      y: Math.max(0, Math.min(height, ((event.clientY - rect.top) / rect.height) * height)),
+      pressure: event.pressure > 0 ? event.pressure : 0.5
+    };
+  }
+
+  /** @param {StrokePoint[]} points @param {StrokePoint} point @param {number} [spacing] */
+  function appendInterpolatedPoint(points, point, spacing = 2) {
+    const last = points[points.length - 1];
+    if (!last) return [point];
+    const distance = Math.hypot(point.x - last.x, point.y - last.y);
+    if (distance < 0.35) return points;
+    const steps = Math.max(1, Math.ceil(distance / spacing));
+    const next = [...points];
+    for (let step = 1; step <= steps; step += 1) {
+      const amount = step / steps;
+      next.push({
+        x: last.x + (point.x - last.x) * amount,
+        y: last.y + (point.y - last.y) * amount,
+        pressure: last.pressure + (point.pressure - last.pressure) * amount
+      });
+    }
+    return next;
+  }
+
+  /** @param {StrokePoint[]} points */
+  function straightenMarker(points) {
+    if (points.length < 2) return points;
+    const center = points.reduce(
+      (sum, point) => ({ x: sum.x + point.x / points.length, y: sum.y + point.y / points.length }),
+      { x: 0, y: 0 }
+    );
+    let xx = 0;
+    let xy = 0;
+    let yy = 0;
+    for (const point of points) {
+      const x = point.x - center.x;
+      const y = point.y - center.y;
+      xx += x * x;
+      xy += x * y;
+      yy += y * y;
+    }
+    let angle = 0.5 * Math.atan2(2 * xy, xx - yy);
+    let direction = { x: Math.cos(angle), y: Math.sin(angle) };
+    const lastPoint = points[points.length - 1];
+    const gesture = { x: lastPoint.x - points[0].x, y: lastPoint.y - points[0].y };
+    if (gesture.x * direction.x + gesture.y * direction.y < 0) {
+      angle += Math.PI;
+      direction = { x: Math.cos(angle), y: Math.sin(angle) };
+    }
+    const projections = points.map(
+      (point) => (point.x - center.x) * direction.x + (point.y - center.y) * direction.y
+    );
+    const startProjection = Math.min(...projections);
+    const endProjection = Math.max(...projections);
+    const start = {
+      x: center.x + direction.x * startProjection,
+      y: center.y + direction.y * startProjection,
+      pressure: 0.5
+    };
+    const end = {
+      x: center.x + direction.x * endProjection,
+      y: center.y + direction.y * endProjection,
+      pressure: 0.5
+    };
+    return appendInterpolatedPoint([start], end, 2);
+  }
+
+  /** @param {number} pageIndex @param {AnnotationStroke} stroke */
+  function replaceStroke(pageIndex, stroke) {
+    annotations = {
+      ...annotations,
+      [pageIndex]: (annotations[pageIndex] ?? []).map((candidate) =>
+        candidate.id === stroke.id ? stroke : candidate
+      )
+    };
+  }
+
+  /** @param {number} pageIndex @param {StrokePoint} point */
+  function eraseAt(pageIndex, point) {
+    const strokes = annotations[pageIndex] ?? [];
+    /** @type {AnnotationStroke[]} */
+    const fragments = [];
+    for (const stroke of strokes) {
+      /** @type {StrokePoint[]} */
+      let run = [];
+      for (const strokePoint of stroke.points) {
+        if (Math.hypot(strokePoint.x - point.x, strokePoint.y - point.y) <= ERASER_RADIUS) {
+          if (run.length) fragments.push({ ...stroke, id: nextAnnotationId++, points: run });
+          run = [];
+        } else {
+          run.push(strokePoint);
+        }
+      }
+      if (run.length) fragments.push({ ...stroke, id: nextAnnotationId++, points: run });
+    }
+    annotations = { ...annotations, [pageIndex]: fragments };
+  }
+
+  /** @param {PointerEvent} event */
+  function updateEraserCursor(event) {
+    if (activeTool !== 'eraser') {
+      eraserCursorVisible = false;
+      return;
+    }
+    const pageHit = pageAtPoint(event.clientX, event.clientY);
+    if (!pageHit || !workspace) {
+      eraserCursorVisible = false;
+      return;
+    }
+    const workspaceRect = workspace.getBoundingClientRect();
+    const workspaceScaleX = workspaceRect.width / workspace.offsetWidth;
+    const workspaceScaleY = workspaceRect.height / workspace.offsetHeight;
+    const pageRect = pageHit.shell.getBoundingClientRect();
+    const pageWidth = Number.parseFloat(pageHit.shell.style.width) || pageHit.shell.offsetWidth;
+    const pageScale = pageRect.width / pageWidth;
+    eraserCursorX = (event.clientX - workspaceRect.left) / workspaceScaleX;
+    eraserCursorY = (event.clientY - workspaceRect.top) / workspaceScaleY;
+    eraserCursorSize = (ERASER_RADIUS * 2 * pageScale) / workspaceScaleX;
+    eraserCursorVisible = true;
+  }
+
   /** @param {PointerEvent} event */
   function handleViewerPointerDown(event) {
     if (!viewer) return;
@@ -469,6 +644,35 @@
       event.preventDefault();
       window.getSelection()?.removeAllRanges();
       zoomAt(zoomLevel * (event.shiftKey ? 1 / CLICK_ZOOM_FACTOR : CLICK_ZOOM_FACTOR), event.clientX, event.clientY);
+      return;
+    }
+
+    const pageHit = pageAtPoint(event.clientX, event.clientY);
+    if (event.button === 0 && pageHit && (activeTool === 'marker' || activeTool === 'pen')) {
+      event.preventDefault();
+      window.getSelection()?.removeAllRanges();
+      const stroke = {
+        id: nextAnnotationId++,
+        type: /** @type {'marker' | 'pen'} */ (activeTool),
+        points: [pointOnPage(event, pageHit.shell)]
+      };
+      annotations = {
+        ...annotations,
+        [pageHit.pageIndex]: [...(annotations[pageHit.pageIndex] ?? []), stroke]
+      };
+      drawingStroke = { pointerId: event.pointerId, pageIndex: pageHit.pageIndex, stroke };
+      viewer.setPointerCapture(event.pointerId);
+      return;
+    }
+
+    if (event.button === 0 && pageHit && activeTool === 'eraser') {
+      event.preventDefault();
+      window.getSelection()?.removeAllRanges();
+      erasingPointerId = event.pointerId;
+      const point = pointOnPage(event, pageHit.shell);
+      lastEraserPoint = { pageIndex: pageHit.pageIndex, point };
+      eraseAt(pageHit.pageIndex, point);
+      viewer.setPointerCapture(event.pointerId);
       return;
     }
 
@@ -494,17 +698,76 @@
 
   /** @param {PointerEvent} event */
   function handleViewerPointerMove(event) {
+    updateEraserCursor(event);
+    handleAnnotationPointerMove(event);
     if (!viewer || !panStart || event.pointerId !== panStart.pointerId) return;
     viewer.scrollLeft = panStart.scrollLeft - (event.clientX - panStart.x);
     viewer.scrollTop = panStart.scrollTop - (event.clientY - panStart.y);
   }
 
   /** @param {PointerEvent} event */
+  function handleAnnotationPointerMove(event) {
+    if (!viewer) return;
+    if (drawingStroke && event.pointerId === drawingStroke.pointerId) {
+      const pages = [...viewer.querySelectorAll('.pdf-page')];
+      const shell = pages[drawingStroke.pageIndex];
+      if (!(shell instanceof HTMLElement)) return;
+      let points = drawingStroke.stroke.points;
+      const events = event.getCoalescedEvents?.() ?? [event];
+      for (const coalescedEvent of events) {
+        points = appendInterpolatedPoint(points, pointOnPage(coalescedEvent, shell));
+      }
+      drawingStroke.stroke = { ...drawingStroke.stroke, points };
+      replaceStroke(drawingStroke.pageIndex, drawingStroke.stroke);
+      return;
+    }
+
+    if (erasingPointerId === event.pointerId) {
+      const pageHit = pageAtPoint(event.clientX, event.clientY);
+      if (pageHit) {
+        const point = pointOnPage(event, pageHit.shell);
+        if (lastEraserPoint?.pageIndex === pageHit.pageIndex) {
+          const samples = appendInterpolatedPoint(
+            [lastEraserPoint.point],
+            point,
+            ERASER_RADIUS / 2
+          );
+          for (const sample of samples.slice(1)) eraseAt(pageHit.pageIndex, sample);
+        } else {
+          eraseAt(pageHit.pageIndex, point);
+        }
+        lastEraserPoint = { pageIndex: pageHit.pageIndex, point };
+      }
+    }
+  }
+
+  /** @param {PointerEvent} event */
   function endPan(event) {
-    if (!viewer || !panStart || event.pointerId !== panStart.pointerId) return;
+    if (!viewer) return;
+    if (drawingStroke && event.pointerId === drawingStroke.pointerId) {
+      if (drawingStroke.stroke.type === 'marker') {
+        drawingStroke.stroke = {
+          ...drawingStroke.stroke,
+          points: straightenMarker(drawingStroke.stroke.points)
+        };
+        replaceStroke(drawingStroke.pageIndex, drawingStroke.stroke);
+      }
+      drawingStroke = null;
+    }
+    if (erasingPointerId === event.pointerId) {
+      erasingPointerId = null;
+      lastEraserPoint = null;
+      eraserCursorVisible = false;
+    }
+    if (panStart && event.pointerId === panStart.pointerId) {
+      panStart = null;
+      isPanning = false;
+    }
     if (viewer.hasPointerCapture(event.pointerId)) viewer.releasePointerCapture(event.pointerId);
-    panStart = null;
-    isPanning = false;
+  }
+
+  function hideEraserCursor() {
+    if (erasingPointerId === null) eraserCursorVisible = false;
   }
 
   function handleViewerScroll() {
@@ -596,6 +859,8 @@
     status = 'Rendering PDF…';
     pdfReady = false;
     cancelSharpRenders();
+    annotations = {};
+    pageSizes = {};
     pageCount = 0;
     selectedPages = new Set();
     selectionAnchor = null;
@@ -657,6 +922,7 @@
 
       shell.style.width = `${viewport.width}px`;
       shell.style.height = `${viewport.height}px`;
+      pageSizes = { ...pageSizes, [index]: { width: viewport.width, height: viewport.height } };
       shell.style.setProperty('--total-scale-factor', `${viewport.scale}`);
       shell.style.setProperty('--scale-round-x', '1px');
       shell.style.setProperty('--scale-round-y', '1px');
@@ -829,12 +1095,14 @@
   </div>
 </aside>
 
-<section class="pdf-workspace" aria-label={`PDF editor for ${file.name}`}>
+<section class="pdf-workspace" aria-label={`PDF editor for ${file.name}`} bind:this={workspace}>
   <div
     class:pan-mode={activeTool === 'pan'}
     class:panning={isPanning}
     class:zoom-mode={activeTool === 'zoom'}
     class:zoom-out={zoomingOut}
+    class:drawing-mode={activeTool === 'marker' || activeTool === 'pen'}
+    class:eraser-mode={activeTool === 'eraser'}
     class="pdf-viewer"
     role="region"
     aria-label="Document pages"
@@ -846,15 +1114,48 @@
     onpointermove={handleViewerPointerMove}
     onpointerup={endPan}
     onpointercancel={endPan}
+    onpointerleave={hideEraserCursor}
   >
     <div class="pdf-document" style:--zoom-level={zoomLevel}>
       {#each Array(pageCount) as _, index}
         <div class="pdf-page" aria-label={`Page ${index + 1}`}>
           <canvas></canvas>
+          <svg
+            class="annotation-layer marker-layer"
+            viewBox={`0 0 ${pageSizes[index]?.width ?? 1} ${pageSizes[index]?.height ?? 1}`}
+            preserveAspectRatio="none"
+            aria-hidden="true"
+          >
+            {#each (annotations[index] ?? []).filter((stroke) => stroke.type === 'marker') as stroke (stroke.id)}
+              <path class="marker-edge" d={strokePath(stroke.points)} />
+              <path class="marker-ink" d={strokePath(stroke.points)} />
+            {/each}
+          </svg>
+          <svg
+            class="annotation-layer pen-layer"
+            viewBox={`0 0 ${pageSizes[index]?.width ?? 1} ${pageSizes[index]?.height ?? 1}`}
+            preserveAspectRatio="none"
+            aria-hidden="true"
+          >
+            {#each (annotations[index] ?? []).filter((stroke) => stroke.type === 'pen') as stroke (stroke.id)}
+              <path class="pen-soft-edge" d={strokePath(stroke.points)} />
+              <path class="pen-ink" d={strokePath(stroke.points)} />
+            {/each}
+          </svg>
         </div>
       {/each}
     </div>
   </div>
+  {#if eraserCursorVisible}
+    <div
+      class="eraser-cursor"
+      style:left={`${eraserCursorX}px`}
+      style:top={`${eraserCursorY}px`}
+      style:width={`${eraserCursorSize}px`}
+      style:height={`${eraserCursorSize}px`}
+      aria-hidden="true"
+    ></div>
+  {/if}
   <EditorToolbar bind:activeTool />
 </section>
 
@@ -998,6 +1299,18 @@
     cursor: zoom-out;
   }
 
+  .pdf-viewer.drawing-mode {
+    cursor: crosshair;
+    touch-action: none;
+    user-select: none;
+  }
+
+  .pdf-viewer.eraser-mode {
+    cursor: none;
+    touch-action: none;
+    user-select: none;
+  }
+
   :global(.pdf-viewer.text-selecting),
   :global(.pdf-viewer.text-selecting .pdf-page),
   :global(.pdf-viewer.text-selecting canvas),
@@ -1018,15 +1331,79 @@
     box-shadow: 0 5px 22px rgba(0, 0, 0, 0.13);
   }
 
+  .annotation-layer {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+  .annotation-layer path {
+    fill: none;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .marker-layer {
+    z-index: 1;
+    mix-blend-mode: multiply;
+  }
+
+  .marker-edge {
+    stroke: #f4cd19;
+    stroke-width: 20px;
+    opacity: 0.13;
+  }
+
+  .marker-ink {
+    stroke: #ffe43b;
+    stroke-width: 16px;
+    opacity: 0.34;
+  }
+
+  .pen-layer {
+    z-index: 3;
+  }
+
+  .pen-soft-edge {
+    stroke: #8d0613;
+    stroke-width: 3.4px;
+    opacity: 0.15;
+  }
+
+  .pen-ink {
+    stroke: #e21d32;
+    stroke-width: 2.05px;
+    opacity: 0.94;
+  }
+
+  .eraser-cursor {
+    position: absolute;
+    z-index: 9;
+    box-sizing: border-box;
+    border: 1.5px solid rgba(25, 25, 25, 0.72);
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.16);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.72), inset 0 0 0 1px rgba(0, 0, 0, 0.08);
+    pointer-events: none;
+    transform: translate(-50%, -50%);
+  }
+
   .pdf-viewer.pan-mode :global(.textLayer span),
   .pdf-viewer.zoom-mode :global(.textLayer span),
-  .pdf-viewer.panning :global(.textLayer span) {
+  .pdf-viewer.panning :global(.textLayer span),
+  .pdf-viewer.drawing-mode :global(.textLayer span),
+  .pdf-viewer.eraser-mode :global(.textLayer span) {
     cursor: inherit;
     pointer-events: none;
     user-select: none;
   }
 
   canvas {
+    position: relative;
+    z-index: 0;
     display: block;
   }
 
@@ -1036,7 +1413,7 @@
     --min-font-size-inv: calc(1 / var(--min-font-size));
     position: absolute;
     inset: 0;
-    z-index: 1;
+    z-index: 2;
     overflow: clip;
     line-height: 1;
     text-align: initial;

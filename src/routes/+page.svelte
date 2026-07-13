@@ -221,6 +221,11 @@
     </div>
 
     <nav class="utilities" aria-label="Editor utilities">
+      {#if activeTab !== null}
+        <button class="utility-button" aria-label="Download" title="Download">
+          <img src="/download.svg" alt="" />
+        </button>
+      {/if}
       {#each [
         { id: 'home', icon: '/home.svg', label: 'Home' },
         { id: 'search', icon: '/search.svg', label: 'Search' },
