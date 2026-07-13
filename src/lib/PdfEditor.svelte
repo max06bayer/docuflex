@@ -16,34 +16,369 @@
   let selectionAnchor = null;
   let status = 'Rendering PDF…';
   let loadGeneration = 0;
+  /** @type {import('pdfjs-dist/web/pdf_viewer.mjs').TextLayerBuilder[]} */
+  let textLayerBuilders = [];
+  /** @type {AbortController | null} */
+  let textLayerAbortController = null;
+  let activeTool = 'select';
+  let zoomLevel = 1;
+  let zoomingOut = false;
+  let isPanning = false;
+  /** @type {{ pointerId: number; x: number; y: number; scrollLeft: number; scrollTop: number } | null} */
+  let panStart = null;
+  let pdfReady = false;
+  let sharpRenderGeneration = 0;
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let sharpRenderTimer;
+  /** @type {Set<import('pdfjs-dist').RenderTask>} */
+  let sharpRenderTasks = new Set();
+
+  const BASE_PAGE_SCALE = 1.35;
+  const MIN_ZOOM = 0.5;
+  const MAX_ZOOM = 4;
+  const CLICK_ZOOM_FACTOR = 1.25;
+  const MAX_CANVAS_PIXELS = 24_000_000;
 
   onMount(() => {
     loadPdf();
+    /** @type {{ x: number; y: number } | null} */
+    let pointerStart = null;
+    /** @type {{ node: Text; start: number; end: number } | null} */
+    let wordDrag = null;
+
+    /** @param {MouseEvent} event */
+    function rememberPointerStart(event) {
+      if (activeTool !== 'select') return;
+      pointerStart = { x: event.clientX, y: event.clientY };
+    }
+
+    /** @param {MouseEvent} event */
+    function beginWordDrag(event) {
+      if (activeTool !== 'select') return;
+      const target = event.target;
+      if (event.detail !== 2 || !(target instanceof Element) || !target.closest('.textLayer span')) return;
+
+      const caret = caretFromPoint(event.clientX, event.clientY);
+      const node = caret?.node;
+      const offset = caret?.offset;
+      if (!(node instanceof Text) || offset === undefined) return;
+      const word = wordBounds(node, offset, 0);
+      if (!word) return;
+
+      event.preventDefault();
+      wordDrag = { node, start: word.start, end: word.end };
+      setSelection(node, word.start, node, word.end);
+    }
+
+    /**
+     * @param {Text} node
+     * @param {number} offset
+     * @param {-1 | 0 | 1} direction
+     */
+    function wordBounds(node, offset, direction) {
+      const words = [...new Intl.Segmenter(undefined, { granularity: 'word' }).segment(node.data)]
+        .filter((segment) => segment.isWordLike)
+        .map((segment) => ({ start: segment.index, end: segment.index + segment.segment.length }));
+      const containing = words.find((word) => offset >= word.start && offset < word.end);
+      if (containing) return containing;
+      if (direction > 0) return words.filter((word) => word.start <= offset).at(-1) ?? words[0] ?? null;
+      if (direction < 0) return words.find((word) => word.end >= offset) ?? words.at(-1) ?? null;
+      return null;
+    }
+
+    /** @param {number} x @param {number} y */
+    function caretFromPoint(x, y) {
+      const caretPosition = document.caretPositionFromPoint?.(x, y);
+      const caretRange = document.caretRangeFromPoint?.(x, y);
+      const node = caretPosition?.offsetNode ?? caretRange?.startContainer;
+      const offset = caretPosition?.offset ?? caretRange?.startOffset;
+      return node instanceof Text && offset !== undefined ? { node, offset } : null;
+    }
+
+    /** @param {Text} startNode @param {number} start @param {Text} endNode @param {number} end */
+    function setSelection(startNode, start, endNode, end) {
+      const range = document.createRange();
+      range.setStart(startNode, start);
+      range.setEnd(endNode, end);
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+    }
+
+    /** @param {MouseEvent} event */
+    function extendWordDrag(event) {
+      if (activeTool !== 'select' || !wordDrag || (event.buttons & 1) === 0) return;
+      const hit = document.elementFromPoint(event.clientX, event.clientY);
+      if (!(hit instanceof Element) || !hit.closest('.textLayer span')) return;
+      const caret = caretFromPoint(event.clientX, event.clientY);
+      if (!caret) return;
+
+      const { node: anchorNode, start, end } = wordDrag;
+      if (caret.node === anchorNode && caret.offset >= start && caret.offset <= end) {
+        setSelection(anchorNode, start, anchorNode, end);
+        return;
+      }
+
+      const caretIsBeforeAnchor =
+        caret.node === anchorNode
+          ? caret.offset < start
+          : Boolean(caret.node.compareDocumentPosition(anchorNode) & Node.DOCUMENT_POSITION_FOLLOWING);
+      const movingWord = wordBounds(caret.node, caret.offset, caretIsBeforeAnchor ? -1 : 1);
+      if (!movingWord) return;
+      if (caretIsBeforeAnchor) setSelection(caret.node, movingWord.start, anchorNode, end);
+      else setSelection(anchorNode, start, caret.node, movingWord.end);
+    }
+
+    function endWordDrag() {
+      wordDrag = null;
+    }
 
     /** @param {MouseEvent} event */
     function clearPageSelection(event) {
-      if (!(event.target instanceof Element) || !event.target.closest('.thumbnail-page')) {
+      const target = event.target;
+      if (!(target instanceof Element) || !target.closest('.thumbnail-page')) {
         selectedPages = new Set();
         selectionAnchor = null;
       }
+      const wasStationaryClick =
+        pointerStart !== null &&
+        Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) < 4;
+      pointerStart = null;
+      if (
+        activeTool === 'select' &&
+        wasStationaryClick &&
+        target instanceof Element &&
+        target.closest('.pdf-page') &&
+        !target.closest('.textLayer span')
+      ) {
+        window.getSelection()?.removeAllRanges();
+      }
     }
 
+    /** @param {KeyboardEvent} event */
+    function updateZoomCursor(event) {
+      if (event.key === 'Shift') zoomingOut = event.type === 'keydown';
+    }
+
+    function resetZoomCursor() {
+      zoomingOut = false;
+    }
+
+    document.addEventListener('mousedown', beginWordDrag, true);
+    document.addEventListener('mousedown', rememberPointerStart);
+    document.addEventListener('mousemove', extendWordDrag);
+    document.addEventListener('mouseup', endWordDrag);
     document.addEventListener('click', clearPageSelection);
-    return () => document.removeEventListener('click', clearPageSelection);
+    window.addEventListener('keydown', updateZoomCursor);
+    window.addEventListener('keyup', updateZoomCursor);
+    window.addEventListener('blur', resetZoomCursor);
+    return () => {
+      document.removeEventListener('mousedown', beginWordDrag, true);
+      document.removeEventListener('mousedown', rememberPointerStart);
+      document.removeEventListener('mousemove', extendWordDrag);
+      document.removeEventListener('mouseup', endWordDrag);
+      document.removeEventListener('click', clearPageSelection);
+      window.removeEventListener('keydown', updateZoomCursor);
+      window.removeEventListener('keyup', updateZoomCursor);
+      window.removeEventListener('blur', resetZoomCursor);
+    };
   });
+
+  /** @param {number} value */
+  function clampZoom(value) {
+    return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value));
+  }
+
+  /**
+   * Changes the document scale while keeping the document point beneath the
+   * pointer in the same place in the scroll viewport.
+   * @param {number} requestedZoom
+   * @param {number} clientX
+   * @param {number} clientY
+   */
+  async function zoomAt(requestedZoom, clientX, clientY) {
+    if (!viewer) return;
+    const nextZoom = clampZoom(requestedZoom);
+    if (Math.abs(nextZoom - zoomLevel) < 0.001) return;
+
+    const documentElement = viewer.querySelector('.pdf-document');
+    if (!(documentElement instanceof HTMLElement)) return;
+    const before = documentElement.getBoundingClientRect();
+    const documentX = (clientX - before.left) / zoomLevel;
+    const documentY = (clientY - before.top) / zoomLevel;
+
+    zoomLevel = nextZoom;
+    await tick();
+
+    const after = documentElement.getBoundingClientRect();
+    viewer.scrollLeft += after.left + documentX * zoomLevel - clientX;
+    viewer.scrollTop += after.top + documentY * zoomLevel - clientY;
+    scheduleSharpRender();
+  }
+
+  /** @param {WheelEvent} event */
+  function handleWheel(event) {
+    if (!event.metaKey && !event.ctrlKey) return;
+    event.preventDefault();
+    const deltaScale =
+      event.deltaMode === WheelEvent.DOM_DELTA_LINE
+        ? 16
+        : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+          ? 100
+          : 1;
+    const factor = Math.exp(-event.deltaY * deltaScale * 0.002);
+    zoomAt(zoomLevel * factor, event.clientX, event.clientY);
+  }
+
+  /** @param {PointerEvent} event */
+  function handleViewerPointerDown(event) {
+    if (!viewer) return;
+
+    if (event.button === 0 && activeTool === 'zoom') {
+      event.preventDefault();
+      window.getSelection()?.removeAllRanges();
+      zoomAt(zoomLevel * (event.shiftKey ? 1 / CLICK_ZOOM_FACTOR : CLICK_ZOOM_FACTOR), event.clientX, event.clientY);
+      return;
+    }
+
+    const shouldPan = event.button === 1 || (event.button === 0 && activeTool === 'pan');
+    if (!shouldPan) return;
+    event.preventDefault();
+    window.getSelection()?.removeAllRanges();
+    isPanning = true;
+    panStart = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      scrollLeft: viewer.scrollLeft,
+      scrollTop: viewer.scrollTop
+    };
+    viewer.setPointerCapture(event.pointerId);
+  }
+
+  /** @param {MouseEvent} event */
+  function preventMiddleClick(event) {
+    if (event.button === 1) event.preventDefault();
+  }
+
+  /** @param {PointerEvent} event */
+  function handleViewerPointerMove(event) {
+    if (!viewer || !panStart || event.pointerId !== panStart.pointerId) return;
+    viewer.scrollLeft = panStart.scrollLeft - (event.clientX - panStart.x);
+    viewer.scrollTop = panStart.scrollTop - (event.clientY - panStart.y);
+  }
+
+  /** @param {PointerEvent} event */
+  function endPan(event) {
+    if (!viewer || !panStart || event.pointerId !== panStart.pointerId) return;
+    if (viewer.hasPointerCapture(event.pointerId)) viewer.releasePointerCapture(event.pointerId);
+    panStart = null;
+    isPanning = false;
+  }
+
+  function handleViewerScroll() {
+    if (zoomLevel > 1) scheduleSharpRender(100);
+  }
+
+  /** @param {number} [delay] */
+  function scheduleSharpRender(delay = 160) {
+    if (!pdfReady || !pdfDocument || !viewer) return;
+    if (sharpRenderTimer) clearTimeout(sharpRenderTimer);
+    sharpRenderTimer = setTimeout(() => {
+      sharpRenderTimer = undefined;
+      rerenderVisiblePages();
+    }, delay);
+  }
+
+  function cancelSharpRenders() {
+    sharpRenderGeneration += 1;
+    sharpRenderTasks.forEach((task) => task.cancel());
+    sharpRenderTasks.clear();
+    if (sharpRenderTimer) clearTimeout(sharpRenderTimer);
+    sharpRenderTimer = undefined;
+  }
+
+  async function rerenderVisiblePages() {
+    if (!pdfDocument || !viewer) return;
+    const generation = ++sharpRenderGeneration;
+    sharpRenderTasks.forEach((task) => task.cancel());
+    sharpRenderTasks.clear();
+
+    const targetQuality = Math.max(1, zoomLevel);
+    const viewerRect = viewer.getBoundingClientRect();
+    const shells = [...viewer.querySelectorAll('.pdf-page')].filter((shell) => {
+      if (!(shell instanceof HTMLElement)) return false;
+      if (targetQuality === 1) return true;
+      const rect = shell.getBoundingClientRect();
+      return rect.bottom >= viewerRect.top - viewerRect.height && rect.top <= viewerRect.bottom + viewerRect.height;
+    });
+
+    for (const shell of shells) {
+      if (generation !== sharpRenderGeneration || !pdfDocument) return;
+      const canvas = shell.querySelector('canvas');
+      if (!(shell instanceof HTMLElement) || !(canvas instanceof HTMLCanvasElement)) continue;
+      if (Math.abs(Number(canvas.dataset.renderZoom ?? 0) - targetQuality) < 0.01) continue;
+
+      const pageIndex = [...viewer.querySelectorAll('.pdf-page')].indexOf(shell);
+      if (pageIndex < 0) continue;
+      const page = await pdfDocument.getPage(pageIndex + 1);
+      const baseViewport = page.getViewport({ scale: BASE_PAGE_SCALE });
+      const renderViewport = page.getViewport({ scale: BASE_PAGE_SCALE * targetQuality });
+      const devicePixelRatio = window.devicePixelRatio || 1;
+      const pixelLimitScale = Math.sqrt(MAX_CANVAS_PIXELS / (renderViewport.width * renderViewport.height));
+      const outputScale = Math.min(devicePixelRatio, pixelLimitScale);
+      const nextCanvas = document.createElement('canvas');
+      nextCanvas.width = Math.max(1, Math.floor(renderViewport.width * outputScale));
+      nextCanvas.height = Math.max(1, Math.floor(renderViewport.height * outputScale));
+      const context = nextCanvas.getContext('2d');
+      if (!context) continue;
+
+      const task = page.render({
+        canvas: nextCanvas,
+        canvasContext: context,
+        viewport: renderViewport,
+        transform: outputScale === 1 ? undefined : [outputScale, 0, 0, outputScale, 0, 0]
+      });
+      sharpRenderTasks.add(task);
+
+      try {
+        await task.promise;
+      } catch (error) {
+        if (error instanceof Error && error.name === 'RenderingCancelledException') return;
+        throw error;
+      } finally {
+        sharpRenderTasks.delete(task);
+      }
+
+      if (generation !== sharpRenderGeneration) return;
+      canvas.width = nextCanvas.width;
+      canvas.height = nextCanvas.height;
+      canvas.style.width = `${baseViewport.width}px`;
+      canvas.style.height = `${baseViewport.height}px`;
+      canvas.getContext('2d')?.drawImage(nextCanvas, 0, 0);
+      canvas.dataset.renderZoom = `${targetQuality}`;
+    }
+  }
 
   async function loadPdf() {
     const generation = ++loadGeneration;
     status = 'Rendering PDF…';
+    pdfReady = false;
+    cancelSharpRenders();
     pageCount = 0;
     selectedPages = new Set();
     selectionAnchor = null;
+    textLayerBuilders.forEach((builder) => builder.cancel());
+    textLayerBuilders = [];
+    textLayerAbortController?.abort();
+    textLayerAbortController = new AbortController();
     pdfDocument?.destroy?.();
     pdfDocument = null;
 
     try {
-      const [pdfjs, worker] = await Promise.all([
+      const [pdfjs, pdfViewer, worker] = await Promise.all([
         import('pdfjs-dist'),
+        import('pdfjs-dist/web/pdf_viewer.mjs'),
         import('pdfjs-dist/build/pdf.worker.mjs?url')
       ]);
       pdfjs.GlobalWorkerOptions.workerSrc = worker.default;
@@ -57,18 +392,24 @@
       pageCount = document.numPages;
       await tick();
       await Promise.all([
-        renderPages(document, generation),
+        renderPages(pdfViewer, document, generation),
         renderThumbnails(document, generation)
       ]);
       status = '';
+      pdfReady = true;
+      if (zoomLevel !== 1) scheduleSharpRender(0);
     } catch (error) {
       console.error(error);
       status = 'Could not render this PDF.';
     }
   }
 
-  /** @param {import('pdfjs-dist').PDFDocumentProxy} document @param {number} generation */
-  async function renderPages(document, generation) {
+  /**
+   * @param {typeof import('pdfjs-dist/web/pdf_viewer.mjs')} pdfViewer
+   * @param {import('pdfjs-dist').PDFDocumentProxy} document
+   * @param {number} generation
+   */
+  async function renderPages(pdfViewer, document, generation) {
     const shells = viewer?.querySelectorAll('.pdf-page') ?? [];
     for (let index = 0; index < shells.length; index += 1) {
       if (generation !== loadGeneration) return;
@@ -76,25 +417,102 @@
       const canvas = shell.querySelector('canvas');
       if (!(shell instanceof HTMLElement) || !(canvas instanceof HTMLCanvasElement)) continue;
       const page = await document.getPage(index + 1);
-      const viewport = page.getViewport({ scale: 1.35 });
+      const viewport = page.getViewport({ scale: BASE_PAGE_SCALE });
       const outputScale = window.devicePixelRatio || 1;
       const context = canvas.getContext('2d');
       if (!context) continue;
 
       shell.style.width = `${viewport.width}px`;
       shell.style.height = `${viewport.height}px`;
+      shell.style.setProperty('--total-scale-factor', `${viewport.scale}`);
+      shell.style.setProperty('--scale-round-x', '1px');
+      shell.style.setProperty('--scale-round-y', '1px');
       canvas.style.width = `${viewport.width}px`;
       canvas.style.height = `${viewport.height}px`;
       canvas.width = Math.floor(viewport.width * outputScale);
       canvas.height = Math.floor(viewport.height * outputScale);
+      canvas.dataset.renderZoom = '1';
+      const textLayerBuilder = new pdfViewer.TextLayerBuilder({
+        pdfPage: page,
+        abortSignal: textLayerAbortController?.signal,
+        onAppend: (/** @type {HTMLDivElement} */ textLayerElement) => shell.append(textLayerElement)
+      });
+      textLayerBuilders.push(textLayerBuilder);
 
-      await page.render({
-        canvas,
-        canvasContext: context,
-        viewport,
-        transform: outputScale === 1 ? undefined : [outputScale, 0, 0, outputScale, 0, 0]
-      }).promise;
+      await Promise.all([
+        page.render({
+          canvas,
+          canvasContext: context,
+          viewport,
+          transform: outputScale === 1 ? undefined : [outputScale, 0, 0, outputScale, 0, 0]
+        }).promise,
+        textLayerBuilder.render({ viewport, images: /** @type {any} */ (null) })
+      ]);
+      mergeAdjacentTextSpans(textLayerBuilder.div);
     }
+  }
+
+  /**
+   * Skia-generated PDFs can split a visual word into several marked-content
+   * spans. PDF.js scales each span independently, which exposes those internal
+   * boundaries in the browser selection highlight. Join only spans that touch
+   * on the same baseline and share the same font metrics.
+   * @param {HTMLDivElement} textLayer
+   */
+  function mergeAdjacentTextSpans(textLayer) {
+    const spans = /** @type {HTMLSpanElement[]} */ (
+      [...textLayer.querySelectorAll('span:not(.markedContent)')].filter(
+        (span) => span instanceof HTMLSpanElement && span.textContent
+      )
+    );
+    /** @type {HTMLSpanElement[]} */
+    let run = [];
+
+    function mergeRun() {
+      if (run.length < 2) {
+        run = [];
+        return;
+      }
+
+      const first = run[0];
+      const firstRect = first.getBoundingClientRect();
+      const lastRect = run[run.length - 1].getBoundingClientRect();
+      const targetWidth = lastRect.right - firstRect.left;
+      first.textContent = run.map((span) => span.textContent).join('');
+      first.style.setProperty('--scale-x', '1');
+      run.slice(1).forEach((span) => span.remove());
+
+      const naturalWidth = first.getBoundingClientRect().width;
+      if (naturalWidth > 0) {
+        first.style.setProperty('--scale-x', `${targetWidth / naturalWidth}`);
+      }
+      run = [];
+    }
+
+    for (const span of spans) {
+      if (run.length === 0) {
+        run = [span];
+        continue;
+      }
+
+      const previous = run[run.length - 1];
+      const previousRect = previous.getBoundingClientRect();
+      const rect = span.getBoundingClientRect();
+      const previousStyle = getComputedStyle(previous);
+      const style = getComputedStyle(span);
+      const sameLine = Math.abs(rect.top - previousRect.top) < 0.75;
+      const touching = Math.abs(rect.left - previousRect.right) < 1.5;
+      const sameFont =
+        style.fontFamily === previousStyle.fontFamily &&
+        style.getPropertyValue('--font-height') === previousStyle.getPropertyValue('--font-height');
+
+      if (sameLine && touching && sameFont) run.push(span);
+      else {
+        mergeRun();
+        run = [span];
+      }
+    }
+    mergeRun();
   }
 
   /** @param {import('pdfjs-dist').PDFDocumentProxy} document @param {number} generation */
@@ -148,6 +566,9 @@
 
   onDestroy(() => {
     loadGeneration += 1;
+    cancelSharpRenders();
+    textLayerBuilders.forEach((builder) => builder.cancel());
+    textLayerAbortController?.abort();
     pdfDocument?.destroy?.();
   });
 </script>
@@ -173,14 +594,32 @@
 </aside>
 
 <section class="pdf-workspace" aria-label={`PDF editor for ${file.name}`}>
-  <div class="pdf-viewer" bind:this={viewer}>
-    {#each Array(pageCount) as _, index}
-      <div class="pdf-page" aria-label={`Page ${index + 1}`}>
-        <canvas></canvas>
-      </div>
-    {/each}
+  <div
+    class:pan-mode={activeTool === 'pan'}
+    class:panning={isPanning}
+    class:zoom-mode={activeTool === 'zoom'}
+    class:zoom-out={zoomingOut}
+    class="pdf-viewer"
+    role="region"
+    aria-label="Document pages"
+    bind:this={viewer}
+    onwheel={handleWheel}
+    onscroll={handleViewerScroll}
+    onauxclick={preventMiddleClick}
+    onpointerdown={handleViewerPointerDown}
+    onpointermove={handleViewerPointerMove}
+    onpointerup={endPan}
+    onpointercancel={endPan}
+  >
+    <div class="pdf-document" style:--zoom-level={zoomLevel}>
+      {#each Array(pageCount) as _, index}
+        <div class="pdf-page" aria-label={`Page ${index + 1}`}>
+          <canvas></canvas>
+        </div>
+      {/each}
+    </div>
   </div>
-  <EditorToolbar />
+  <EditorToolbar bind:activeTool />
 </section>
 
 <style>
@@ -288,11 +727,39 @@
   }
 
   .pdf-viewer {
+    box-sizing: border-box;
     width: 100%;
     height: 100%;
     padding: 36px 48px 80px;
     overflow: auto;
     scrollbar-width: none;
+  }
+
+  .pdf-document {
+    width: max-content;
+    min-width: 100%;
+    zoom: var(--zoom-level);
+  }
+
+  .pdf-viewer.pan-mode {
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+  }
+
+  .pdf-viewer.panning {
+    cursor: grabbing;
+    user-select: none;
+  }
+
+  .pdf-viewer.zoom-mode {
+    cursor: zoom-in;
+    touch-action: none;
+    user-select: none;
+  }
+
+  .pdf-viewer.zoom-mode.zoom-out {
+    cursor: zoom-out;
   }
 
   .pdf-viewer::-webkit-scrollbar {
@@ -307,7 +774,82 @@
     box-shadow: 0 5px 22px rgba(0, 0, 0, 0.13);
   }
 
+  .pdf-viewer.pan-mode :global(.textLayer span),
+  .pdf-viewer.zoom-mode :global(.textLayer span),
+  .pdf-viewer.panning :global(.textLayer span) {
+    cursor: inherit;
+    pointer-events: none;
+    user-select: none;
+  }
+
   canvas {
     display: block;
+  }
+
+  :global(.textLayer) {
+    --min-font-size: 1;
+    --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+    --min-font-size-inv: calc(1 / var(--min-font-size));
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    overflow: clip;
+    line-height: 1;
+    text-align: initial;
+    text-size-adjust: none;
+    transform-origin: 0 0;
+    forced-color-adjust: none;
+    caret-color: CanvasText;
+    pointer-events: none;
+  }
+
+  :global(.textLayer span),
+  :global(.textLayer br) {
+    position: absolute;
+    color: transparent;
+    white-space: pre;
+    cursor: text;
+    pointer-events: auto;
+    transform-origin: 0 0;
+  }
+
+  :global(.textLayer > :not(.markedContent)),
+  :global(.textLayer .markedContent span:not(.markedContent)) {
+    z-index: 1;
+    --font-height: 0;
+    --scale-x: 1;
+    --rotate: 0deg;
+    font-size: calc(var(--text-scale-factor) * var(--font-height));
+    transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+  }
+
+  :global(.textLayer .markedContent) {
+    display: contents;
+  }
+
+  :global(.textLayer span[role='img']) {
+    cursor: default;
+    user-select: none;
+  }
+
+  :global(.textLayer ::selection) {
+    background: color-mix(in srgb, AccentColor, transparent 75%);
+  }
+
+  :global(.textLayer br::selection) {
+    background: transparent;
+  }
+
+  :global(.textLayer .endOfContent) {
+    position: absolute;
+    z-index: 0;
+    display: block;
+    inset: 100% 0 0;
+    cursor: default;
+    user-select: none;
+  }
+
+  :global(.textLayer.selecting .endOfContent) {
+    top: 0;
   }
 </style>

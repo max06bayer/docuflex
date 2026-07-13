@@ -88,7 +88,8 @@
   const nonInvertedTools = new Set(['select', 'image', 'blackout', 'whiteout', 'measure', 'highlight']);
   const lightSelectionTools = new Set(['blackout', 'whiteout']);
 
-  let activeTool = 'select';
+  /** @type {string} */
+  export let activeTool = 'select';
   let groupSelections = Object.fromEntries(groups.map((group) => [group.id, group.primary]));
   /** @type {string | null} */
   let expandedGroup = null;
@@ -98,6 +99,11 @@
     activeTool = tool;
     groupSelections = { ...groupSelections, [groupId]: tool };
     expandedGroup = null;
+  }
+
+  /** @param {{ id: string; tools: { id: string; label: string }[] }} group */
+  function selectedTool(group) {
+    return group.tools.find((tool) => tool.id === groupSelections[group.id]) ?? group.tools[0];
   }
 
   /** @param {MouseEvent} event @param {string} groupId */
@@ -165,9 +171,9 @@
           class:light-selection={lightSelectionTools.has(groupSelections[group.id])}
           class="primary-tool"
           style="corner-shape: squircle;"
-          aria-label={group.tools[0].label}
+          aria-label={selectedTool(group).label}
           aria-pressed={activeTool === groupSelections[group.id]}
-          title={group.tools[0].label}
+          title={selectedTool(group).label}
           onclick={() => selectTool(group.id, groupSelections[group.id])}
         >
           <img
