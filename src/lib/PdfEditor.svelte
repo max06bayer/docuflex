@@ -4,6 +4,7 @@
 
   /** @typedef {{ x: number; y: number; pressure: number }} StrokePoint */
   /** @typedef {{ id: number; type: 'marker' | 'pen'; points: StrokePoint[] }} AnnotationStroke */
+  /** @typedef {{ id: number; type: 'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line'; x: number; y: number; width: number; height: number; rotation: number }} AnnotationShape */
 
   /** @type {File} */
   export let file;
@@ -39,6 +40,8 @@
   let sharpRenderTasks = new Set();
   /** @type {Record<number, AnnotationStroke[]>} */
   let annotations = {};
+  /** @type {Record<number, AnnotationShape[]>} */
+  let shapes = {};
   /** @type {Record<number, { width: number; height: number }>} */
   let pageSizes = {};
   /** @type {{ pointerId: number; pageIndex: number; stroke: AnnotationStroke } | null} */
@@ -52,6 +55,14 @@
   let eraserCursorX = 0;
   let eraserCursorY = 0;
   let eraserCursorSize = 34;
+  /** @type {{ pageIndex: number; id: number } | null} */
+  let selectedShape = null;
+  /** @type {{ pointerId: number; pageIndex: number; id: number; start: StrokePoint } | null} */
+  let drawingShape = null;
+  /** @type {null | { pointerId: number; kind: 'move'; pageIndex: number; id: number; start: StrokePoint; initial: AnnotationShape } | { pointerId: number; kind: 'resize'; pageIndex: number; id: number; handleX: -1 | 0 | 1; handleY: -1 | 0 | 1; initial: AnnotationShape } | { pointerId: number; kind: 'rotate'; pageIndex: number; id: number; initial: AnnotationShape; startAngle: number } | { pointerId: number; kind: 'line-endpoint'; pageIndex: number; id: number; endpoint: 'start' | 'end'; initial: AnnotationShape }} */
+  let shapeInteraction = null;
+  /** @type {{ pageIndex: number; x: number | null; y: number | null; shape: AnnotationShape } | null} */
+  let shapeGuides = null;
 
   const BASE_PAGE_SCALE = 1.35;
   const MIN_ZOOM = 0.5;
@@ -59,6 +70,9 @@
   const CLICK_ZOOM_FACTOR = 1.25;
   const MAX_CANVAS_PIXELS = 24_000_000;
   const ERASER_RADIUS = 17;
+  const SHAPE_TOOLS = new Set(['triangle', 'rectangle', 'circle', 'check', 'cross', 'arrow', 'line']);
+  const LINE_SHAPE_TOOLS = new Set(['arrow', 'line']);
+  const MIN_SHAPE_SIZE = 8;
 
   $: if (activeTool !== 'eraser') eraserCursorVisible = false;
 
@@ -415,6 +429,7 @@
     document.addEventListener('dragstart', suppressProductionBlankDrag);
     document.addEventListener('click', clearPageSelection);
     window.addEventListener('keydown', updateZoomCursor);
+    window.addEventListener('keydown', handleShapeKeyboard);
     window.addEventListener('keyup', updateZoomCursor);
     window.addEventListener('blur', resetZoomCursor);
     window.addEventListener('blur', endTextSelectionCursor);
@@ -431,6 +446,7 @@
       document.removeEventListener('dragstart', suppressProductionBlankDrag);
       document.removeEventListener('click', clearPageSelection);
       window.removeEventListener('keydown', updateZoomCursor);
+      window.removeEventListener('keydown', handleShapeKeyboard);
       window.removeEventListener('keyup', updateZoomCursor);
       window.removeEventListener('blur', resetZoomCursor);
       window.removeEventListener('blur', endTextSelectionCursor);
@@ -518,6 +534,345 @@
       y: Math.max(0, Math.min(height, ((event.clientY - rect.top) / rect.height) * height)),
       pressure: event.pressure > 0 ? event.pressure : 0.5
     };
+  }
+
+  /** @param {number} pageIndex @param {number} id */
+  function findShape(pageIndex, id) {
+    return (shapes[pageIndex] ?? []).find((shape) => shape.id === id) ?? null;
+  }
+
+  /** @param {number} pageIndex @param {AnnotationShape} shape */
+  function replaceShape(pageIndex, shape) {
+    shapes = {
+      ...shapes,
+      [pageIndex]: (shapes[pageIndex] ?? []).map((candidate) =>
+        candidate.id === shape.id ? shape : candidate
+      )
+    };
+  }
+
+  /** @param {number} value @param {number} minimum @param {number} maximum */
+  function clamp(value, minimum, maximum) {
+    return Math.max(minimum, Math.min(maximum, value));
+  }
+
+  /** @param {number} x @param {number} y @param {number} angle */
+  function rotateVector(x, y, angle) {
+    const cosine = Math.cos(angle);
+    const sine = Math.sin(angle);
+    return { x: x * cosine - y * sine, y: x * sine + y * cosine };
+  }
+
+  /** @param {AnnotationShape} shape */
+  function shapeCenter(shape) {
+    return { x: shape.x + shape.width / 2, y: shape.y + shape.height / 2 };
+  }
+
+  /** @param {AnnotationShape} shape */
+  function isLinearShape(shape) {
+    return LINE_SHAPE_TOOLS.has(shape.type);
+  }
+
+  /** @param {AnnotationShape} shape */
+  function linearEndpoints(shape) {
+    const center = shapeCenter(shape);
+    const angle = (shape.rotation * Math.PI) / 180;
+    const half = rotateVector(shape.width / 2, 0, angle);
+    return {
+      start: { x: center.x - half.x, y: center.y - half.y },
+      end: { x: center.x + half.x, y: center.y + half.y }
+    };
+  }
+
+  /** @param {AnnotationShape} shape @param {{ width: number; height: number }} pageSize */
+  function shapeGuideSegments(shape, pageSize) {
+    if (isLinearShape(shape)) {
+      const endpoints = Object.values(linearEndpoints(shape));
+      const horizontalCandidates = endpoints.flatMap((point) => [
+        { distance: point.x, edge: 0, point },
+        { distance: pageSize.width - point.x, edge: pageSize.width, point }
+      ]);
+      const verticalCandidates = endpoints.flatMap((point) => [
+        { distance: point.y, edge: 0, point },
+        { distance: pageSize.height - point.y, edge: pageSize.height, point }
+      ]);
+      const horizontal = horizontalCandidates.sort((left, right) => left.distance - right.distance)[0];
+      const vertical = verticalCandidates.sort((left, right) => left.distance - right.distance)[0];
+      return {
+        horizontal: { y: horizontal.point.y, edge: horizontal.edge, shape: horizontal.point.x },
+        vertical: { x: vertical.point.x, edge: vertical.edge, shape: vertical.point.y }
+      };
+    }
+    const center = shapeCenter(shape);
+    return {
+      horizontal: {
+        y: center.y,
+        edge: center.x < pageSize.width / 2 ? 0 : pageSize.width,
+        shape: center.x < pageSize.width / 2 ? shape.x : shape.x + shape.width
+      },
+      vertical: {
+        x: center.x,
+        edge: center.y < pageSize.height / 2 ? 0 : pageSize.height,
+        shape: center.y < pageSize.height / 2 ? shape.y : shape.y + shape.height
+      }
+    };
+  }
+
+  /** @param {AnnotationShape} shape @param {{ x: number; y: number }} start @param {{ x: number; y: number }} end */
+  function shapeFromEndpoints(shape, start, end) {
+    const width = Math.max(0.01, Math.hypot(end.x - start.x, end.y - start.y));
+    const center = { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 };
+    return {
+      ...shape,
+      x: center.x - width / 2,
+      y: center.y - 0.005,
+      width,
+      height: 0.01,
+      rotation: (Math.atan2(end.y - start.y, end.x - start.x) * 180) / Math.PI
+    };
+  }
+
+  /** @param {{ x: number; y: number }} fixed @param {{ x: number; y: number }} moving */
+  function constrainLineAngle(fixed, moving) {
+    const distance = Math.hypot(moving.x - fixed.x, moving.y - fixed.y);
+    const angle = Math.atan2(moving.y - fixed.y, moving.x - fixed.x);
+    const snapped = Math.round(angle / (Math.PI / 4)) * (Math.PI / 4);
+    return { x: fixed.x + Math.cos(snapped) * distance, y: fixed.y + Math.sin(snapped) * distance };
+  }
+
+  /** @param {PointerEvent} event */
+  function shapeTarget(event) {
+    const target = event.target;
+    if (!(target instanceof Element)) return null;
+    const element = target.closest('[data-shape-id]');
+    if (!(element instanceof SVGElement)) return null;
+    const id = Number(element.dataset.shapeId);
+    const pageIndex = Number(element.dataset.shapePage);
+    return Number.isInteger(id) && Number.isInteger(pageIndex) ? { id, pageIndex, element } : null;
+  }
+
+  /** @param {AnnotationShape} shape @param {{ width: number; height: number }} pageSize */
+  function snapMovedShape(shape, pageSize) {
+    const tolerance = 6 / zoomLevel;
+    const xCandidates = [
+      { value: shape.x, target: 0 },
+      { value: shape.x + shape.width / 2, target: pageSize.width / 2 },
+      { value: shape.x + shape.width, target: pageSize.width }
+    ];
+    const yCandidates = [
+      { value: shape.y, target: 0 },
+      { value: shape.y + shape.height / 2, target: pageSize.height / 2 },
+      { value: shape.y + shape.height, target: pageSize.height }
+    ];
+    const xSnap = xCandidates
+      .map((candidate) => ({ ...candidate, distance: Math.abs(candidate.value - candidate.target) }))
+      .sort((left, right) => left.distance - right.distance)[0];
+    const ySnap = yCandidates
+      .map((candidate) => ({ ...candidate, distance: Math.abs(candidate.value - candidate.target) }))
+      .sort((left, right) => left.distance - right.distance)[0];
+    const next = { ...shape };
+    let guideX = null;
+    let guideY = null;
+    if (xSnap.distance <= tolerance) {
+      next.x += xSnap.target - xSnap.value;
+      guideX = xSnap.target;
+    }
+    if (ySnap.distance <= tolerance) {
+      next.y += ySnap.target - ySnap.value;
+      guideY = ySnap.target;
+    }
+    next.x = clamp(next.x, 0, Math.max(0, pageSize.width - next.width));
+    next.y = clamp(next.y, 0, Math.max(0, pageSize.height - next.height));
+    return { shape: next, x: guideX, y: guideY };
+  }
+
+  /** @param {KeyboardEvent} event */
+  function handleShapeKeyboard(event) {
+    if (!selectedShape) return;
+    const target = event.target;
+    if (target instanceof HTMLElement && (target.matches('input, textarea, select') || target.isContentEditable)) return;
+    const shape = findShape(selectedShape.pageIndex, selectedShape.id);
+    if (!shape) return;
+    if (event.key === 'Escape') {
+      selectedShape = null;
+      shapeGuides = null;
+      return;
+    }
+    if (event.key === 'Backspace' || event.key === 'Delete') {
+      event.preventDefault();
+      shapes = {
+        ...shapes,
+        [selectedShape.pageIndex]: (shapes[selectedShape.pageIndex] ?? []).filter(
+          (candidate) => candidate.id !== selectedShape?.id
+        )
+      };
+      selectedShape = null;
+      shapeGuides = null;
+      return;
+    }
+    const direction = {
+      ArrowLeft: { x: -1, y: 0 },
+      ArrowRight: { x: 1, y: 0 },
+      ArrowUp: { x: 0, y: -1 },
+      ArrowDown: { x: 0, y: 1 }
+    }[event.key];
+    if (!direction) return;
+    event.preventDefault();
+    const pageSize = pageSizes[selectedShape.pageIndex];
+    const amount = event.shiftKey ? 10 : 1;
+    replaceShape(selectedShape.pageIndex, {
+      ...shape,
+      x: clamp(shape.x + direction.x * amount, 0, Math.max(0, pageSize.width - shape.width)),
+      y: clamp(shape.y + direction.y * amount, 0, Math.max(0, pageSize.height - shape.height))
+    });
+  }
+
+  /** @param {PointerEvent} event @param {HTMLElement} shell @param {number} pageIndex */
+  function beginShapeCreation(event, shell, pageIndex) {
+    const start = pointOnPage(event, shell);
+    const shape = {
+      id: nextAnnotationId++,
+      type: /** @type {'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line'} */ (activeTool),
+      x: start.x,
+      y: start.y,
+      width: 0.01,
+      height: 0.01,
+      rotation: 0
+    };
+    shapes = { ...shapes, [pageIndex]: [...(shapes[pageIndex] ?? []), shape] };
+    selectedShape = { pageIndex, id: shape.id };
+    drawingShape = { pointerId: event.pointerId, pageIndex, id: shape.id, start };
+    shapeGuides = { pageIndex, x: null, y: null, shape };
+  }
+
+  /** @param {PointerEvent} event @param {HTMLElement} shell */
+  function updateShapeCreation(event, shell) {
+    if (!drawingShape) return;
+    const current = pointOnPage(event, shell);
+    const start = drawingShape.start;
+    const existingShape = findShape(drawingShape.pageIndex, drawingShape.id);
+    if (!existingShape) return;
+    if (isLinearShape(existingShape)) {
+      const end = event.shiftKey ? constrainLineAngle(start, current) : current;
+      const next = shapeFromEndpoints(existingShape, start, end);
+      replaceShape(drawingShape.pageIndex, next);
+      shapeGuides = { pageIndex: drawingShape.pageIndex, x: null, y: null, shape: next };
+      return;
+    }
+    let deltaX = current.x - start.x;
+    let deltaY = current.y - start.y;
+    if (event.shiftKey) {
+      const size = Math.max(Math.abs(deltaX), Math.abs(deltaY));
+      deltaX = Math.sign(deltaX || 1) * size;
+      deltaY = Math.sign(deltaY || 1) * size;
+    }
+    const x1 = event.altKey ? start.x - deltaX : start.x;
+    const y1 = event.altKey ? start.y - deltaY : start.y;
+    const x2 = event.altKey ? start.x + deltaX : start.x + deltaX;
+    const y2 = event.altKey ? start.y + deltaY : start.y + deltaY;
+    const pageSize = pageSizes[drawingShape.pageIndex];
+    const shape = existingShape;
+    if (!shape || !pageSize) return;
+    const next = {
+      ...shape,
+      x: clamp(Math.min(x1, x2), 0, pageSize.width),
+      y: clamp(Math.min(y1, y2), 0, pageSize.height),
+      width: Math.max(0.01, Math.min(pageSize.width, Math.max(x1, x2)) - clamp(Math.min(x1, x2), 0, pageSize.width)),
+      height: Math.max(0.01, Math.min(pageSize.height, Math.max(y1, y2)) - clamp(Math.min(y1, y2), 0, pageSize.height))
+    };
+    replaceShape(drawingShape.pageIndex, next);
+    shapeGuides = {
+      pageIndex: drawingShape.pageIndex,
+      x: Math.abs(next.x + next.width / 2 - pageSize.width / 2) <= 6 / zoomLevel ? pageSize.width / 2 : null,
+      y: Math.abs(next.y + next.height / 2 - pageSize.height / 2) <= 6 / zoomLevel ? pageSize.height / 2 : null,
+      shape: next
+    };
+  }
+
+  /** @param {PointerEvent} event @param {HTMLElement} shell */
+  function updateShapeTransform(event, shell) {
+    if (!shapeInteraction) return;
+    const point = pointOnPage(event, shell);
+    const interaction = shapeInteraction;
+    const pageSize = pageSizes[interaction.pageIndex];
+    if (!pageSize) return;
+
+    if (interaction.kind === 'move') {
+      const proposed = {
+        ...interaction.initial,
+        x: interaction.initial.x + point.x - interaction.start.x,
+        y: interaction.initial.y + point.y - interaction.start.y
+      };
+      const snapped = event.metaKey || event.ctrlKey
+        ? { shape: proposed, x: null, y: null }
+        : snapMovedShape(proposed, pageSize);
+      replaceShape(interaction.pageIndex, snapped.shape);
+      shapeGuides = { pageIndex: interaction.pageIndex, x: snapped.x, y: snapped.y, shape: snapped.shape };
+      return;
+    }
+
+    if (interaction.kind === 'line-endpoint') {
+      const endpoints = linearEndpoints(interaction.initial);
+      if (interaction.endpoint === 'start') {
+        const start = event.shiftKey ? constrainLineAngle(endpoints.end, point) : point;
+        const next = shapeFromEndpoints(interaction.initial, start, endpoints.end);
+        replaceShape(interaction.pageIndex, next);
+        shapeGuides = { pageIndex: interaction.pageIndex, x: null, y: null, shape: next };
+      } else {
+        const end = event.shiftKey ? constrainLineAngle(endpoints.start, point) : point;
+        const next = shapeFromEndpoints(interaction.initial, endpoints.start, end);
+        replaceShape(interaction.pageIndex, next);
+        shapeGuides = { pageIndex: interaction.pageIndex, x: null, y: null, shape: next };
+      }
+      return;
+    }
+
+    if (interaction.kind === 'rotate') {
+      const center = shapeCenter(interaction.initial);
+      const pointerAngle = Math.atan2(point.y - center.y, point.x - center.x);
+      let rotation = interaction.initial.rotation + ((pointerAngle - interaction.startAngle) * 180) / Math.PI;
+      if (event.shiftKey) rotation = Math.round(rotation / 15) * 15;
+      const next = { ...interaction.initial, rotation: ((rotation % 360) + 360) % 360 };
+      replaceShape(interaction.pageIndex, next);
+      shapeGuides = { pageIndex: interaction.pageIndex, x: null, y: null, shape: next };
+      return;
+    }
+
+    const initial = interaction.initial;
+    const center = shapeCenter(initial);
+    const angle = (initial.rotation * Math.PI) / 180;
+    const localPointer = rotateVector(point.x - center.x, point.y - center.y, -angle);
+    let width = interaction.handleX === 0 ? initial.width : Math.max(MIN_SHAPE_SIZE, Math.abs(localPointer.x) * (event.altKey ? 2 : 1) + (event.altKey ? 0 : initial.width / 2));
+    let height = interaction.handleY === 0 ? initial.height : Math.max(MIN_SHAPE_SIZE, Math.abs(localPointer.y) * (event.altKey ? 2 : 1) + (event.altKey ? 0 : initial.height / 2));
+
+    if (!event.altKey) {
+      if (interaction.handleX !== 0) width = Math.max(MIN_SHAPE_SIZE, interaction.handleX * localPointer.x + initial.width / 2);
+      if (interaction.handleY !== 0) height = Math.max(MIN_SHAPE_SIZE, interaction.handleY * localPointer.y + initial.height / 2);
+    }
+    if (event.shiftKey && interaction.handleX !== 0 && interaction.handleY !== 0) {
+      const ratio = initial.width / initial.height;
+      if (width / height > ratio) height = width / ratio;
+      else width = height * ratio;
+    }
+
+    let nextCenter = center;
+    if (!event.altKey) {
+      const localCenterShift = {
+        x: interaction.handleX === 0 ? 0 : interaction.handleX * (width - initial.width) / 2,
+        y: interaction.handleY === 0 ? 0 : interaction.handleY * (height - initial.height) / 2
+      };
+      const worldShift = rotateVector(localCenterShift.x, localCenterShift.y, angle);
+      nextCenter = { x: center.x + worldShift.x, y: center.y + worldShift.y };
+    }
+    const next = {
+      ...initial,
+      x: nextCenter.x - width / 2,
+      y: nextCenter.y - height / 2,
+      width,
+      height
+    };
+    replaceShape(interaction.pageIndex, next);
+    shapeGuides = { pageIndex: interaction.pageIndex, x: null, y: null, shape: next };
   }
 
   /** @param {StrokePoint[]} points @param {StrokePoint} point @param {number} [spacing] */
@@ -640,6 +995,63 @@
   function handleViewerPointerDown(event) {
     if (!viewer) return;
 
+    const shapeHit = shapeTarget(event);
+    if (event.button === 0 && shapeHit && activeTool === 'select') {
+      const shape = findShape(shapeHit.pageIndex, shapeHit.id);
+      const pages = [...viewer.querySelectorAll('.pdf-page')];
+      const shell = pages[shapeHit.pageIndex];
+      if (!shape || !(shell instanceof HTMLElement)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      window.getSelection()?.removeAllRanges();
+      selectedShape = { pageIndex: shapeHit.pageIndex, id: shapeHit.id };
+      const point = pointOnPage(event, shell);
+      const handle = shapeHit.element.dataset.shapeHandle;
+      const endpoint = shapeHit.element.dataset.shapeEndpoint;
+      if (endpoint === 'start' || endpoint === 'end') {
+        shapeInteraction = {
+          pointerId: event.pointerId,
+          kind: 'line-endpoint',
+          pageIndex: shapeHit.pageIndex,
+          id: shape.id,
+          endpoint,
+          initial: { ...shape }
+        };
+      } else if (shapeHit.element.dataset.shapeRotate !== undefined) {
+        const center = shapeCenter(shape);
+        shapeInteraction = {
+          pointerId: event.pointerId,
+          kind: 'rotate',
+          pageIndex: shapeHit.pageIndex,
+          id: shape.id,
+          initial: { ...shape },
+          startAngle: Math.atan2(point.y - center.y, point.x - center.x)
+        };
+      } else if (handle) {
+        const [handleX, handleY] = handle.split(',').map(Number);
+        shapeInteraction = {
+          pointerId: event.pointerId,
+          kind: 'resize',
+          pageIndex: shapeHit.pageIndex,
+          id: shape.id,
+          handleX: /** @type {-1 | 0 | 1} */ (handleX),
+          handleY: /** @type {-1 | 0 | 1} */ (handleY),
+          initial: { ...shape }
+        };
+      } else {
+        shapeInteraction = {
+          pointerId: event.pointerId,
+          kind: 'move',
+          pageIndex: shapeHit.pageIndex,
+          id: shape.id,
+          start: point,
+          initial: { ...shape }
+        };
+      }
+      viewer.setPointerCapture(event.pointerId);
+      return;
+    }
+
     if (event.button === 0 && activeTool === 'zoom') {
       event.preventDefault();
       window.getSelection()?.removeAllRanges();
@@ -648,6 +1060,23 @@
     }
 
     const pageHit = pageAtPoint(event.clientX, event.clientY);
+    if (event.button === 0 && activeTool === 'select' && !pageHit) {
+      selectedShape = null;
+      shapeGuides = null;
+    }
+    if (event.button === 0 && pageHit && SHAPE_TOOLS.has(activeTool)) {
+      event.preventDefault();
+      window.getSelection()?.removeAllRanges();
+      beginShapeCreation(event, pageHit.shell, pageHit.pageIndex);
+      viewer.setPointerCapture(event.pointerId);
+      return;
+    }
+
+    if (event.button === 0 && activeTool === 'select' && pageHit && !shapeHit) {
+      selectedShape = null;
+      shapeGuides = null;
+    }
+
     if (event.button === 0 && pageHit && (activeTool === 'marker' || activeTool === 'pen')) {
       event.preventDefault();
       window.getSelection()?.removeAllRanges();
@@ -699,6 +1128,13 @@
   /** @param {PointerEvent} event */
   function handleViewerPointerMove(event) {
     updateEraserCursor(event);
+    if (viewer && drawingShape && event.pointerId === drawingShape.pointerId) {
+      const shell = viewer.querySelectorAll('.pdf-page')[drawingShape.pageIndex];
+      if (shell instanceof HTMLElement) updateShapeCreation(event, shell);
+    } else if (viewer && shapeInteraction && event.pointerId === shapeInteraction.pointerId) {
+      const shell = viewer.querySelectorAll('.pdf-page')[shapeInteraction.pageIndex];
+      if (shell instanceof HTMLElement) updateShapeTransform(event, shell);
+    }
     handleAnnotationPointerMove(event);
     if (!viewer || !panStart || event.pointerId !== panStart.pointerId) return;
     viewer.scrollLeft = panStart.scrollLeft - (event.clientX - panStart.x);
@@ -744,6 +1180,36 @@
   /** @param {PointerEvent} event */
   function endPan(event) {
     if (!viewer) return;
+    if (drawingShape && event.pointerId === drawingShape.pointerId) {
+      const shell = viewer.querySelectorAll('.pdf-page')[drawingShape.pageIndex];
+      if (shell instanceof HTMLElement) updateShapeCreation(event, shell);
+      const shape = findShape(drawingShape.pageIndex, drawingShape.id);
+      const pageSize = pageSizes[drawingShape.pageIndex];
+      if (shape && pageSize && isLinearShape(shape) && shape.width < 3) {
+        const end = {
+          x: Math.min(pageSize.width, drawingShape.start.x + Math.min(120, pageSize.width / 4)),
+          y: drawingShape.start.y
+        };
+        replaceShape(drawingShape.pageIndex, shapeFromEndpoints(shape, drawingShape.start, end));
+      } else if (shape && pageSize && !isLinearShape(shape) && (shape.width < 3 || shape.height < 3)) {
+        const preferredSize = shape.type === 'check' || shape.type === 'cross' ? 48 : 120;
+        const defaultSize = Math.min(preferredSize, pageSize.width / 4, pageSize.height / 4);
+        replaceShape(drawingShape.pageIndex, {
+          ...shape,
+          x: clamp(drawingShape.start.x, 0, pageSize.width - defaultSize),
+          y: clamp(drawingShape.start.y, 0, pageSize.height - defaultSize),
+          width: defaultSize,
+          height: defaultSize
+        });
+      }
+      drawingShape = null;
+      shapeGuides = null;
+      activeTool = 'select';
+    }
+    if (shapeInteraction && event.pointerId === shapeInteraction.pointerId) {
+      shapeInteraction = null;
+      shapeGuides = null;
+    }
     if (drawingStroke && event.pointerId === drawingStroke.pointerId) {
       if (drawingStroke.stroke.type === 'marker') {
         drawingStroke.stroke = {
@@ -860,6 +1326,11 @@
     pdfReady = false;
     cancelSharpRenders();
     annotations = {};
+    shapes = {};
+    selectedShape = null;
+    drawingShape = null;
+    shapeInteraction = null;
+    shapeGuides = null;
     pageSizes = {};
     pageCount = 0;
     selectedPages = new Set();
@@ -1078,10 +1549,10 @@
   }
 
   function exportableAnnotations() {
-    return Object.entries(annotations).flatMap(([page, strokes]) => {
+    const strokes = Object.entries(annotations).flatMap(([page, pageStrokes]) => {
       const pageSize = pageSizes[Number(page)];
       if (!pageSize?.width || !pageSize.height) return [];
-      return strokes
+      return pageStrokes
         .filter((stroke) => stroke.points.length > 0)
         .map((stroke) => ({
           page: Number(page),
@@ -1092,6 +1563,24 @@
           }))
         }));
     });
+    const exportedShapes = Object.entries(shapes).flatMap(([page, pageShapes]) => {
+      const pageSize = pageSizes[Number(page)];
+      if (!pageSize?.width || !pageSize.height) return [];
+      return pageShapes.map((shape) => {
+        return {
+          page: Number(page),
+          type: shape.type,
+          x: shape.x / pageSize.width,
+          y: shape.y / pageSize.height,
+          width: shape.width / pageSize.width,
+          height: shape.height / pageSize.height,
+          rotation: shape.rotation,
+          radiusX: 0,
+          radiusY: 0
+        };
+      });
+    });
+    return [...strokes, ...exportedShapes];
   }
 
   export async function downloadPdf() {
@@ -1154,6 +1643,7 @@
     class:zoom-mode={activeTool === 'zoom'}
     class:zoom-out={zoomingOut}
     class:drawing-mode={activeTool === 'marker' || activeTool === 'pen'}
+    class:shape-mode={SHAPE_TOOLS.has(activeTool)}
     class:eraser-mode={activeTool === 'eraser'}
     class="pdf-viewer"
     role="region"
@@ -1170,6 +1660,7 @@
   >
     <div class="pdf-document" style:--zoom-level={zoomLevel}>
       {#each Array(pageCount) as _, index}
+        {@const currentSelection = selectedShape?.pageIndex === index ? (shapes[index] ?? []).find((shape) => shape.id === selectedShape?.id) ?? null : null}
         <div class="pdf-page" aria-label={`Page ${index + 1}`}>
           <canvas></canvas>
           <svg
@@ -1183,6 +1674,261 @@
               <path class="marker-ink" d={strokePath(stroke.points)} />
             {/each}
           </svg>
+          <svg
+            class="annotation-layer shape-layer"
+            viewBox={`0 0 ${pageSizes[index]?.width ?? 1} ${pageSizes[index]?.height ?? 1}`}
+            preserveAspectRatio="none"
+            aria-label={`Shapes on page ${index + 1}`}
+          >
+            {#each (shapes[index] ?? []) as shape (shape.id)}
+              <g transform={`rotate(${shape.rotation} ${shape.x + shape.width / 2} ${shape.y + shape.height / 2})`}>
+                {#if shape.type === 'rectangle'}
+                  <rect
+                    class="pdf-shape"
+                    data-shape-id={shape.id}
+                    data-shape-page={index}
+                    x={shape.x}
+                    y={shape.y}
+                    width={shape.width}
+                    height={shape.height}
+                    rx="0"
+                  />
+                {:else if shape.type === 'circle'}
+                  <ellipse
+                    class="pdf-shape"
+                    data-shape-id={shape.id}
+                    data-shape-page={index}
+                    cx={shape.x + shape.width / 2}
+                    cy={shape.y + shape.height / 2}
+                    rx={shape.width / 2}
+                    ry={shape.height / 2}
+                  />
+                {:else if shape.type === 'check'}
+                  <polyline
+                    class="pdf-shape shape-symbol"
+                    data-shape-id={shape.id}
+                    data-shape-page={index}
+                    points={`${shape.x + shape.width * 0.08},${shape.y + shape.height * 0.54} ${shape.x + shape.width * 0.38},${shape.y + shape.height * 0.82} ${shape.x + shape.width * 0.92},${shape.y + shape.height * 0.16}`}
+                  />
+                {:else if shape.type === 'cross'}
+                  <g data-shape-id={shape.id} data-shape-page={index}>
+                    <line class="pdf-shape shape-symbol" x1={shape.x + shape.width * 0.14} y1={shape.y + shape.height * 0.14} x2={shape.x + shape.width * 0.86} y2={shape.y + shape.height * 0.86} />
+                    <line class="pdf-shape shape-symbol" x1={shape.x + shape.width * 0.86} y1={shape.y + shape.height * 0.14} x2={shape.x + shape.width * 0.14} y2={shape.y + shape.height * 0.86} />
+                  </g>
+                {:else if shape.type === 'line'}
+                  <line
+                    class="shape-linear-hit"
+                    data-shape-id={shape.id}
+                    data-shape-page={index}
+                    x1={shape.x}
+                    y1={shape.y + shape.height / 2}
+                    x2={shape.x + shape.width}
+                    y2={shape.y + shape.height / 2}
+                  />
+                  <line
+                    class="pdf-shape shape-linear"
+                    data-shape-id={shape.id}
+                    data-shape-page={index}
+                    x1={shape.x}
+                    y1={shape.y + shape.height / 2}
+                    x2={shape.x + shape.width}
+                    y2={shape.y + shape.height / 2}
+                  />
+                {:else if shape.type === 'arrow'}
+                  <line
+                    class="shape-linear-hit"
+                    data-shape-id={shape.id}
+                    data-shape-page={index}
+                    x1={shape.x}
+                    y1={shape.y + shape.height / 2}
+                    x2={shape.x + shape.width}
+                    y2={shape.y + shape.height / 2}
+                  />
+                  <line
+                    class="pdf-shape shape-linear"
+                    data-shape-id={shape.id}
+                    data-shape-page={index}
+                    x1={shape.x}
+                    y1={shape.y + shape.height / 2}
+                    x2={shape.x + shape.width}
+                    y2={shape.y + shape.height / 2}
+                  />
+                  <polyline
+                    class="pdf-shape shape-arrowhead"
+                    data-shape-id={shape.id}
+                    data-shape-page={index}
+                    points={`${shape.x + shape.width - Math.min(16, Math.max(8, shape.width * 0.16))},${shape.y + shape.height / 2 - Math.min(7, Math.max(4, shape.width * 0.07))} ${shape.x + shape.width},${shape.y + shape.height / 2} ${shape.x + shape.width - Math.min(16, Math.max(8, shape.width * 0.16))},${shape.y + shape.height / 2 + Math.min(7, Math.max(4, shape.width * 0.07))}`}
+                  />
+                {:else}
+                  <polygon
+                    class="pdf-shape"
+                    data-shape-id={shape.id}
+                    data-shape-page={index}
+                    points={`${shape.x + shape.width / 2},${shape.y} ${shape.x + shape.width},${shape.y + shape.height} ${shape.x},${shape.y + shape.height}`}
+                  />
+                {/if}
+              </g>
+            {/each}
+          </svg>
+          {#if currentSelection}
+            <svg
+              class="annotation-layer shape-selection-layer"
+              viewBox={`0 0 ${pageSizes[index]?.width ?? 1} ${pageSizes[index]?.height ?? 1}`}
+              preserveAspectRatio="none"
+              style:--shape-ui-scale={1 / zoomLevel}
+              aria-label={`Selected ${currentSelection.type}`}
+            >
+              {#if shapeGuides?.pageIndex === index}
+                {@const guideSegments = shapeGuideSegments(shapeGuides.shape, pageSizes[index] ?? { width: 1, height: 1 })}
+                <line
+                  class="shape-guide"
+                  x1={guideSegments.vertical.x}
+                  x2={guideSegments.vertical.x}
+                  y1={guideSegments.vertical.edge}
+                  y2={guideSegments.vertical.shape}
+                />
+                <line
+                  class="shape-guide"
+                  x1={guideSegments.horizontal.edge}
+                  x2={guideSegments.horizontal.shape}
+                  y1={guideSegments.horizontal.y}
+                  y2={guideSegments.horizontal.y}
+                />
+              {/if}
+              <g transform={`rotate(${currentSelection.rotation} ${currentSelection.x + currentSelection.width / 2} ${currentSelection.y + currentSelection.height / 2})`}>
+                {#if isLinearShape(currentSelection)}
+                  <line
+                    class="linear-selection-line"
+                    x1={currentSelection.x}
+                    y1={currentSelection.y + currentSelection.height / 2}
+                    x2={currentSelection.x + currentSelection.width}
+                    y2={currentSelection.y + currentSelection.height / 2}
+                  />
+                  <line
+                    class="linear-selection-hit"
+                    data-shape-id={currentSelection.id}
+                    data-shape-page={index}
+                    x1={currentSelection.x}
+                    y1={currentSelection.y + currentSelection.height / 2}
+                    x2={currentSelection.x + currentSelection.width}
+                    y2={currentSelection.y + currentSelection.height / 2}
+                  />
+                  {#each [
+                    ['start', currentSelection.x],
+                    ['end', currentSelection.x + currentSelection.width]
+                  ] as endpoint}
+                    {@const endpointSize = 8 / zoomLevel}
+                    <rect
+                      class="linear-endpoint-handle"
+                      data-shape-id={currentSelection.id}
+                      data-shape-page={index}
+                      data-shape-endpoint={endpoint[0]}
+                      x={Number(endpoint[1]) - endpointSize / 2}
+                      y={currentSelection.y + currentSelection.height / 2 - endpointSize / 2}
+                      width={endpointSize}
+                      height={endpointSize}
+                    />
+                  {/each}
+                {:else}
+                <rect
+                  class="shape-selection-box"
+                  x={currentSelection.x}
+                  y={currentSelection.y}
+                  width={currentSelection.width}
+                  height={currentSelection.height}
+                />
+                <line
+                  class="shape-edge-handle"
+                  data-shape-id={currentSelection.id}
+                  data-shape-page={index}
+                  data-shape-handle="0,-1"
+                  x1={currentSelection.x}
+                  x2={currentSelection.x + currentSelection.width}
+                  y1={currentSelection.y}
+                  y2={currentSelection.y}
+                  stroke-width={14 / zoomLevel}
+                />
+                <line
+                  class="shape-edge-handle"
+                  data-shape-id={currentSelection.id}
+                  data-shape-page={index}
+                  data-shape-handle="0,1"
+                  x1={currentSelection.x}
+                  x2={currentSelection.x + currentSelection.width}
+                  y1={currentSelection.y + currentSelection.height}
+                  y2={currentSelection.y + currentSelection.height}
+                  stroke-width={14 / zoomLevel}
+                />
+                <line
+                  class="shape-edge-handle"
+                  data-shape-id={currentSelection.id}
+                  data-shape-page={index}
+                  data-shape-handle="-1,0"
+                  x1={currentSelection.x}
+                  x2={currentSelection.x}
+                  y1={currentSelection.y}
+                  y2={currentSelection.y + currentSelection.height}
+                  stroke-width={14 / zoomLevel}
+                />
+                <line
+                  class="shape-edge-handle"
+                  data-shape-id={currentSelection.id}
+                  data-shape-page={index}
+                  data-shape-handle="1,0"
+                  x1={currentSelection.x + currentSelection.width}
+                  x2={currentSelection.x + currentSelection.width}
+                  y1={currentSelection.y}
+                  y2={currentSelection.y + currentSelection.height}
+                  stroke-width={14 / zoomLevel}
+                />
+                {#each [
+                  [-1, -1], [1, -1], [-1, 1], [1, 1]
+                ] as handle}
+                  {@const handleSize = 8 / zoomLevel}
+                  {@const handleX = currentSelection.x + ((handle[0] + 1) * currentSelection.width) / 2}
+                  {@const handleY = currentSelection.y + ((handle[1] + 1) * currentSelection.height) / 2}
+                  <rect
+                    class="shape-resize-handle handle-{handle[0]}-{handle[1]}"
+                    data-shape-id={currentSelection.id}
+                    data-shape-page={index}
+                    data-shape-handle={`${handle[0]},${handle[1]}`}
+                    x={handleX - handleSize / 2}
+                    y={handleY - handleSize / 2}
+                    width={handleSize}
+                    height={handleSize}
+                    stroke-width={2 / zoomLevel}
+                  />
+                {/each}
+                {#each [[-1, -1], [1, -1], [-1, 1], [1, 1]] as corner}
+                  <circle
+                    class="shape-rotate-zone"
+                    data-shape-id={currentSelection.id}
+                    data-shape-page={index}
+                    data-shape-rotate
+                    cx={currentSelection.x + (corner[0] < 0 ? -15 / zoomLevel : currentSelection.width + 15 / zoomLevel)}
+                    cy={currentSelection.y + (corner[1] < 0 ? -15 / zoomLevel : currentSelection.height + 15 / zoomLevel)}
+                    r={10 / zoomLevel}
+                  />
+                {/each}
+                {#if currentSelection}
+                  {@const badgeLabel = `${Math.round(currentSelection.width)} × ${Math.round(currentSelection.height)}`}
+                  {@const badgeWidth = Math.max(54, badgeLabel.length * 7 + 8) / zoomLevel}
+                  {@const badgeHeight = 20 / zoomLevel}
+                  {@const badgeX = currentSelection.x + currentSelection.width / 2 - badgeWidth / 2}
+                  {@const badgeY = currentSelection.y + currentSelection.height + 10 / zoomLevel}
+                  <g class="shape-size-badge">
+                    <rect x={badgeX} y={badgeY} width={badgeWidth} height={badgeHeight} rx={3 / zoomLevel} />
+                    <text
+                      x={badgeX + badgeWidth / 2}
+                      y={badgeY + badgeHeight / 2}
+                      font-size={14 / zoomLevel}
+                    >{badgeLabel}</text>
+                  </g>
+                {/if}
+                {/if}
+              </g>
+            </svg>
+          {/if}
           <svg
             class="annotation-layer pen-layer"
             viewBox={`0 0 ${pageSizes[index]?.width ?? 1} ${pageSizes[index]?.height ?? 1}`}
@@ -1357,6 +2103,12 @@
     user-select: none;
   }
 
+  .pdf-viewer.shape-mode {
+    cursor: crosshair;
+    touch-action: none;
+    user-select: none;
+  }
+
   .pdf-viewer.eraser-mode {
     cursor: none;
     touch-action: none;
@@ -1416,7 +2168,159 @@
   }
 
   .pen-layer {
+    z-index: 4;
+  }
+
+  .shape-layer {
     z-index: 3;
+  }
+
+  .pdf-shape {
+    fill: #ff4d55;
+    stroke: #de3542;
+    stroke-width: 1.35px;
+    stroke-linejoin: round;
+    pointer-events: visiblePainted;
+  }
+
+  .shape-symbol {
+    fill: none;
+    stroke: #ff4d55;
+    stroke-width: 1.7px;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    pointer-events: visibleStroke;
+  }
+
+  .shape-linear {
+    fill: none;
+    stroke: #ff4d55;
+    stroke-width: 1.4px;
+    stroke-linecap: round;
+    pointer-events: none;
+  }
+
+  .shape-arrowhead {
+    fill: none;
+    stroke: #ff4d55;
+    stroke-width: 1.4px;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    pointer-events: visibleStroke;
+  }
+
+  .shape-linear-hit {
+    fill: none;
+    stroke: transparent;
+    stroke-width: 16px;
+    pointer-events: stroke;
+    cursor: move;
+  }
+
+  .pdf-viewer:not(.shape-mode):not(.drawing-mode):not(.eraser-mode) .pdf-shape {
+    cursor: move;
+  }
+
+  .shape-selection-layer {
+    z-index: 5;
+    overflow: visible;
+  }
+
+  .shape-selection-box,
+  .shape-guide {
+    fill: none;
+    stroke: #0d99ff;
+    stroke-width: calc(2px * var(--shape-ui-scale));
+  }
+
+  .linear-selection-line {
+    fill: none;
+    stroke: #0d99ff;
+    stroke-width: calc(2px * var(--shape-ui-scale));
+    pointer-events: none;
+  }
+
+  .linear-selection-hit {
+    fill: none;
+    stroke: transparent;
+    stroke-width: calc(14px * var(--shape-ui-scale));
+    pointer-events: stroke;
+    cursor: move;
+  }
+
+  .linear-endpoint-handle {
+    fill: #fff;
+    stroke: #0d99ff;
+    stroke-width: calc(2px * var(--shape-ui-scale));
+    pointer-events: all;
+    cursor: crosshair;
+  }
+
+  .shape-selection-box {
+    pointer-events: none;
+  }
+
+  .shape-edge-handle {
+    fill: none;
+    stroke: transparent;
+    stroke-width: calc(14px * var(--shape-ui-scale));
+    pointer-events: stroke;
+  }
+
+  .shape-edge-handle[data-shape-handle='0,-1'],
+  .shape-edge-handle[data-shape-handle='0,1'] {
+    cursor: ns-resize;
+  }
+
+  .shape-edge-handle[data-shape-handle='-1,0'],
+  .shape-edge-handle[data-shape-handle='1,0'] {
+    cursor: ew-resize;
+  }
+
+  .shape-guide {
+    stroke-width: calc(1.15px * var(--shape-ui-scale));
+    stroke-dasharray: calc(3px * var(--shape-ui-scale)) calc(4px * var(--shape-ui-scale));
+    opacity: 0.68;
+  }
+
+  .shape-resize-handle {
+    fill: #fff;
+    stroke: #0d99ff;
+    stroke-width: calc(2px * var(--shape-ui-scale));
+    pointer-events: all;
+  }
+
+  .shape-resize-handle[data-shape-handle='-1,-1'],
+  .shape-resize-handle[data-shape-handle='1,1'] {
+    cursor: nwse-resize;
+  }
+
+  .shape-resize-handle[data-shape-handle='1,-1'],
+  .shape-resize-handle[data-shape-handle='-1,1'] {
+    cursor: nesw-resize;
+  }
+
+  .shape-rotate-zone {
+    fill: transparent;
+    stroke: none;
+    cursor: url('/rotate-cursor.svg') 16 16, crosshair;
+    pointer-events: all;
+  }
+
+  .shape-size-badge {
+    pointer-events: none;
+  }
+
+  .shape-size-badge rect {
+    fill: #0d99ff;
+  }
+
+  .shape-size-badge text {
+    fill: #fff;
+    font-family: Inter, sans-serif;
+    font-weight: 500;
+    dominant-baseline: central;
+    text-anchor: middle;
   }
 
   .pen-soft-edge {
@@ -1447,6 +2351,7 @@
   .pdf-viewer.zoom-mode :global(.textLayer span),
   .pdf-viewer.panning :global(.textLayer span),
   .pdf-viewer.drawing-mode :global(.textLayer span),
+  .pdf-viewer.shape-mode :global(.textLayer span),
   .pdf-viewer.eraser-mode :global(.textLayer span) {
     cursor: inherit;
     pointer-events: none;

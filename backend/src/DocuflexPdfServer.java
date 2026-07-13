@@ -153,20 +153,26 @@ public class DocuflexPdfServer {
       for (int pageIndex = 0; pageIndex < document.getNumberOfPages(); pageIndex += 1) {
         List<AnnotationStroke> markers = new ArrayList<>();
         List<AnnotationStroke> pens = new ArrayList<>();
+        List<AnnotationStroke> shapes = new ArrayList<>();
         for (AnnotationStroke annotation : annotations) {
-          if (annotation.page != pageIndex || annotation.points.isEmpty()) {
+          if (annotation.page != pageIndex) {
             continue;
           }
           if ("marker".equals(annotation.type)) {
-            markers.add(annotation);
+            if (!annotation.points.isEmpty()) markers.add(annotation);
           } else if ("pen".equals(annotation.type)) {
-            pens.add(annotation);
+            if (!annotation.points.isEmpty()) pens.add(annotation);
+          } else {
+            shapes.add(annotation);
           }
         }
 
         PDPage page = document.getPage(pageIndex);
         if (!markers.isEmpty()) {
           drawAnnotationLayer(document, page, markers, true);
+        }
+        if (!shapes.isEmpty()) {
+          drawShapeLayer(document, page, shapes);
         }
         if (!pens.isEmpty()) {
           drawAnnotationLayer(document, page, pens, false);
@@ -177,6 +183,195 @@ public class DocuflexPdfServer {
       document.save(output);
       return output.toByteArray();
     }
+  }
+
+  private static void drawShapeLayer(
+      PDDocument document,
+      PDPage page,
+      List<AnnotationStroke> shapes) throws IOException {
+    try (PDPageContentStream content = new PDPageContentStream(
+        document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
+      content.setNonStrokingColor(1f, 0.302f, 0.333f);
+      content.setStrokingColor(0.871f, 0.208f, 0.259f);
+      content.setLineWidth(1f);
+      content.setLineJoinStyle(1);
+
+      for (AnnotationStroke shape : shapes) {
+        if (shape.width <= 0 || shape.height <= 0) continue;
+        if ("check".equals(shape.type)) {
+          content.setLineWidth(1.25f);
+          PdfPoint start = shapePoint(page, shape, 0.08, 0.54);
+          PdfPoint middle = shapePoint(page, shape, 0.38, 0.82);
+          PdfPoint end = shapePoint(page, shape, 0.92, 0.16);
+          content.moveTo(start.x, start.y);
+          content.lineTo(middle.x, middle.y);
+          content.lineTo(end.x, end.y);
+          content.stroke();
+          continue;
+        } else if ("cross".equals(shape.type)) {
+          content.setLineWidth(1.25f);
+          PdfPoint firstStart = shapePoint(page, shape, 0.14, 0.14);
+          PdfPoint firstEnd = shapePoint(page, shape, 0.86, 0.86);
+          PdfPoint secondStart = shapePoint(page, shape, 0.86, 0.14);
+          PdfPoint secondEnd = shapePoint(page, shape, 0.14, 0.86);
+          content.moveTo(firstStart.x, firstStart.y);
+          content.lineTo(firstEnd.x, firstEnd.y);
+          content.moveTo(secondStart.x, secondStart.y);
+          content.lineTo(secondEnd.x, secondEnd.y);
+          content.stroke();
+          continue;
+        } else if ("line".equals(shape.type) || "arrow".equals(shape.type)) {
+          content.setLineWidth(1.05f);
+          PdfPoint start = shapePoint(page, shape, 0, 0.5);
+          PdfPoint end = shapePoint(page, shape, 1, 0.5);
+          content.moveTo(start.x, start.y);
+          content.lineTo(end.x, end.y);
+          content.stroke();
+          if ("arrow".equals(shape.type)) {
+            appendArrowHead(content, start, end);
+            content.stroke();
+          }
+          continue;
+        }
+
+        content.setLineWidth(1f);
+        if ("triangle".equals(shape.type)) {
+          PdfPoint top = shapePoint(page, shape, 0.5, 0);
+          PdfPoint bottomRight = shapePoint(page, shape, 1, 1);
+          PdfPoint bottomLeft = shapePoint(page, shape, 0, 1);
+          content.moveTo(top.x, top.y);
+          content.lineTo(bottomRight.x, bottomRight.y);
+          content.lineTo(bottomLeft.x, bottomLeft.y);
+          content.closePath();
+        } else if ("circle".equals(shape.type)) {
+          appendEllipse(content, page, shape);
+        } else if ("rectangle".equals(shape.type)) {
+          appendRoundedRectangle(content, page, shape);
+        } else {
+          continue;
+        }
+        content.fillAndStroke();
+      }
+    }
+  }
+
+  private static void appendArrowHead(
+      PDPageContentStream content,
+      PdfPoint start,
+      PdfPoint end) throws IOException {
+    double deltaX = end.x - start.x;
+    double deltaY = end.y - start.y;
+    double length = Math.max(0.001, Math.hypot(deltaX, deltaY));
+    double directionX = deltaX / length;
+    double directionY = deltaY / length;
+    double arrowLength = Math.min(12, Math.max(7, length * 0.16));
+    double halfWidth = Math.min(5.5, Math.max(3.5, length * 0.07));
+    float baseX = (float) (end.x - directionX * arrowLength);
+    float baseY = (float) (end.y - directionY * arrowLength);
+    float leftX = (float) (baseX - directionY * halfWidth);
+    float leftY = (float) (baseY + directionX * halfWidth);
+    float rightX = (float) (baseX + directionY * halfWidth);
+    float rightY = (float) (baseY - directionX * halfWidth);
+    content.moveTo(leftX, leftY);
+    content.lineTo(end.x, end.y);
+    content.lineTo(rightX, rightY);
+  }
+
+  private static void appendEllipse(
+      PDPageContentStream content,
+      PDPage page,
+      AnnotationStroke shape) throws IOException {
+    double kappa = 0.5522847498307936;
+    PdfPoint start = shapePoint(page, shape, 0.5, 0);
+    content.moveTo(start.x, start.y);
+    shapeCurve(content, page, shape, 0.5 + 0.5 * kappa, 0, 1, 0.5 - 0.5 * kappa, 1, 0.5);
+    shapeCurve(content, page, shape, 1, 0.5 + 0.5 * kappa, 0.5 + 0.5 * kappa, 1, 0.5, 1);
+    shapeCurve(content, page, shape, 0.5 - 0.5 * kappa, 1, 0, 0.5 + 0.5 * kappa, 0, 0.5);
+    shapeCurve(content, page, shape, 0, 0.5 - 0.5 * kappa, 0.5 - 0.5 * kappa, 0, 0.5, 0);
+    content.closePath();
+  }
+
+  private static void appendRoundedRectangle(
+      PDPageContentStream content,
+      PDPage page,
+      AnnotationStroke shape) throws IOException {
+    double rx = Math.min(shape.radiusX, shape.width / 2);
+    double ry = Math.min(shape.radiusY, shape.height / 2);
+    if (rx <= 0 || ry <= 0) {
+      PdfPoint topLeft = shapePoint(page, shape, 0, 0);
+      PdfPoint topRight = shapePoint(page, shape, 1, 0);
+      PdfPoint bottomRight = shapePoint(page, shape, 1, 1);
+      PdfPoint bottomLeft = shapePoint(page, shape, 0, 1);
+      content.moveTo(topLeft.x, topLeft.y);
+      content.lineTo(topRight.x, topRight.y);
+      content.lineTo(bottomRight.x, bottomRight.y);
+      content.lineTo(bottomLeft.x, bottomLeft.y);
+      content.closePath();
+      return;
+    }
+
+    double localRx = rx / shape.width;
+    double localRy = ry / shape.height;
+    double kappa = 0.5522847498307936;
+    PdfPoint start = shapePoint(page, shape, localRx, 0);
+    content.moveTo(start.x, start.y);
+    PdfPoint topRightStart = shapePoint(page, shape, 1 - localRx, 0);
+    content.lineTo(topRightStart.x, topRightStart.y);
+    shapeCurve(content, page, shape, 1 - localRx + localRx * kappa, 0, 1, localRy - localRy * kappa, 1, localRy);
+    PdfPoint rightBottomStart = shapePoint(page, shape, 1, 1 - localRy);
+    content.lineTo(rightBottomStart.x, rightBottomStart.y);
+    shapeCurve(content, page, shape, 1, 1 - localRy + localRy * kappa, 1 - localRx + localRx * kappa, 1, 1 - localRx, 1);
+    PdfPoint bottomLeftStart = shapePoint(page, shape, localRx, 1);
+    content.lineTo(bottomLeftStart.x, bottomLeftStart.y);
+    shapeCurve(content, page, shape, localRx - localRx * kappa, 1, 0, 1 - localRy + localRy * kappa, 0, 1 - localRy);
+    PdfPoint leftTopStart = shapePoint(page, shape, 0, localRy);
+    content.lineTo(leftTopStart.x, leftTopStart.y);
+    shapeCurve(content, page, shape, 0, localRy - localRy * kappa, localRx - localRx * kappa, 0, localRx, 0);
+    content.closePath();
+  }
+
+  private static void shapeCurve(
+      PDPageContentStream content,
+      PDPage page,
+      AnnotationStroke shape,
+      double control1X,
+      double control1Y,
+      double control2X,
+      double control2Y,
+      double endX,
+      double endY) throws IOException {
+    PdfPoint control1 = shapePoint(page, shape, control1X, control1Y);
+    PdfPoint control2 = shapePoint(page, shape, control2X, control2Y);
+    PdfPoint end = shapePoint(page, shape, endX, endY);
+    content.curveTo(control1.x, control1.y, control2.x, control2.y, end.x, end.y);
+  }
+
+  private static PdfPoint shapePoint(
+      PDPage page,
+      AnnotationStroke shape,
+      double localX,
+      double localY) {
+    double centerX = shape.x + shape.width / 2;
+    double centerY = shape.y + shape.height / 2;
+    double pointX = shape.x + localX * shape.width;
+    double pointY = shape.y + localY * shape.height;
+    double radians = Math.toRadians(shape.rotation);
+    double cosine = Math.cos(radians);
+    double sine = Math.sin(radians);
+    PDRectangle box = page.getCropBox();
+    int pageRotation = ((page.getRotation() % 360) + 360) % 360;
+    double displayWidth = pageRotation == 90 || pageRotation == 270 ? box.getHeight() : box.getWidth();
+    double displayHeight = pageRotation == 90 || pageRotation == 270 ? box.getWidth() : box.getHeight();
+    // Shape rotation happens in the rendered page's pixel coordinate system.
+    // Rotating normalized values directly distorts non-square pages because one
+    // normalized X unit and one normalized Y unit represent different lengths.
+    double deltaX = (pointX - centerX) * displayWidth;
+    double deltaY = (pointY - centerY) * displayHeight;
+    double rotatedX = deltaX * cosine - deltaY * sine;
+    double rotatedY = deltaX * sine + deltaY * cosine;
+    return normalizedToPdfPoint(page, new NormalizedPoint(
+        centerX + rotatedX / displayWidth,
+        centerY + rotatedY / displayHeight));
   }
 
   private static void drawAnnotationLayer(
@@ -2297,8 +2492,32 @@ public class DocuflexPdfServer {
     for (Object raw : rawAnnotations) {
       Map<String, Object> annotation = asObject(raw);
       String type = asString(annotation.get("type"));
-      if (!"marker".equals(type) && !"pen".equals(type)) {
+      boolean isStroke = "marker".equals(type) || "pen".equals(type);
+      boolean isShape = "triangle".equals(type) || "rectangle".equals(type) || "circle".equals(type) ||
+          "check".equals(type) || "cross".equals(type) || "arrow".equals(type) || "line".equals(type);
+      if (!isStroke && !isShape) {
         throw new IllegalArgumentException("Unsupported annotation type: " + type);
+      }
+      if (isShape) {
+        double x = optionalDouble(annotation.get("x"));
+        double y = optionalDouble(annotation.get("y"));
+        double width = optionalDouble(annotation.get("width"));
+        double height = optionalDouble(annotation.get("height"));
+        double rotation = optionalDouble(annotation.get("rotation"));
+        double radiusX = optionalDouble(annotation.get("radiusX"));
+        double radiusY = optionalDouble(annotation.get("radiusY"));
+        if (!Double.isFinite(x) || !Double.isFinite(y) || !Double.isFinite(width) ||
+            !Double.isFinite(height) || !Double.isFinite(rotation) ||
+            !Double.isFinite(radiusX) || !Double.isFinite(radiusY)) {
+          throw new IllegalArgumentException("Shape coordinates must be finite numbers.");
+        }
+        if (width <= 0 || height <= 0 || width > 2 || height > 2) {
+          throw new IllegalArgumentException("Invalid shape size.");
+        }
+        annotations.add(new AnnotationStroke(
+            asInt(annotation.get("page")), type, List.of(),
+            x, y, width, height, rotation, Math.max(0, radiusX), Math.max(0, radiusY)));
+        continue;
       }
       List<NormalizedPoint> points = new ArrayList<>();
       for (Object rawPoint : asArray(annotation.get("points"))) {
@@ -2314,7 +2533,8 @@ public class DocuflexPdfServer {
           throw new IllegalArgumentException("Too many annotation points.");
         }
       }
-      annotations.add(new AnnotationStroke(asInt(annotation.get("page")), type, points));
+      annotations.add(new AnnotationStroke(
+          asInt(annotation.get("page")), type, points, 0, 0, 0, 0, 0, 0, 0));
     }
     return annotations;
   }
@@ -2505,7 +2725,17 @@ public class DocuflexPdfServer {
       boolean overlay,
       String alignment) {}
 
-  private record AnnotationStroke(int page, String type, List<NormalizedPoint> points) {}
+  private record AnnotationStroke(
+      int page,
+      String type,
+      List<NormalizedPoint> points,
+      double x,
+      double y,
+      double width,
+      double height,
+      double rotation,
+      double radiusX,
+      double radiusY) {}
 
   private record NormalizedPoint(double x, double y) {}
 
