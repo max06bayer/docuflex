@@ -500,8 +500,11 @@
       const rect = span.getBoundingClientRect();
       const previousStyle = getComputedStyle(previous);
       const style = getComputedStyle(span);
-      const sameLine = Math.abs(rect.top - previousRect.top) < 0.75;
-      const touching = Math.abs(rect.left - previousRect.right) < 1.5;
+      const textHeight = Math.min(previousRect.height, rect.height);
+      const lineTolerance = Math.max(1, textHeight * 0.06);
+      const gapTolerance = Math.max(2, textHeight * 0.1);
+      const sameLine = Math.abs(rect.top - previousRect.top) < lineTolerance;
+      const touching = Math.abs(rect.left - previousRect.right) < gapTolerance;
       const sameFont =
         style.fontFamily === previousStyle.fontFamily &&
         style.getPropertyValue('--font-height') === previousStyle.getPropertyValue('--font-height');
