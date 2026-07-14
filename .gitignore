@@ -13,6 +13,7 @@ backend/out/
 # Local runtime and test artifacts
 tmp/
 *.log
+.pdf2htmlex/
 
 # Environment files
 .env
