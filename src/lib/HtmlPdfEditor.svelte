@@ -50,7 +50,7 @@
   let embeddedFontFamilies = {};
 
   $: foregroundAnnotations = visualAnnotations.filter(
-    (annotation) => !['highlight', 'underline', 'crossout', 'marker'].includes(annotation?.type)
+    (annotation) => !['highlight', 'underline', 'crossout', 'blackout', 'whiteout', 'marker'].includes(annotation?.type)
   );
   $: if (htmlFrame && visualAnnotations) {
     visualAnnotations;
@@ -593,7 +593,7 @@
   export function resolvedTextHighlights() {
     syncUnderTextAnnotationLayers();
     return visualAnnotations.flatMap((annotation) => {
-      if (!['highlight', 'underline', 'crossout'].includes(annotation?.type)) return [];
+      if (!['highlight', 'underline', 'crossout', 'blackout', 'whiteout'].includes(annotation?.type)) return [];
       const id = String(annotation.id || '');
       const resolved = resolvedTextHighlightRects.get(id) ?? {
         x: Number(annotation.x || 0),
@@ -2900,7 +2900,7 @@ ${setupScript}`;
     /** @type {Map<number, any[]>} */
     const annotationsByPage = new Map();
     visualAnnotations.forEach((annotation) => {
-      if (!['highlight', 'underline', 'crossout', 'marker'].includes(annotation?.type)) return;
+      if (!['highlight', 'underline', 'crossout', 'blackout', 'whiteout', 'marker'].includes(annotation?.type)) return;
       const page = Number(annotation.page);
       const pageAnnotations = annotationsByPage.get(page) ?? [];
       pageAnnotations.push(annotation);
@@ -2917,9 +2917,11 @@ ${setupScript}`;
       const htmlPageContent = /** @type {HTMLElement} */ (pageContent);
       htmlPageContent.querySelector(':scope > .docuflex-text-highlight-layer')?.remove();
       let layer = htmlPageContent.querySelector(':scope > .docuflex-under-text-annotation-layer');
+      let redactionLayer = htmlPageContent.querySelector(':scope > .docuflex-over-text-redaction-layer');
 
       if (pageAnnotations.length === 0) {
         layer?.remove();
+        redactionLayer?.remove();
         return;
       }
 
@@ -2941,26 +2943,57 @@ ${setupScript}`;
       svgLayer.style.overflow = 'hidden';
       svgLayer.style.pointerEvents = 'none';
       svgLayer.style.mixBlendMode = 'multiply';
-      const existingGroups = new Map([...svgLayer.querySelectorAll(':scope > g[data-docuflex-annotation-id]')]
+      const pageRedactions = pageAnnotations.filter((annotation) => annotation.type === 'blackout' || annotation.type === 'whiteout');
+      if (pageRedactions.length > 0 && (!redactionLayer || redactionLayer.nodeType !== 1)) {
+        redactionLayer = doc.createElementNS(svgNamespace, 'svg');
+        redactionLayer.setAttribute('class', 'docuflex-over-text-redaction-layer');
+        redactionLayer.setAttribute('aria-hidden', 'true');
+        redactionLayer.setAttribute('viewBox', '0 0 1 1');
+        redactionLayer.setAttribute('preserveAspectRatio', 'none');
+        htmlPageContent.appendChild(redactionLayer);
+      } else if (pageRedactions.length === 0) {
+        redactionLayer?.remove();
+        redactionLayer = null;
+      }
+      const redactionSvgLayer = redactionLayer?.nodeType === 1
+        ? /** @type {SVGSVGElement} */ (redactionLayer)
+        : null;
+      if (redactionSvgLayer) {
+        redactionSvgLayer.style.position = 'absolute';
+        redactionSvgLayer.style.inset = '0';
+        redactionSvgLayer.style.width = '100%';
+        redactionSvgLayer.style.height = '100%';
+        redactionSvgLayer.style.overflow = 'hidden';
+        redactionSvgLayer.style.pointerEvents = 'none';
+        redactionSvgLayer.style.zIndex = '2147483000';
+      }
+      const existingNodes = [
+        ...svgLayer.querySelectorAll(':scope > g[data-docuflex-annotation-id]'),
+        ...(redactionSvgLayer?.querySelectorAll(':scope > g[data-docuflex-annotation-id]') ?? [])
+      ];
+      const existingGroups = new Map(existingNodes
         .map((node) => [node.getAttribute('data-docuflex-annotation-id') ?? '', node]));
       const activeGroupIds = new Set();
 
       pageAnnotations.forEach((annotation, annotationIndex) => {
         const annotationId = String(annotation.id || `${annotation.type}-${annotationIndex}`);
+        const isRedaction = annotation.type === 'blackout' || annotation.type === 'whiteout';
+        const targetLayer = isRedaction ? redactionSvgLayer : svgLayer;
+        if (!targetLayer) return;
         activeGroupIds.add(annotationId);
         let group = existingGroups.get(annotationId);
-        if (!group || group.getAttribute('data-docuflex-annotation-type') !== annotation.type) {
+        if (!group || group.parentNode !== targetLayer || group.getAttribute('data-docuflex-annotation-type') !== annotation.type) {
           group?.remove();
           group = doc.createElementNS(svgNamespace, 'g');
           group.setAttribute('data-docuflex-annotation-id', annotationId);
           group.setAttribute('data-docuflex-annotation-type', annotation.type);
-          svgLayer.appendChild(group);
+          targetLayer.appendChild(group);
         }
 
-        if (['highlight', 'underline', 'crossout'].includes(annotation.type)) {
+        if (['highlight', 'underline', 'crossout', 'blackout', 'whiteout'].includes(annotation.type)) {
           const boundRect = boundTextHighlightRect(annotation, htmlPage);
           resolvedTextHighlightRects.set(String(annotation.id || ''), boundRect);
-          if (annotation.type === 'highlight') {
+          if (annotation.type === 'highlight' || isRedaction) {
             let rect = group.querySelector(':scope > rect');
             if (!rect) {
               group.replaceChildren();
@@ -2971,8 +3004,8 @@ ${setupScript}`;
             rect.setAttribute('y', `${boundRect.y}`);
             rect.setAttribute('width', `${boundRect.width}`);
             rect.setAttribute('height', `${boundRect.height}`);
-            rect.setAttribute('rx', '0.002');
-            rect.setAttribute('fill', '#ffe43b');
+            rect.setAttribute('rx', annotation.type === 'highlight' ? '0.002' : '0');
+            rect.setAttribute('fill', annotation.type === 'highlight' ? '#ffe43b' : annotation.type === 'blackout' ? '#000' : '#fff');
           } else {
             const lineY = boundRect.y + boundRect.height * (annotation.type === 'underline' ? 0.9 : 0.52);
             const color = Array.isArray(annotation.color) && annotation.color.length >= 3

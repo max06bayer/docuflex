@@ -5,8 +5,10 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.awt.image.BufferedImage;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
@@ -38,13 +40,19 @@ import org.apache.pdfbox.pdmodel.font.PDSimpleFont;
 import org.apache.pdfbox.pdmodel.font.PDType0Font;
 import org.apache.pdfbox.pdmodel.font.PDType1Font;
 import org.apache.pdfbox.pdmodel.font.Standard14Fonts;
+import org.apache.pdfbox.pdmodel.encryption.AccessPermission;
+import org.apache.pdfbox.pdmodel.encryption.StandardProtectionPolicy;
 import org.apache.pdfbox.pdmodel.font.encoding.Encoding;
 import org.apache.pdfbox.pdmodel.font.encoding.GlyphList;
 import org.apache.pdfbox.pdmodel.graphics.PDXObject;
+import org.apache.pdfbox.pdmodel.graphics.image.LosslessFactory;
+import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
 import org.apache.pdfbox.pdmodel.graphics.form.PDFormXObject;
 import org.apache.pdfbox.pdmodel.graphics.blend.BlendMode;
 import org.apache.pdfbox.pdmodel.graphics.state.PDExtendedGraphicsState;
 import org.apache.pdfbox.util.Matrix;
+import org.apache.pdfbox.rendering.ImageType;
+import org.apache.pdfbox.rendering.PDFRenderer;
 import org.apache.pdfbox.Loader;
 
 public class DocuflexPdfServer {
@@ -58,6 +66,7 @@ public class DocuflexPdfServer {
     server.createContext("/health", DocuflexPdfServer::handleHealth);
     server.createContext("/edit", DocuflexPdfServer::handleEdit);
     server.createContext("/fonts", DocuflexPdfServer::handleFonts);
+    server.createContext("/decrypt", DocuflexPdfServer::handleDecrypt);
     server.createContext("/export", DocuflexPdfServer::handleExport);
     server.start();
     System.out.println("Docuflex PDFBox server listening on http://" + HOST + ":" + PORT);
@@ -141,7 +150,14 @@ public class DocuflexPdfServer {
       Map<String, Object> payload = asObject(new JsonParser(body).parse());
       byte[] pdfBytes = Base64.getDecoder().decode(asString(payload.get("pdfBase64")));
       List<AnnotationStroke> annotations = parseAnnotations(asArray(payload.get("annotations")));
-      byte[] exported = annotations.isEmpty() ? pdfBytes : applyAnnotations(pdfBytes, annotations);
+      String sourcePassword = optionalString(payload.get("sourcePassword"));
+      String encryptionPassword = optionalString(payload.get("encryptionPassword"));
+      if (encryptionPassword.getBytes(StandardCharsets.UTF_8).length > 32) {
+        throw new IllegalArgumentException("Encryption password must be 32 bytes or fewer.");
+      }
+      byte[] exported = annotations.isEmpty() && sourcePassword.isEmpty() && encryptionPassword.isEmpty()
+          ? pdfBytes
+          : applyAnnotations(pdfBytes, annotations, sourcePassword, encryptionPassword);
       sendPdf(exchange, exported);
     } catch (Exception error) {
       error.printStackTrace();
@@ -149,12 +165,45 @@ public class DocuflexPdfServer {
     }
   }
 
-  private static byte[] applyAnnotations(byte[] pdfBytes, List<AnnotationStroke> annotations) throws IOException {
-    try (PDDocument document = Loader.loadPDF(pdfBytes)) {
+  private static void handleDecrypt(HttpExchange exchange) throws IOException {
+    addCors(exchange);
+    if ("OPTIONS".equals(exchange.getRequestMethod())) {
+      sendNoContent(exchange);
+      return;
+    }
+    if (!"POST".equals(exchange.getRequestMethod())) {
+      sendJson(exchange, 405, "{\"error\":\"POST required\"}");
+      return;
+    }
+
+    try {
+      String body = readRequestBody(exchange);
+      Map<String, Object> payload = asObject(new JsonParser(body).parse());
+      byte[] pdfBytes = Base64.getDecoder().decode(asString(payload.get("pdfBase64")));
+      String password = asString(payload.get("password"));
+      try (PDDocument document = Loader.loadPDF(pdfBytes, password)) {
+        document.setAllSecurityToBeRemoved(true);
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        document.save(output);
+        sendPdf(exchange, output.toByteArray());
+      }
+    } catch (Exception error) {
+      sendJson(exchange, 400, "{\"error\":\"Incorrect password or unsupported encrypted PDF.\"}");
+    }
+  }
+
+  private static byte[] applyAnnotations(
+      byte[] pdfBytes,
+      List<AnnotationStroke> annotations,
+      String sourcePassword,
+      String encryptionPassword) throws IOException {
+    try (PDDocument document = Loader.loadPDF(pdfBytes, sourcePassword)) {
       document.setAllSecurityToBeRemoved(true);
+      List<Integer> redactedPages = new ArrayList<>();
       for (int pageIndex = 0; pageIndex < document.getNumberOfPages(); pageIndex += 1) {
         List<AnnotationStroke> markers = new ArrayList<>();
         List<AnnotationStroke> textMarks = new ArrayList<>();
+        List<AnnotationStroke> redactions = new ArrayList<>();
         List<AnnotationStroke> pens = new ArrayList<>();
         List<AnnotationStroke> shapes = new ArrayList<>();
         for (AnnotationStroke annotation : annotations) {
@@ -166,6 +215,8 @@ public class DocuflexPdfServer {
           } else if ("highlight".equals(annotation.type) || "underline".equals(annotation.type) ||
               "crossout".equals(annotation.type)) {
             textMarks.add(annotation);
+          } else if ("blackout".equals(annotation.type) || "whiteout".equals(annotation.type)) {
+            redactions.add(annotation);
           } else if ("pen".equals(annotation.type)) {
             if (!annotation.points.isEmpty()) pens.add(annotation);
           } else {
@@ -186,6 +237,26 @@ public class DocuflexPdfServer {
         if (!pens.isEmpty()) {
           drawAnnotationLayer(document, page, pens, false);
         }
+        if (!redactions.isEmpty()) {
+          drawRedactionLayer(document, page, redactions);
+          redactedPages.add(pageIndex);
+        }
+      }
+      if (!redactedPages.isEmpty()) {
+        flattenRedactedPages(document, redactedPages);
+      }
+
+      if (!encryptionPassword.isEmpty()) {
+        AccessPermission permissions = new AccessPermission();
+        byte[] ownerSecret = new byte[32];
+        new SecureRandom().nextBytes(ownerSecret);
+        String ownerPassword = Base64.getEncoder().encodeToString(ownerSecret);
+        StandardProtectionPolicy policy = new StandardProtectionPolicy(
+            ownerPassword, encryptionPassword, permissions);
+        policy.setEncryptionKeyLength(256);
+        policy.setPreferAES(true);
+        document.setAllSecurityToBeRemoved(false);
+        document.protect(policy);
       }
 
       ByteArrayOutputStream output = new ByteArrayOutputStream();
@@ -237,6 +308,56 @@ public class DocuflexPdfServer {
         content.lineTo(end.x, end.y);
         content.stroke();
       }
+    }
+  }
+
+  private static void drawRedactionLayer(
+      PDDocument document,
+      PDPage page,
+      List<AnnotationStroke> redactions) throws IOException {
+    try (PDPageContentStream content = new PDPageContentStream(
+        document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
+      for (AnnotationStroke redaction : redactions) {
+        if (redaction.width <= 0 || redaction.height <= 0) continue;
+        if ("blackout".equals(redaction.type)) content.setNonStrokingColor(0f, 0f, 0f);
+        else content.setNonStrokingColor(1f, 1f, 1f);
+        PdfPoint topLeft = shapePoint(page, redaction, 0, 0);
+        PdfPoint topRight = shapePoint(page, redaction, 1, 0);
+        PdfPoint bottomRight = shapePoint(page, redaction, 1, 1);
+        PdfPoint bottomLeft = shapePoint(page, redaction, 0, 1);
+        content.moveTo(topLeft.x, topLeft.y);
+        content.lineTo(topRight.x, topRight.y);
+        content.lineTo(bottomRight.x, bottomRight.y);
+        content.lineTo(bottomLeft.x, bottomLeft.y);
+        content.closePath();
+        content.fill();
+      }
+    }
+  }
+
+  private static void flattenRedactedPages(PDDocument document, List<Integer> pageIndexes) throws IOException {
+    PDFRenderer renderer = new PDFRenderer(document);
+    renderer.setSubsamplingAllowed(false);
+    for (int pageIndex : pageIndexes) {
+      BufferedImage rendered = renderer.renderImageWithDPI(pageIndex, 144f, ImageType.RGB);
+      PDPage page = document.getPage(pageIndex);
+      PDRectangle cropBox = page.getCropBox();
+      int rotation = ((page.getRotation() % 360) + 360) % 360;
+      float displayWidth = rotation == 90 || rotation == 270 ? cropBox.getHeight() : cropBox.getWidth();
+      float displayHeight = rotation == 90 || rotation == 270 ? cropBox.getWidth() : cropBox.getHeight();
+      PDImageXObject pageImage = LosslessFactory.createFromImage(document, rendered);
+
+      page.setRotation(0);
+      page.setMediaBox(new PDRectangle(displayWidth, displayHeight));
+      page.setCropBox(new PDRectangle(displayWidth, displayHeight));
+      page.setResources(new PDResources());
+      page.setContents(new PDStream(document));
+      page.setAnnotations(new ArrayList<>());
+      try (PDPageContentStream content = new PDPageContentStream(
+          document, page, PDPageContentStream.AppendMode.OVERWRITE, false, false)) {
+        content.drawImage(pageImage, 0, 0, displayWidth, displayHeight);
+      }
+      rendered.flush();
     }
   }
 
@@ -2627,7 +2748,7 @@ public class DocuflexPdfServer {
       boolean isShape = "triangle".equals(type) || "rectangle".equals(type) || "circle".equals(type) ||
           "check".equals(type) || "cross".equals(type) || "arrow".equals(type) || "line".equals(type) ||
           "textfield".equals(type) || "highlight".equals(type) || "underline".equals(type) ||
-          "crossout".equals(type);
+          "crossout".equals(type) || "blackout".equals(type) || "whiteout".equals(type);
       if (!isStroke && !isShape) {
         throw new IllegalArgumentException("Unsupported annotation type: " + type);
       }

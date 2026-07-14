@@ -1,15 +1,23 @@
 <script>
   import { onDestroy, onMount, tick } from 'svelte';
+  import { cubicOut } from 'svelte/easing';
+  import { fly } from 'svelte/transition';
   import EditorToolbar from '$lib/EditorToolbar.svelte';
   import HtmlPdfEditor from '$lib/HtmlPdfEditor.svelte';
 
   /** @typedef {{ x: number; y: number; pressure: number }} StrokePoint */
   /** @typedef {{ id: number; type: 'marker' | 'pen'; points: StrokePoint[] }} AnnotationStroke */
   /** @typedef {{ id: number; type: 'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'textfield'; x: number; y: number; width: number; height: number; rotation: number; text?: string }} AnnotationShape */
-  /** @typedef {{ id: number; type: 'highlight' | 'underline' | 'crossout'; rects: { x: number; y: number; width: number; height: number; color?: [number, number, number] }[] }} TextHighlight */
+  /** @typedef {{ id: number; type: 'highlight' | 'underline' | 'crossout' | 'blackout' | 'whiteout'; rects: { x: number; y: number; width: number; height: number; color?: [number, number, number] }[] }} TextHighlight */
 
   /** @type {File} */
   export let file;
+  /** @type {{ enabled: boolean; password: string }} */
+  export let protection = { enabled: false, password: '' };
+  /** @type {(protection: { enabled: boolean; password: string }) => void} */
+  export let onProtectionChange = () => {};
+  /** @type {() => void} */
+  export let onRequestClose = () => {};
   let workingFile = file;
 
   /** @type {HTMLDivElement | undefined} */
@@ -18,6 +26,8 @@
   let workspace;
   /** @type {import('pdfjs-dist').PDFDocumentProxy | null} */
   let pdfDocument = null;
+  /** @type {import('pdfjs-dist').PDFDocumentLoadingTask | null} */
+  let pdfLoadingTask = null;
   let pageCount = 0;
   /** @type {Set<number>} */
   let selectedPages = new Set();
@@ -86,6 +96,20 @@
   let shapeInteraction = null;
   /** @type {{ pageIndex: number; x: number | null; y: number | null; shape: AnnotationShape } | null} */
   let shapeGuides = null;
+  let protectPanelOpen = false;
+  let encryptionEnabled = Boolean(protection?.enabled);
+  let protectionPassword = protection?.password ?? '';
+  let protectionConfirmPassword = '';
+  let disableProtectionPassword = '';
+  let showProtectionPassword = false;
+  let showProtectionConfirmPassword = false;
+  let showDisableProtectionPassword = false;
+  let protectionError = '';
+  let passwordUnlockOpen = false;
+  let passwordUnlockValue = '';
+  let passwordUnlockError = '';
+  let showPasswordUnlockValue = false;
+  let unlockingPdf = false;
 
   const BASE_PAGE_SCALE = 1.35;
   const MIN_ZOOM = 0.5;
@@ -96,7 +120,7 @@
   const SHAPE_TOOLS = new Set(['triangle', 'rectangle', 'circle', 'check', 'cross', 'arrow', 'line', 'textfield']);
   const LINE_SHAPE_TOOLS = new Set(['arrow', 'line']);
   const HTML_VIEW_TOOLS = new Set(['edit', 'pan', 'zoom']);
-  const TEXT_MARK_TOOLS = new Set(['highlight', 'underline', 'crossout']);
+  const TEXT_MARK_TOOLS = new Set(['highlight', 'underline', 'crossout', 'blackout', 'whiteout']);
   const MIN_SHAPE_SIZE = 8;
 
   $: if (activeTool !== 'eraser') eraserCursorVisible = false;
@@ -125,6 +149,8 @@
   /** @param {string} previousTool @param {string} nextTool */
   async function handleToolTransition(previousTool, nextTool) {
     const generation = ++editorTransitionGeneration;
+    if (nextTool === 'protect') protectPanelOpen = true;
+    else if (previousTool === 'protect') protectPanelOpen = false;
     if (nextTool === 'edit') {
       if (htmlEditorStarted && htmlEditorReady) {
         htmlViewportMode = true;
@@ -178,6 +204,97 @@
   function handleHtmlEditorReady() {
     htmlEditorReady = true;
     if (editorTransition === 'Preparing Document for Editing') editorTransition = '';
+  }
+
+  function closeProtectPanel() {
+    protectPanelOpen = false;
+    protectionError = '';
+    if (!encryptionEnabled) protectionPassword = '';
+    protectionConfirmPassword = '';
+    disableProtectionPassword = '';
+    showProtectionPassword = false;
+    showProtectionConfirmPassword = false;
+    showDisableProtectionPassword = false;
+    if (activeTool === 'protect') activeTool = 'select';
+  }
+
+  function submitProtection() {
+    protectionError = '';
+    if (encryptionEnabled) {
+      if (disableProtectionPassword !== protectionPassword) {
+        protectionError = 'Incorrect password.';
+        return;
+      }
+      encryptionEnabled = false;
+      protectionPassword = '';
+      protectionConfirmPassword = '';
+      disableProtectionPassword = '';
+      showDisableProtectionPassword = false;
+      onProtectionChange({ enabled: false, password: '' });
+      return;
+    }
+    if (!protectionPassword) {
+      protectionError = 'Enter a password.';
+      return;
+    }
+    if (new TextEncoder().encode(protectionPassword).length > 32) {
+      protectionError = 'Password must be 32 bytes or fewer.';
+      return;
+    }
+    if (protectionPassword !== protectionConfirmPassword) {
+      protectionError = 'Passwords do not match.';
+      return;
+    }
+    encryptionEnabled = true;
+    protectionConfirmPassword = '';
+    disableProtectionPassword = '';
+    showProtectionPassword = false;
+    showProtectionConfirmPassword = false;
+    onProtectionChange({ enabled: true, password: protectionPassword });
+  }
+
+  async function disableImportedEncryption() {
+    passwordUnlockError = '';
+    if (!passwordUnlockValue) {
+      passwordUnlockError = 'Enter the password.';
+      return;
+    }
+    if (unlockingPdf) return;
+    unlockingPdf = true;
+    try {
+      const encryptedBytes = await workingFile.arrayBuffer();
+      const response = await fetch('/api/pdf/decrypt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pdfBase64: arrayBufferToBase64(encryptedBytes),
+          password: passwordUnlockValue
+        })
+      });
+      if (!response.ok) {
+        const error = await response.json().catch(() => null);
+        throw new Error(error?.error ?? 'Incorrect password.');
+      }
+      const decryptedBytes = await response.arrayBuffer();
+      workingFile = new File([decryptedBytes], workingFile.name, {
+        type: 'application/pdf',
+        lastModified: Date.now()
+      });
+      passwordUnlockOpen = false;
+      passwordUnlockValue = '';
+      passwordUnlockError = '';
+      showPasswordUnlockValue = false;
+      encryptionEnabled = false;
+      protectionPassword = '';
+      onProtectionChange({ enabled: false, password: '' });
+      await loadPdf();
+    } catch (error) {
+      passwordUnlockError = error instanceof Error && /password/i.test(error.message)
+        ? 'Incorrect password.'
+        : error instanceof Error ? error.message : 'Could not decrypt this PDF.';
+    } finally {
+      unlockingPdf = false;
+    }
   }
 
   onMount(() => {
@@ -709,7 +826,7 @@
 
   function commitTextHighlight() {
     if (!TEXT_MARK_TOOLS.has(activeTool)) return;
-    const markType = /** @type {'highlight' | 'underline' | 'crossout'} */ (activeTool);
+    const markType = /** @type {'highlight' | 'underline' | 'crossout' | 'blackout' | 'whiteout'} */ (activeTool);
     queueMicrotask(() => {
       const selection = window.getSelection();
       if (!selection || selection.isCollapsed || selection.rangeCount === 0 || !viewer) return;
@@ -733,7 +850,7 @@
             y: ((rect.top - pageRect.top) / pageRect.height) * pageHeight,
             width: (rect.width / pageRect.width) * pageWidth,
             height: (rect.height / pageRect.height) * pageHeight,
-            ...(markType === 'highlight' ? {} : { color: selectedTextColor(rect, shell) })
+            ...(['underline', 'crossout'].includes(markType) ? { color: selectedTextColor(rect, shell) } : {})
           }))
           .sort((left, right) => left.y - right.y || left.x - right.x);
         const merged = mergeTextHighlightRects(rects);
@@ -1941,6 +2058,8 @@
     textLayerAbortController?.abort();
     textLayerAbortController = new AbortController();
     viewer?.querySelectorAll('.textLayer').forEach((layer) => layer.remove());
+    void pdfLoadingTask?.destroy();
+    pdfLoadingTask = null;
     pdfDocument?.destroy?.();
     pdfDocument = null;
 
@@ -1954,11 +2073,22 @@
       ]);
       pdfjs.GlobalWorkerOptions.workerSrc = worker.default;
       const bytes = await workingFile.arrayBuffer();
-      const document = await pdfjs.getDocument({ data: bytes }).promise;
+      const loadingTask = pdfjs.getDocument({ data: bytes });
+      pdfLoadingTask = loadingTask;
+      loadingTask.onPassword = () => {
+        if (generation !== loadGeneration) return;
+        passwordUnlockOpen = true;
+        passwordUnlockError = '';
+        encryptionEnabled = true;
+        protectionPassword = '';
+        onProtectionChange({ enabled: true, password: '' });
+      };
+      const document = await loadingTask.promise;
       if (generation !== loadGeneration) {
         document.destroy();
         return;
       }
+      pdfLoadingTask = null;
       pdfDocument = document;
       pageCount = document.numPages;
       await tick();
@@ -1970,8 +2100,9 @@
       pdfReady = true;
       if (zoomLevel !== 1) scheduleSharpRender(0);
     } catch (error) {
+      if (generation !== loadGeneration) return;
       console.error(error);
-      status = 'Could not render this PDF.';
+      if (!passwordUnlockOpen) status = 'Could not render this PDF.';
     }
   }
 
@@ -2230,6 +2361,9 @@
   }
 
   export async function downloadPdf() {
+    if (passwordUnlockOpen || unlockingPdf) {
+      throw new Error('Unlock this password-protected PDF before downloading.');
+    }
     let sourcePdf = await workingFile.arrayBuffer();
     if (htmlEditorStarted && htmlEditor?.applyTextEdits) {
       sourcePdf = await htmlEditor.applyTextEdits(sourcePdf);
@@ -2239,7 +2373,8 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         pdfBase64: arrayBufferToBase64(sourcePdf),
-        annotations: exportableAnnotations()
+        annotations: exportableAnnotations(),
+        encryptionPassword: encryptionEnabled ? protectionPassword : ''
       })
     });
     if (!response.ok) {
@@ -2262,6 +2397,7 @@
     cancelSharpRenders();
     textLayerBuilders.forEach((builder) => builder.cancel());
     textLayerAbortController?.abort();
+    void pdfLoadingTask?.destroy();
     pdfDocument?.destroy?.();
   });
 </script>
@@ -2359,7 +2495,7 @@
                     height={rect.height}
                     rx={Math.min(2, rect.height * 0.12)}
                   />
-                {:else}
+                {:else if ['underline', 'crossout'].includes(highlight.type ?? 'highlight')}
                   <line
                     class="text-decoration"
                     x1={rect.x}
@@ -2690,6 +2826,25 @@
               <path class="pen-ink" d={strokePath(stroke.points)} />
             {/each}
           </svg>
+          <svg
+            class="annotation-layer redaction-layer"
+            viewBox={`0 0 ${pageSizes[index]?.width ?? 1} ${pageSizes[index]?.height ?? 1}`}
+            preserveAspectRatio="none"
+            aria-hidden="true"
+          >
+            {#each (textHighlights[index] ?? []).filter((mark) => mark.type === 'blackout' || mark.type === 'whiteout') as redaction (redaction.id)}
+              {#each redaction.rects as rect}
+                <rect
+                  class:blackout={redaction.type === 'blackout'}
+                  class:whiteout={redaction.type === 'whiteout'}
+                  x={rect.x}
+                  y={rect.y}
+                  width={rect.width}
+                  height={rect.height}
+                />
+              {/each}
+            {/each}
+          </svg>
         </div>
       {/each}
     </div>
@@ -2705,6 +2860,164 @@
     ></div>
   {/if}
   <EditorToolbar bind:activeTool />
+  {#if protectPanelOpen}
+    <div
+      class:encrypted={encryptionEnabled}
+      class:has-error={Boolean(protectionError)}
+      class="protect-panel"
+      role="dialog"
+      aria-label="Password Protect"
+      transition:fly={{ x: 18, duration: 240, easing: cubicOut }}
+    >
+      <header class="protect-panel-header">
+        <img src="/lock.svg" alt="" />
+        <h2>Password Protect</h2>
+        <button class="protect-panel-close" type="button" aria-label="Close password protection" onclick={closeProtectPanel}>
+          <span></span>
+          <span></span>
+        </button>
+      </header>
+      <form class="protect-panel-form" onsubmit={(event) => { event.preventDefault(); submitProtection(); }}>
+        <div class:has-error={Boolean(protectionError)} class="protect-fields">
+          {#if encryptionEnabled}
+            <div class="password-field" class:error={Boolean(protectionError)} in:fly={{ y: 8, duration: 220, easing: cubicOut }}>
+              <input
+                type={showDisableProtectionPassword ? 'text' : 'password'}
+                placeholder="Password"
+                aria-label="Password"
+                autocomplete="current-password"
+                bind:value={disableProtectionPassword}
+                oninput={() => protectionError = ''}
+              />
+              <button
+                class="password-visibility"
+                type="button"
+                aria-label={showDisableProtectionPassword ? 'Hide password' : 'Show password'}
+                aria-pressed={showDisableProtectionPassword}
+                onclick={() => showDisableProtectionPassword = !showDisableProtectionPassword}
+              >
+                <img class:visible={!showDisableProtectionPassword} src="/eye.svg" alt="" />
+                <img class:visible={showDisableProtectionPassword} src="/eye-off.svg" alt="" />
+              </button>
+            </div>
+          {:else}
+            <div class="password-fields-enter" in:fly={{ y: -8, duration: 220, easing: cubicOut }}>
+              <div
+                class="password-field"
+                class:error={protectionError === 'Enter a password.' || protectionError === 'Password must be 32 bytes or fewer.'}
+              >
+                <input
+                  type={showProtectionPassword ? 'text' : 'password'}
+                  placeholder="Password"
+                  aria-label="Password"
+                  autocomplete="new-password"
+                  bind:value={protectionPassword}
+                  oninput={() => protectionError = ''}
+                />
+                <button
+                  class="password-visibility"
+                  type="button"
+                  aria-label={showProtectionPassword ? 'Hide password' : 'Show password'}
+                  aria-pressed={showProtectionPassword}
+                  onclick={() => showProtectionPassword = !showProtectionPassword}
+                >
+                  <img class:visible={!showProtectionPassword} src="/eye.svg" alt="" />
+                  <img class:visible={showProtectionPassword} src="/eye-off.svg" alt="" />
+                </button>
+              </div>
+              <div class="password-field" class:error={protectionError === 'Passwords do not match.'}>
+                <input
+                  type={showProtectionConfirmPassword ? 'text' : 'password'}
+                  placeholder="Confirm Password"
+                  aria-label="Confirm password"
+                  autocomplete="new-password"
+                  bind:value={protectionConfirmPassword}
+                  oninput={() => protectionError = ''}
+                />
+                <button
+                  class="password-visibility"
+                  type="button"
+                  aria-label={showProtectionConfirmPassword ? 'Hide confirmed password' : 'Show confirmed password'}
+                  aria-pressed={showProtectionConfirmPassword}
+                  onclick={() => showProtectionConfirmPassword = !showProtectionConfirmPassword}
+                >
+                  <img class:visible={!showProtectionConfirmPassword} src="/eye.svg" alt="" />
+                  <img class:visible={showProtectionConfirmPassword} src="/eye-off.svg" alt="" />
+                </button>
+              </div>
+            </div>
+          {/if}
+          <p class:visible={Boolean(protectionError)} class="protection-error" aria-live="polite">{protectionError}</p>
+        </div>
+        <div class="protect-warning">
+          <h3>Warning:</h3>
+          <p>Full <span>AES-256 Encryption.</span> If you lose the Password, the file can NOT be restored.</p>
+        </div>
+        <footer class="protect-actions">
+          <button class:encrypted={encryptionEnabled} class="protect-submit" type="submit">
+            <img src="/lock.svg" alt="" />
+            <span>{encryptionEnabled ? 'Disable Encryption' : 'Enable Encryption'}</span>
+          </button>
+        </footer>
+      </form>
+    </div>
+  {/if}
+  {#if passwordUnlockOpen}
+    <div class="preparation-overlay password-unlock-overlay" role="presentation">
+      <div
+        class:has-error={Boolean(passwordUnlockError)}
+        class="protect-panel encrypted unlock-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Unlock password protected PDF"
+        transition:fly={{ y: 10, duration: 240, easing: cubicOut }}
+      >
+        <header class="protect-panel-header">
+          <img src="/lock.svg" alt="" />
+          <h2>Password Protect</h2>
+          <button class="protect-panel-close" type="button" aria-label="Close encrypted document" onclick={onRequestClose}>
+            <span></span>
+            <span></span>
+          </button>
+        </header>
+        <form class="protect-panel-form" onsubmit={(event) => { event.preventDefault(); void disableImportedEncryption(); }}>
+          <div class:has-error={Boolean(passwordUnlockError)} class="protect-fields">
+            <div class="password-field" class:error={Boolean(passwordUnlockError)}>
+              <input
+                type={showPasswordUnlockValue ? 'text' : 'password'}
+                placeholder="Password"
+                aria-label="Password"
+                autocomplete="current-password"
+                bind:value={passwordUnlockValue}
+                oninput={() => passwordUnlockError = ''}
+              />
+              <button
+                class="password-visibility"
+                type="button"
+                aria-label={showPasswordUnlockValue ? 'Hide password' : 'Show password'}
+                aria-pressed={showPasswordUnlockValue}
+                onclick={() => showPasswordUnlockValue = !showPasswordUnlockValue}
+              >
+                <img class:visible={!showPasswordUnlockValue} src="/eye.svg" alt="" />
+                <img class:visible={showPasswordUnlockValue} src="/eye-off.svg" alt="" />
+              </button>
+            </div>
+            <p class:visible={Boolean(passwordUnlockError)} class="protection-error" aria-live="polite">{passwordUnlockError}</p>
+          </div>
+          <div class="protect-warning">
+            <h3>Warning:</h3>
+            <p>Full <span>AES-256 Encryption.</span> If you lose the Password, the file can NOT be restored.</p>
+          </div>
+          <footer class="protect-actions">
+            <button class="protect-submit encrypted" type="submit" disabled={unlockingPdf}>
+              <img src="/lock.svg" alt="" />
+              <span>{unlockingPdf ? 'Disabling Encryption…' : 'Disable Encryption'}</span>
+            </button>
+          </footer>
+        </form>
+      </div>
+    </div>
+  {/if}
   {#if editorTransition}
     <div class="preparation-overlay" role="presentation">
       <div class="preparation-dialog" role="dialog" aria-modal="true" aria-label={editorTransition}>
@@ -2817,6 +3130,380 @@
     min-height: 0;
     overflow: hidden;
     background: #e9e9e9;
+  }
+
+  .protect-panel {
+    position: absolute;
+    z-index: 40;
+    top: 20px;
+    right: 18px;
+    display: grid;
+    grid-template-rows: 50px 1fr;
+    box-sizing: border-box;
+    width: min(320px, calc(100% - 36px));
+    height: 392px;
+    max-height: calc(100% - 40px);
+    overflow: hidden;
+    border: 1.5px solid #c5c5c5;
+    border-radius: 13px;
+    background: #fafafa;
+    box-shadow: 0 9px 24px rgba(0, 0, 0, 0.07);
+    color: #000;
+    font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    transition: height 300ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 200ms ease;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .protect-panel.encrypted {
+    height: 342px;
+  }
+
+  .protect-panel.has-error {
+    height: 428px;
+  }
+
+  .protect-panel.encrypted.has-error {
+    height: 378px;
+  }
+
+  .protect-panel-header {
+    display: grid;
+    grid-template-columns: 26px 1fr 28px;
+    align-items: center;
+    box-sizing: border-box;
+    min-width: 0;
+    padding: 0 12px 0 12px;
+    border-bottom: 1px solid #cacaca;
+    background: #eeeeee;
+    height: 50px;
+  }
+
+  .protect-panel-header > img {
+    width: 24px;
+    height: 24px;
+  }
+
+  .protect-panel-header h2 {
+    margin: 0 0 1px 7px;
+    overflow: hidden;
+    color: #000;
+    font-size: 18px;
+    font-weight: 400;
+    line-height: 1;
+    letter-spacing: -0.25px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .protect-panel-close {
+    position: relative;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 0;
+    border-radius: 9px;
+    background: transparent;
+    cursor: pointer;
+    transition: transform 160ms ease;
+  }
+
+  .protect-panel-close:active {
+    transform: scale(0.94);
+  }
+
+  .protect-panel-close span {
+    position: absolute;
+    top: 13px;
+    left: 6px;
+    width: 16px;
+    height: 1.5px;
+    border-radius: 999px;
+    background: #929292;
+    transform: rotate(45deg);
+    transition: background-color 160ms ease;
+  }
+
+  .protect-panel-close span + span {
+    transform: rotate(-45deg);
+  }
+
+  .protect-panel-close:hover span {
+    background: #000;
+  }
+
+  .protect-panel-form {
+    display: grid;
+    grid-template-rows: 124px 140px 78px;
+    min-height: 0;
+    transition: grid-template-rows 300ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .protect-panel.encrypted .protect-panel-form {
+    grid-template-rows: 74px 140px 78px;
+  }
+
+  .protect-panel.has-error .protect-panel-form {
+    grid-template-rows: 160px 140px 78px;
+  }
+
+  .protect-panel.encrypted.has-error .protect-panel-form {
+    grid-template-rows: 110px 140px 78px;
+  }
+
+  .protect-fields {
+    position: relative;
+    display: grid;
+    align-content: center;
+    box-sizing: border-box;
+    min-height: 0;
+    padding: 10px 18px 14px;
+    overflow: hidden;
+    border-bottom: 1px solid #cacaca;
+    background: #fafafa;
+  }
+
+  .password-fields-enter {
+    display: grid;
+    gap: 10px;
+  }
+
+  .password-field {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 44px;
+    box-sizing: border-box;
+    width: 100%;
+    height: 40px;
+    overflow: hidden;
+    border: 1px solid #d7d7d7;
+    border-radius: 8px;
+    background: #f3f3f3;
+    transition: border-color 170ms ease, box-shadow 170ms ease, background-color 170ms ease;
+  }
+
+  .password-field:focus-within {
+    border-color: #a9a9a9;
+    background: #f3f3f3;
+    box-shadow: 0 0 0 3px rgba(0, 117, 255, 0.09);
+  }
+
+  .password-field.error {
+    border-color: #e15757;
+    box-shadow: 0 0 0 3px rgba(225, 87, 87, 0.09);
+  }
+
+  .password-field input {
+    box-sizing: border-box;
+    min-width: 0;
+    height: 100%;
+    padding: 0 11px;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: #343434;
+    font: inherit;
+    font-size: 18px;
+    font-weight: 400;
+    line-height: 1;
+    letter-spacing: -0.25px;
+  }
+
+  .password-field input::placeholder {
+    color: #7a7a7a;
+    opacity: 1;
+  }
+
+  .password-visibility {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    border-left: 1px solid #d7d7d7;
+    background: transparent;
+    cursor: pointer;
+    transition: background-color 160ms ease;
+  }
+
+  .password-visibility:hover {
+    background: rgba(0, 0, 0, 0.035);
+  }
+
+  .password-visibility:active img {
+    transform: translate(-50%, -50%) scale(0.91);
+  }
+
+  .password-visibility img {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 24px;
+    height: 24px;
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.9);
+    transition: opacity 170ms ease, transform 190ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .password-visibility img.visible {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+
+  .password-visibility:active img.visible {
+    transform: translate(-50%, -50%) scale(0.91);
+  }
+
+  .protection-error {
+    box-sizing: border-box;
+    width: 100%;
+    max-height: 0;
+    margin: 0;
+    overflow: hidden;
+    color: #c83e3e;
+    font-size: 18px;
+    line-height: 1;
+    opacity: 0;
+    transform: translateY(3px);
+    transition: max-height 240ms cubic-bezier(0.22, 1, 0.36, 1), margin-top 240ms cubic-bezier(0.22, 1, 0.36, 1), opacity 170ms ease, transform 210ms ease;
+  }
+
+  .protection-error.visible {
+    max-height: 22px;
+    margin-top: 6px;
+    opacity: 1;
+    transform: translateY(4px);
+  }
+
+  .protect-warning {
+    box-sizing: border-box;
+    min-height: 0;
+    padding: 18px 19px 10px;
+    overflow: hidden;
+    border-bottom: 1px solid #cacaca;
+    background: #fafafa;
+  }
+
+  .protect-warning h3 {
+    margin: 0 0 7px;
+    color: #000;
+    font-size: 18px;
+    font-weight: 400;
+    line-height: 1;
+    letter-spacing: -0.25px;
+  }
+
+  .protect-warning p {
+    margin: 0;
+    color: #7a7a7a;
+    font-size: 18px;
+    font-weight: 400;
+    line-height: 1.42;
+    letter-spacing: -0.25px;
+  }
+
+  .protect-warning p span {
+    color: #0878f9;
+  }
+
+  .protect-actions {
+    display: grid;
+    place-items: center;
+    box-sizing: border-box;
+    min-height: 0;
+    padding: 17px 18px;
+    background: #fafafa;
+  }
+
+  .protect-submit {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    box-sizing: border-box;
+    width: 100%;
+    height: 44px;
+    padding: 0 12px;
+    border: 0;
+    border-radius: 8px;
+    background: #000;
+    color: #fff;
+    font: inherit;
+    font-size: 18px;
+    font-weight: 400;
+    line-height: 1;
+    letter-spacing: -0.3px;
+    cursor: pointer;
+    transition: background-color 260ms ease, transform 160ms ease, box-shadow 220ms ease;
+  }
+
+  .protect-submit:hover {
+    box-shadow: 0 5px 16px rgba(0, 0, 0, 0.16);
+  }
+
+  .protect-submit:active {
+    transform: scale(0.985);
+  }
+
+  .protect-submit.encrypted {
+    background: #0878f9;
+    box-shadow: 0 5px 16px rgba(8, 120, 249, 0.22);
+  }
+
+  .protect-submit:disabled {
+    cursor: wait;
+    opacity: 0.82;
+  }
+
+  .protect-submit img {
+    width: 24px;
+    height: 24px;
+    filter: brightness(0) invert(1);
+  }
+
+  .password-unlock-overlay {
+    z-index: 1100;
+  }
+
+  .unlock-panel,
+  .unlock-panel.encrypted {
+    position: relative;
+    top: auto;
+    right: auto;
+  }
+
+  @media (max-width: 980px) {
+    .protect-panel {
+      width: min(330px, calc(100% - 28px));
+      right: 14px;
+      transform-origin: top right;
+    }
+
+    .protect-panel-header h2 {
+      font-size: 18px;
+    }
+
+    .password-field input,
+    .protect-warning p {
+      font-size: 18px;
+    }
+
+    .protect-submit {
+      font-size: 18px;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .protect-panel,
+    .protect-panel-form,
+    .protect-panel-close,
+    .password-field,
+    .password-visibility,
+    .password-visibility img,
+    .protection-error,
+    .protect-submit {
+      transition: none;
+    }
   }
 
   .pdf-viewer {
@@ -3051,6 +3738,18 @@
 
   .pen-layer {
     z-index: 4;
+  }
+
+  .redaction-layer {
+    z-index: 5;
+  }
+
+  .redaction-layer rect.blackout {
+    fill: #000;
+  }
+
+  .redaction-layer rect.whiteout {
+    fill: #fff;
   }
 
   .shape-layer {

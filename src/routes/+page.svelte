@@ -27,9 +27,9 @@
     { name: 'OCR', shortcut: 'O', icon: ocrIcon }
   ];
 
-  /** @type {{ id: number; name: string; type: 'pdf'; file: File }[]} */
+  /** @type {{ id: number; name: string; type: 'pdf'; file: File; protection: { enabled: boolean; password: string } }[]} */
   let tabs = [];
-  /** @type {{ name: string; file: File }[]} */
+  /** @type {{ name: string; file: File; protection: { enabled: boolean; password: string } }[]} */
   let recentDocuments = [];
   /** @type {number | null} */
   let activeTab = null;
@@ -39,7 +39,7 @@
   let activeShortcut = '';
   /** @type {ReturnType<typeof setTimeout> | undefined} */
   let shortcutTimer;
-  /** @type {{ id: number; name: string; type: 'pdf'; file: File } | undefined} */
+  /** @type {{ id: number; name: string; type: 'pdf'; file: File; protection: { enabled: boolean; password: string } } | undefined} */
   let activeDocument;
   $: activeDocument = tabs.find((tab) => tab.id === activeTab);
   /** @type {HTMLInputElement | undefined} */
@@ -51,6 +51,11 @@
   /** @param {MouseEvent | KeyboardEvent} event @param {number} id */
   function closeTab(event, id) {
     event.stopPropagation();
+    requestCloseTab(id);
+  }
+
+  /** @param {number} id */
+  function requestCloseTab(id) {
     if (closingTabs.has(id)) return;
     closingTabs = new Set([...closingTabs, id]);
     window.setTimeout(() => finishClosingTab(id), 110);
@@ -113,22 +118,32 @@
     addFileTab(file);
   }
 
-  /** @param {File} file */
-  function addFileTab(file) {
+  /** @param {File} file @param {{ enabled: boolean; password: string }} [protection] */
+  function addFileTab(file, protection = { enabled: false, password: '' }) {
     const id = nextTabId++;
-    tabs = [...tabs, { id, name: file.name, type: 'pdf', file }];
-    recentDocuments = [{ name: file.name, file }, ...recentDocuments.filter((document) => document.name !== file.name)];
+    tabs = [...tabs, { id, name: file.name, type: 'pdf', file, protection }];
+    recentDocuments = [{ name: file.name, file, protection }, ...recentDocuments.filter((document) => document.name !== file.name)];
     activeTab = id;
   }
 
-  /** @param {{ name: string; file: File }} document */
+  /** @param {{ name: string; file: File; protection: { enabled: boolean; password: string } }} document */
   function openRecentDocument(document) {
     const existing = tabs.find((tab) => tab.name === document.name);
     if (existing) {
       activeTab = existing.id;
       return;
     }
-    addFileTab(document.file);
+    addFileTab(document.file, document.protection);
+  }
+
+  /** @param {number} id @param {{ enabled: boolean; password: string }} protection */
+  function updateDocumentProtection(id, protection) {
+    const document = tabs.find((tab) => tab.id === id);
+    if (!document) return;
+    tabs = tabs.map((tab) => tab.id === id ? { ...tab, protection } : tab);
+    recentDocuments = recentDocuments.map((recent) =>
+      recent.name === document.name ? { ...recent, protection } : recent
+    );
   }
 
   /** @param {KeyboardEvent} event */
@@ -190,6 +205,9 @@
           onclick={() => (activeTab = tab.id)}
         >
           <img src="/pdficon.svg" alt="" />
+          {#if tab.protection.enabled}
+            <img class="tab-lock-icon" src="/lock.svg" alt="Encrypted" title="Encrypted" />
+          {/if}
           <span class="tab-title" class:long-title={tab.name.length > 22}>{tab.name}</span>
           <span
             class="close-tab"
@@ -288,7 +306,10 @@
       {#each recentDocuments as document}
         <button class="recent-document" aria-label={`Open ${document.name}`} onclick={() => openRecentDocument(document)}>
           <span class="document-preview" aria-hidden="true"></span>
-          <span class="document-name"><span>{document.name}</span></span>
+          <span class="document-name">
+            {#if document.protection.enabled}<img class="recent-lock-icon" src="/lock.svg" alt="Encrypted" />{/if}
+            <span>{document.name}</span>
+          </span>
         </button>
       {/each}
 
@@ -302,7 +323,13 @@
   </section>
   {:else}
     {#key activeDocument.id}
-      <PdfEditor file={activeDocument.file} bind:this={pdfEditor} />
+      <PdfEditor
+        file={activeDocument.file}
+        protection={activeDocument.protection}
+        onProtectionChange={(protection) => updateDocumentProtection(activeDocument.id, protection)}
+        onRequestClose={() => requestCloseTab(activeDocument.id)}
+        bind:this={pdfEditor}
+      />
     {/key}
   {/if}
 
@@ -504,6 +531,14 @@
     transform: translateZ(0);
     backface-visibility: hidden;
     transition: filter 160ms ease, opacity 160ms ease;
+  }
+
+  .document-tab .tab-lock-icon {
+    width: 22px;
+    height: 22px;
+    margin-left: -4px;
+    margin-right: -7px;
+    animation: protection-lock-in 190ms cubic-bezier(0.22, 1, 0.36, 1) both;
   }
 
   .close-tab {
@@ -1116,8 +1151,10 @@
   }
 
   .document-name {
-    display: grid;
-    place-items: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
     width: 100%;
     height: 50px;
     overflow: hidden;
@@ -1138,6 +1175,18 @@
     max-width: 100%;
     overflow: hidden;
     white-space: nowrap;
+  }
+
+  .document-name .recent-lock-icon {
+    width: 17px;
+    height: 17px;
+    flex: 0 0 auto;
+    animation: protection-lock-in 190ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  @keyframes protection-lock-in {
+    from { opacity: 0; transform: scale(0.78); }
+    to { opacity: 1; transform: scale(1); }
   }
 
   .open-document .document-preview {
