@@ -1,5 +1,6 @@
 <script>
   import { onDestroy, onMount, tick } from 'svelte';
+  import HtmlAnnotationOverlay from '$lib/HtmlAnnotationOverlay.svelte';
 
   /** @type {File} */
   export let file;
@@ -7,6 +8,10 @@
   export let zoomLevel = 1;
   export let zoomingOut = false;
   export let onEditorReady = () => {};
+  /** @type {any[]} */
+  export let visualAnnotations = [];
+  /** @type {any[]} */
+  let foregroundAnnotations = [];
 
   /** @type {HTMLInputElement | undefined} */
   let fileInput;
@@ -33,9 +38,24 @@
   let convertedHtml = '';
   let exportUrl = '';
   let maskFrame = 0;
+  let overlayFrame = 0;
+  /** @type {{ page: number; left: number; top: number; width: number; height: number }[]} */
+  let overlayPageFrames = [];
+  /** @type {Map<string, { element: HTMLElement; left: number; top: number; width: number; height: number }>} */
+  const textHighlightBindings = new Map();
+  /** @type {Map<string, { x: number; y: number; width: number; height: number }>} */
+  const resolvedTextHighlightRects = new Map();
   let embeddedFontStyle = '';
   /** @type {Record<string, string>} */
   let embeddedFontFamilies = {};
+
+  $: foregroundAnnotations = visualAnnotations.filter(
+    (annotation) => annotation?.type !== 'highlight' && annotation?.type !== 'marker'
+  );
+  $: if (htmlFrame && visualAnnotations) {
+    visualAnnotations;
+    scheduleHtmlGeometrySync();
+  }
   /** @type {Record<string, string>} */
   let htmlFontNames = {};
   /** @type {Record<string, { text: string; htmlText: string }>} */
@@ -320,6 +340,8 @@
     }
 
     isConvertingHtml = true;
+    textHighlightBindings.clear();
+    resolvedTextHighlightRects.clear();
     editMode = false;
     status = 'Sending PDF to pdf2htmlEX converter...';
 
@@ -465,13 +487,15 @@
       : extractConvertedHtmlOriginalTexts(convertedHtml);
     const editNodes = new Map();
     doc.querySelectorAll('[data-docuflex-edit-id]').forEach((node) => {
-      if (!(node instanceof HTMLElement)) return;
-      editNodes.set(node.dataset.docuflexEditId || `fallback-${editNodes.size}`, node);
+      if (node.nodeType !== 1) return;
+      const htmlNode = /** @type {HTMLElement} */ (node);
+      editNodes.set(htmlNode.dataset.docuflexEditId || `fallback-${editNodes.size}`, htmlNode);
     });
     doc.querySelectorAll('.t').forEach((node, index) => {
-      if (!(node instanceof HTMLElement)) return;
-      const id = node.dataset.docuflexEditId || `html-text-${index}`;
-      if (!editNodes.has(id)) editNodes.set(id, node);
+      if (node.nodeType !== 1) return;
+      const htmlNode = /** @type {HTMLElement} */ (node);
+      const id = htmlNode.dataset.docuflexEditId || `html-text-${index}`;
+      if (!editNodes.has(id)) editNodes.set(id, htmlNode);
     });
 
     Array.from(editNodes.values()).forEach((node, index) => {
@@ -483,8 +507,8 @@
       if (!oldText || oldText === newText) return;
 
       const pageElement = node.closest('[data-page-no]');
-      const page = pageElement instanceof HTMLElement
-        ? Math.max(0, Number(pageElement.dataset.pageNo ?? '1') - 1)
+      const page = pageElement?.nodeType === 1
+        ? Math.max(0, Number((/** @type {HTMLElement} */ (pageElement)).dataset.pageNo ?? '1') - 1)
         : 0;
       htmlEdits.push({
         id: `html-${page}-${index}`,
@@ -530,6 +554,55 @@
     const misses = Array.isArray(result.misses) ? result.misses : [];
     if (misses.length) console.warn('PDFBox could not apply some HTML text edits:', misses);
     return base64ToArrayBuffer(result.pdfBase64);
+  }
+
+  export async function hasPendingTextEdits() {
+    htmlFrame?.contentDocument?.body?.normalize();
+    return (await collectConvertedHtmlEdits()).length > 0;
+  }
+
+  /** @param {ArrayBuffer} appliedBytes */
+  export async function commitAppliedTextEdits(appliedBytes) {
+    pdfBytes = appliedBytes.slice(0);
+    const frameWindow = htmlFrame?.contentWindow;
+    try {
+      const rebaseEdits = /** @type {{ __docuflexRebaseEdits?: () => void }} */ (frameWindow)?.__docuflexRebaseEdits;
+      rebaseEdits?.();
+    } catch {
+      // Fall through to the DOM baseline refresh below.
+    }
+
+    const doc = htmlFrame?.contentDocument;
+    /** @type {Record<string, { text: string; htmlText: string }>} */
+    const rebasedOriginals = {};
+    doc?.querySelectorAll('[data-docuflex-edit-id]').forEach((node) => {
+      if (node.nodeType !== 1) return;
+      const htmlNode = /** @type {HTMLElement} */ (node);
+      const currentText = normalizeLineText(convertedVisibleText(htmlNode));
+      if (!currentText) return;
+      const id = htmlNode.dataset.docuflexEditId || `html-text-${Object.keys(rebasedOriginals).length}`;
+      const htmlText = htmlNode.textContent ?? currentText;
+      htmlNode.dataset.docuflexOriginalText = currentText;
+      htmlNode.dataset.docuflexOriginalHtmlText = htmlText;
+      rebasedOriginals[id] = { text: currentText, htmlText };
+    });
+    if (Object.keys(rebasedOriginals).length) convertedHtmlOriginalTexts = rebasedOriginals;
+    scheduleHtmlGeometrySync();
+  }
+
+  export function resolvedTextHighlights() {
+    syncUnderTextAnnotationLayers();
+    return visualAnnotations.flatMap((annotation) => {
+      if (annotation?.type !== 'highlight') return [];
+      const id = String(annotation.id || '');
+      const resolved = resolvedTextHighlightRects.get(id) ?? {
+        x: Number(annotation.x || 0),
+        y: Number(annotation.y || 0),
+        width: Number(annotation.width || 0),
+        height: Number(annotation.height || 0)
+      };
+      return [{ id, page: Number(annotation.page || 0), ...resolved }];
+    });
   }
 
   async function requestConvertedHtmlEditsFromFrame() {
@@ -2376,6 +2449,54 @@
       newText
     }];
   })];
+  const docuflexRebaseEdits = () => {
+    const rebasedLines = new Map();
+    document.querySelectorAll('.docuflex-textbox').forEach((box) => {
+      if (!(box instanceof HTMLElement)) return;
+      const original = docuflexTextBoxOriginalLines(box);
+      const rows = Array.from(box.querySelectorAll('.docuflex-textbox-rich-line'));
+      const formattedRows = docuflexFormattedTextBoxRows(rows);
+      const dirty = docuflexTextBoxDirty(box);
+      const wrapped = dirty || formattedRows
+        ? (formattedRows ? docuflexTextBoxRowTexts(rows, original) : docuflexWrappedTextBoxLines(box))
+        : original.map((line) => docuflexNormalizeText(line.text || ''));
+      const nextOriginal = original.map((line, index) => {
+        let replacement = wrapped[index] || '';
+        if (index === original.length - 1 && wrapped.length > original.length) {
+          replacement = [replacement, ...wrapped.slice(original.length)].filter(Boolean).join(' ');
+        }
+        const nextLine = { ...line, text: replacement, htmlText: replacement };
+        rebasedLines.set(String(line.id || ''), { replacement, row: rows[index] });
+        return nextLine;
+      });
+      box.dataset.docuflexOriginalLines = JSON.stringify(nextOriginal);
+      box.dataset.docuflexOriginalLeft = box.style.left || '0';
+      box.dataset.docuflexOriginalTop = box.style.top || '0';
+      delete box.dataset.docuflexMoved;
+      box.classList.remove('docuflex-live-edit');
+    });
+
+    document.querySelectorAll('.t[data-docuflex-edit-id]').forEach((node) => {
+      if (!(node instanceof HTMLElement)) return;
+      const id = node.dataset.docuflexEditId || '';
+      const rebased = rebasedLines.get(id);
+      if (rebased) {
+        const row = rebased.row;
+        if (row instanceof HTMLElement) {
+          const clone = docuflexCleanRichClone(row.cloneNode(true));
+          node.innerHTML = clone.innerHTML || rebased.replacement;
+        } else {
+          node.textContent = rebased.replacement;
+        }
+      }
+      const current = rebased?.replacement || docuflexVisibleText(node) || docuflexNormalizeText(node.textContent || '');
+      if (!current) return;
+      node.dataset.docuflexOriginalText = current;
+      node.dataset.docuflexOriginalHtmlText = node.textContent || current;
+      node.classList.remove('docuflex-live-edit');
+    });
+    docuflexScheduleDirty(null);
+  };
   let docuflexDirtyTimer = 0;
   let docuflexBackdropTimer = 0;
   const docuflexScheduleDirty = (fontSource) => {
@@ -2399,6 +2520,7 @@
     }, 300);
   };
   window.__docuflexCollectEdits = docuflexCollectEdits;
+  window.__docuflexRebaseEdits = docuflexRebaseEdits;
   window.__docuflexFormat = (command) => {
     document.execCommand(command, false);
     parent.postMessage({
@@ -2754,6 +2876,266 @@ ${setupScript}`;
     doc.documentElement.style.setProperty('--docuflex-viewer-padding-right', `${48 / frameScale}px`);
     doc.documentElement.style.setProperty('--docuflex-viewer-padding-bottom', `${80 / frameScale}px`);
     doc.documentElement.style.setProperty('--docuflex-page-margin', `${30 / scale}px`);
+    scheduleHtmlGeometrySync();
+  }
+
+  function scheduleHtmlGeometrySync() {
+    if (overlayFrame) cancelAnimationFrame(overlayFrame);
+    overlayFrame = requestAnimationFrame(() => {
+      overlayFrame = 0;
+      ensureHtmlScrollExtent();
+      syncUnderTextAnnotationLayers();
+      syncOverlayPageFrames();
+    });
+  }
+
+  function syncUnderTextAnnotationLayers() {
+    const doc = htmlFrame?.contentDocument;
+    if (!doc) return;
+    const svgNamespace = 'http://www.w3.org/2000/svg';
+    /** @type {Map<number, any[]>} */
+    const annotationsByPage = new Map();
+    visualAnnotations.forEach((annotation) => {
+      if (annotation?.type !== 'highlight' && annotation?.type !== 'marker') return;
+      const page = Number(annotation.page);
+      const pageAnnotations = annotationsByPage.get(page) ?? [];
+      pageAnnotations.push(annotation);
+      annotationsByPage.set(page, pageAnnotations);
+    });
+
+    doc.querySelectorAll('.pf').forEach((page, index) => {
+      if (page.nodeType !== 1) return;
+      const htmlPage = /** @type {HTMLElement} */ (page);
+      const pageNumber = Math.max(0, Number(htmlPage.dataset.pageNo || index + 1) - 1);
+      const pageAnnotations = annotationsByPage.get(pageNumber) ?? [];
+      const pageContent = htmlPage.querySelector('.pc');
+      if (!pageContent || pageContent.nodeType !== 1) return;
+      const htmlPageContent = /** @type {HTMLElement} */ (pageContent);
+      htmlPageContent.querySelector(':scope > .docuflex-text-highlight-layer')?.remove();
+      let layer = htmlPageContent.querySelector(':scope > .docuflex-under-text-annotation-layer');
+
+      if (pageAnnotations.length === 0) {
+        layer?.remove();
+        return;
+      }
+
+      if (!layer || layer.nodeType !== 1) {
+        layer = doc.createElementNS(svgNamespace, 'svg');
+        layer.setAttribute('class', 'docuflex-under-text-annotation-layer');
+        layer.setAttribute('aria-hidden', 'true');
+        layer.setAttribute('viewBox', '0 0 1 1');
+        layer.setAttribute('preserveAspectRatio', 'none');
+        const firstTextNode = [...htmlPageContent.children].find((child) => child.classList.contains('t')) ?? null;
+        htmlPageContent.insertBefore(layer, firstTextNode);
+      }
+
+      const svgLayer = /** @type {SVGSVGElement} */ (layer);
+      svgLayer.style.position = 'absolute';
+      svgLayer.style.inset = '0';
+      svgLayer.style.width = '100%';
+      svgLayer.style.height = '100%';
+      svgLayer.style.overflow = 'hidden';
+      svgLayer.style.pointerEvents = 'none';
+      svgLayer.style.mixBlendMode = 'multiply';
+      svgLayer.replaceChildren();
+
+      pageAnnotations.forEach((annotation) => {
+        if (annotation.type === 'highlight') {
+          const boundRect = boundTextHighlightRect(annotation, htmlPage);
+          resolvedTextHighlightRects.set(String(annotation.id || ''), boundRect);
+          const rect = doc.createElementNS(svgNamespace, 'rect');
+          rect.setAttribute('x', `${boundRect.x}`);
+          rect.setAttribute('y', `${boundRect.y}`);
+          rect.setAttribute('width', `${boundRect.width}`);
+          rect.setAttribute('height', `${boundRect.height}`);
+          rect.setAttribute('rx', '0.002');
+          rect.setAttribute('fill', '#ffe43b');
+          svgLayer.appendChild(rect);
+          return;
+        }
+
+        const points = /** @type {{ x: number; y: number }[]} */ (
+          Array.isArray(annotation.points) ? annotation.points : []
+        );
+        if (points.length === 0) return;
+        const pathData = points.map((point, pointIndex) =>
+          `${pointIndex ? 'L' : 'M'} ${Number(point.x || 0)} ${Number(point.y || 0)}`
+        ).join(' ');
+        const edge = doc.createElementNS(svgNamespace, 'path');
+        edge.setAttribute('d', pathData);
+        edge.setAttribute('fill', 'none');
+        edge.setAttribute('stroke', '#f4cd19');
+        edge.setAttribute('stroke-width', '0.022');
+        edge.setAttribute('stroke-linecap', 'round');
+        edge.setAttribute('stroke-linejoin', 'round');
+        edge.setAttribute('opacity', '0.13');
+        svgLayer.appendChild(edge);
+        const ink = edge.cloneNode(false);
+        if (ink.nodeType === 1) {
+          const inkPath = /** @type {SVGPathElement} */ (ink);
+          inkPath.setAttribute('stroke', '#ffe43b');
+          inkPath.setAttribute('stroke-width', '0.0175');
+          inkPath.setAttribute('opacity', '0.34');
+          svgLayer.appendChild(inkPath);
+        }
+      });
+    });
+  }
+
+  /** @param {any} annotation @param {HTMLElement} page */
+  function boundTextHighlightRect(annotation, page) {
+    const original = {
+      x: Number(annotation.x || 0),
+      y: Number(annotation.y || 0),
+      width: Number(annotation.width || 0),
+      height: Number(annotation.height || 0)
+    };
+    const key = String(annotation.id || `${annotation.page}:${original.x}:${original.y}:${original.width}:${original.height}`);
+    const pageRect = page.getBoundingClientRect();
+    if (!pageRect.width || !pageRect.height) return original;
+    let binding = textHighlightBindings.get(key);
+    if (binding) {
+      const owner = owningEditableTextBox(page, binding.element);
+      if (owner && owner !== binding.element) {
+        const oldRect = binding.element.getBoundingClientRect();
+        const target = {
+          left: oldRect.left + binding.left * oldRect.width,
+          top: oldRect.top + binding.top * oldRect.height,
+          width: binding.width * oldRect.width,
+          height: binding.height * oldRect.height
+        };
+        const ownerRect = owner.getBoundingClientRect();
+        if (ownerRect.width && ownerRect.height) {
+          binding = {
+            element: owner,
+            left: (target.left - ownerRect.left) / ownerRect.width,
+            top: (target.top - ownerRect.top) / ownerRect.height,
+            width: target.width / ownerRect.width,
+            height: target.height / ownerRect.height
+          };
+          textHighlightBindings.set(key, binding);
+        }
+      }
+      const style = htmlFrame?.contentWindow?.getComputedStyle(binding.element);
+      if (!binding.element.isConnected || style?.display === 'none' || style?.visibility === 'hidden' || binding.element.classList.contains('docuflex-group-hidden')) {
+        textHighlightBindings.delete(key);
+        binding = undefined;
+      }
+    }
+
+    if (!binding) {
+      const target = {
+        left: pageRect.left + original.x * pageRect.width,
+        top: pageRect.top + original.y * pageRect.height,
+        right: pageRect.left + (original.x + original.width) * pageRect.width,
+        bottom: pageRect.top + (original.y + original.height) * pageRect.height
+      };
+      const targetCenterX = (target.left + target.right) / 2;
+      const targetCenterY = (target.top + target.bottom) / 2;
+      /** @type {{ element: HTMLElement; rect: DOMRect; score: number } | null} */
+      let best = null;
+      page.querySelectorAll('.docuflex-textbox, .t').forEach((candidate) => {
+        if (candidate.nodeType !== 1) return;
+        const element = /** @type {HTMLElement} */ (candidate);
+        const style = htmlFrame?.contentWindow?.getComputedStyle(element);
+        if (style?.display === 'none' || style?.visibility === 'hidden' || element.classList.contains('docuflex-group-hidden')) return;
+        const rect = element.getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
+        const overlapWidth = Math.max(0, Math.min(target.right, rect.right) - Math.max(target.left, rect.left));
+        const overlapHeight = Math.max(0, Math.min(target.bottom, rect.bottom) - Math.max(target.top, rect.top));
+        const overlap = overlapWidth * overlapHeight;
+        const distance = Math.hypot(targetCenterX - (rect.left + rect.width / 2), targetCenterY - (rect.top + rect.height / 2));
+        const score = overlap * 1000 - distance;
+        if (!best || score > best.score) best = { element, rect, score };
+      });
+      if (best) {
+        const bestMatch = /** @type {{ element: HTMLElement; rect: DOMRect; score: number }} */ (best);
+        const owner = owningEditableTextBox(page, bestMatch.element);
+        const ownerRect = owner?.getBoundingClientRect();
+        const boundElement = owner && ownerRect?.width && ownerRect.height ? owner : bestMatch.element;
+        const boundElementRect = /** @type {DOMRect} */ (boundElement === owner ? ownerRect : bestMatch.rect);
+        binding = {
+          element: boundElement,
+          left: (target.left - boundElementRect.left) / boundElementRect.width,
+          top: (target.top - boundElementRect.top) / boundElementRect.height,
+          width: (target.right - target.left) / boundElementRect.width,
+          height: (target.bottom - target.top) / boundElementRect.height
+        };
+        textHighlightBindings.set(key, binding);
+      }
+    }
+
+    if (!binding) return original;
+    const textRect = binding.element.getBoundingClientRect();
+    return {
+      x: (textRect.left + binding.left * textRect.width - pageRect.left) / pageRect.width,
+      y: (textRect.top + binding.top * textRect.height - pageRect.top) / pageRect.height,
+      width: (binding.width * textRect.width) / pageRect.width,
+      height: (binding.height * textRect.height) / pageRect.height
+    };
+  }
+
+  /** @param {HTMLElement} page @param {HTMLElement} element */
+  function owningEditableTextBox(page, element) {
+    if (element.classList.contains('docuflex-textbox')) return element;
+    const editId = element.dataset.docuflexEditId;
+    if (!editId) return null;
+    for (const candidate of page.querySelectorAll('.docuflex-textbox')) {
+      if (candidate.nodeType !== 1) continue;
+      const box = /** @type {HTMLElement} */ (candidate);
+      try {
+        const lineIds = JSON.parse(box.dataset.docuflexLineIds || '[]');
+        if (Array.isArray(lineIds) && lineIds.map(String).includes(editId)) return box;
+      } catch {
+        // Ignore a malformed generated textbox and keep the line-level binding.
+      }
+    }
+    return null;
+  }
+
+  function ensureHtmlScrollExtent() {
+    const doc = htmlFrame?.contentDocument;
+    if (!doc) return;
+    const pageContainer = doc.querySelector('#page-container');
+    const pageElements = [...doc.querySelectorAll('.pf')].filter((page) => page.nodeType === 1);
+    const lastPage = pageElements.at(-1);
+    if (!pageContainer || pageContainer.nodeType !== 1 || !lastPage || lastPage.nodeType !== 1) return;
+    const htmlPageContainer = /** @type {HTMLElement} */ (pageContainer);
+    const htmlLastPage = /** @type {HTMLElement} */ (lastPage);
+    const requiredHeight = htmlLastPage.offsetTop + htmlLastPage.offsetHeight + 60 / (scale * zoomLevel);
+    htmlPageContainer.style.minHeight = `${Math.ceil(requiredHeight)}px`;
+    let scrollTail = doc.getElementById('docuflex-html-scroll-tail');
+    if (!scrollTail || scrollTail.nodeType !== 1) {
+      scrollTail = doc.createElement('div');
+      scrollTail.id = 'docuflex-html-scroll-tail';
+      scrollTail.setAttribute('aria-hidden', 'true');
+      htmlPageContainer.insertAdjacentElement('afterend', scrollTail);
+    }
+    const htmlScrollTail = /** @type {HTMLElement} */ (scrollTail);
+    htmlScrollTail.style.height = `${Math.max(80 / (scale * zoomLevel), (htmlFrame?.contentWindow?.innerHeight ?? 0) * 0.55)}px`;
+    htmlScrollTail.style.pointerEvents = 'none';
+  }
+
+  function syncOverlayPageFrames() {
+    const doc = htmlFrame?.contentDocument;
+    if (!doc || !htmlFrame || !htmlViewport) {
+      overlayPageFrames = [];
+      return;
+    }
+    const frameScale = scale * zoomLevel;
+    overlayPageFrames = [...doc.querySelectorAll('.pf')].flatMap((page, index) => {
+      if (page.nodeType !== 1) return [];
+      const htmlPage = /** @type {HTMLElement} */ (page);
+      const rect = htmlPage.getBoundingClientRect();
+      const pageNumber = Number(htmlPage.dataset.pageNo || index + 1);
+      return [{
+        page: Math.max(0, pageNumber - 1),
+        left: rect.left * frameScale,
+        top: rect.top * frameScale,
+        width: rect.width * frameScale,
+        height: rect.height * frameScale
+      }];
+    });
   }
 
   function updateHtmlToolMode() {
@@ -2884,12 +3266,16 @@ ${setupScript}`;
       htmlPanStart = null;
       updateHtmlToolMode();
     });
+    frameWindow?.addEventListener('scroll', scheduleHtmlGeometrySync, true);
+    frameWindow?.addEventListener('resize', scheduleHtmlGeometrySync);
     doc.addEventListener('wheel', handleHtmlWheel, { passive: false, capture: true });
     doc.addEventListener('pointerdown', handleHtmlPointerDown, true);
     doc.addEventListener('pointermove', handleHtmlPointerMove, true);
+    doc.addEventListener('pointermove', scheduleHtmlGeometrySync, true);
     doc.addEventListener('pointerup', endHtmlPan, true);
     doc.addEventListener('pointercancel', endHtmlPan, true);
     doc.addEventListener('auxclick', preventHtmlMiddleClick, true);
+    doc.addEventListener('scroll', scheduleHtmlGeometrySync, true);
     hideDuplicateConvertedPageBackdrops(doc);
     requestAnimationFrame(() => hideDuplicateConvertedPageBackdrops(doc));
     doc.querySelectorAll('.t').forEach((node) => {
@@ -2911,6 +3297,9 @@ ${setupScript}`;
       saveHtmlSelection();
       syncHtmlFormatState();
     });
+    scheduleHtmlGeometrySync();
+    setTimeout(scheduleHtmlGeometrySync, 160);
+    setTimeout(scheduleHtmlGeometrySync, 500);
     onEditorReady();
   }
 
@@ -3249,8 +3638,11 @@ ${setupScript}`;
       htmlItalicActive = Boolean(font.italic);
     }
 
-    if (data.type === 'dirty' && Number(data.dirtyCount) > 0) {
-      status = `${Number(data.dirtyCount)} HTML text edit${Number(data.dirtyCount) === 1 ? '' : 's'} staged.`;
+    if (data.type === 'dirty') {
+      scheduleHtmlGeometrySync();
+      if (Number(data.dirtyCount) > 0) {
+        status = `${Number(data.dirtyCount)} HTML text edit${Number(data.dirtyCount) === 1 ? '' : 's'} staged.`;
+      }
     }
   }
 
@@ -3292,6 +3684,7 @@ ${setupScript}`;
 
   onDestroy(() => {
     if (maskFrame) cancelAnimationFrame(maskFrame);
+    if (overlayFrame) cancelAnimationFrame(overlayFrame);
     cleanupExportUrl();
     pdfDocument?.destroy?.();
   });
@@ -3317,6 +3710,7 @@ ${setupScript}`;
       sandbox="allow-scripts allow-same-origin"
       onload={prepareConvertedHtmlEditor}
     ></iframe>
+    <HtmlAnnotationOverlay pageFrames={overlayPageFrames} annotations={foregroundAnnotations} />
   {:else}
     <div class="html-editor-state">
       <span class="state-mark">{isConvertingHtml ? 'HTML' : '!'}</span>
@@ -3374,6 +3768,7 @@ ${setupScript}`;
 
   .html-preview {
     position: absolute;
+    z-index: 1;
     top: 0;
     left: 50%;
     display: block;

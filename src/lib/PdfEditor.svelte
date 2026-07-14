@@ -39,6 +39,8 @@
   let observedTool = 'select';
   let editorTransition = '';
   let editorTransitionGeneration = 0;
+  /** @type {any[]} */
+  let htmlVisualAnnotations = [];
   let zoomLevel = 1;
   let zoomingOut = false;
   let isPanning = false;
@@ -103,6 +105,13 @@
     void handleToolTransition(previousTool, activeTool);
   }
   $: htmlViewportVisible = htmlEditorStarted && htmlEditorReady && htmlViewportMode && HTML_VIEW_TOOLS.has(activeTool);
+  $: {
+    annotations;
+    shapes;
+    textHighlights;
+    pageSizes;
+    htmlVisualAnnotations = exportableAnnotations();
+  }
 
   function isTextSelectionTool() {
     return activeTool === 'select' || activeTool === 'highlight';
@@ -116,7 +125,10 @@
   async function handleToolTransition(previousTool, nextTool) {
     const generation = ++editorTransitionGeneration;
     if (nextTool === 'edit') {
-      if (htmlEditorStarted && htmlViewportMode) return;
+      if (htmlEditorStarted && htmlEditorReady) {
+        htmlViewportMode = true;
+        return;
+      }
       editorTransition = 'Preparing Document for Editing';
       htmlEditorReady = false;
       htmlEditorStarted = true;
@@ -131,7 +143,13 @@
 
     editorTransition = 'Applying Changes to Document';
     try {
+      if (htmlEditor?.resolvedTextHighlights) {
+        applyResolvedTextHighlights(htmlEditor.resolvedTextHighlights());
+      }
       const sourceBytes = await workingFile.arrayBuffer();
+      const hasTextEdits = htmlEditor?.hasPendingTextEdits
+        ? await htmlEditor.hasPendingTextEdits()
+        : true;
       const editedBytes = htmlEditor?.applyTextEdits
         ? await htmlEditor.applyTextEdits(sourceBytes)
         : sourceBytes;
@@ -141,10 +159,10 @@
         lastModified: Date.now()
       });
       htmlViewportMode = false;
-      htmlEditorStarted = false;
-      htmlEditorReady = false;
-      await tick();
       await loadPdf(false);
+      if (hasTextEdits && htmlEditor?.commitAppliedTextEdits) {
+        await htmlEditor.commitAppliedTextEdits(editedBytes);
+      }
     } catch (error) {
       console.error(error);
       status = error instanceof Error ? error.message : 'Could not apply the edited PDF text.';
@@ -2098,7 +2116,8 @@
     const exportedHighlights = Object.entries(textHighlights).flatMap(([page, highlights]) => {
       const pageSize = pageSizes[Number(page)];
       if (!pageSize?.width || !pageSize.height) return [];
-      return highlights.flatMap((highlight) => highlight.rects.map((rect) => ({
+      return highlights.flatMap((highlight) => highlight.rects.map((rect, rectIndex) => ({
+        id: `highlight-${highlight.id}-${rectIndex}`,
         page: Number(page),
         type: 'highlight',
         x: rect.x / pageSize.width,
@@ -2112,6 +2131,29 @@
       })));
     });
     return [...strokes, ...exportedShapes, ...exportedHighlights];
+  }
+
+  /** @param {{ id: string; page: number; x: number; y: number; width: number; height: number }[]} resolved */
+  function applyResolvedTextHighlights(resolved) {
+    const resolvedById = new Map(resolved.map((rect) => [rect.id, rect]));
+    textHighlights = Object.fromEntries(Object.entries(textHighlights).map(([page, highlights]) => {
+      const pageIndex = Number(page);
+      const pageSize = pageSizes[pageIndex];
+      if (!pageSize?.width || !pageSize.height) return [page, highlights];
+      return [page, highlights.map((highlight) => ({
+        ...highlight,
+        rects: highlight.rects.map((rect, rectIndex) => {
+          const resolvedRect = resolvedById.get(`highlight-${highlight.id}-${rectIndex}`);
+          if (!resolvedRect || resolvedRect.page !== pageIndex) return rect;
+          return {
+            x: resolvedRect.x * pageSize.width,
+            y: resolvedRect.y * pageSize.height,
+            width: resolvedRect.width * pageSize.width,
+            height: resolvedRect.height * pageSize.height
+          };
+        })
+      }))];
+    }));
   }
 
   export async function downloadPdf() {
@@ -2180,6 +2222,7 @@
         {activeTool}
         {zoomingOut}
         file={workingFile}
+        visualAnnotations={htmlVisualAnnotations}
         onEditorReady={handleHtmlEditorReady}
       />
     </div>
