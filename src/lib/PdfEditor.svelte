@@ -6,7 +6,7 @@
   /** @typedef {{ x: number; y: number; pressure: number }} StrokePoint */
   /** @typedef {{ id: number; type: 'marker' | 'pen'; points: StrokePoint[] }} AnnotationStroke */
   /** @typedef {{ id: number; type: 'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'textfield'; x: number; y: number; width: number; height: number; rotation: number; text?: string }} AnnotationShape */
-  /** @typedef {{ id: number; rects: { x: number; y: number; width: number; height: number }[] }} TextHighlight */
+  /** @typedef {{ id: number; type: 'highlight' | 'underline' | 'crossout'; rects: { x: number; y: number; width: number; height: number; color?: [number, number, number] }[] }} TextHighlight */
 
   /** @type {File} */
   export let file;
@@ -96,6 +96,7 @@
   const SHAPE_TOOLS = new Set(['triangle', 'rectangle', 'circle', 'check', 'cross', 'arrow', 'line', 'textfield']);
   const LINE_SHAPE_TOOLS = new Set(['arrow', 'line']);
   const HTML_VIEW_TOOLS = new Set(['edit', 'pan', 'zoom']);
+  const TEXT_MARK_TOOLS = new Set(['highlight', 'underline', 'crossout']);
   const MIN_SHAPE_SIZE = 8;
 
   $: if (activeTool !== 'eraser') eraserCursorVisible = false;
@@ -114,7 +115,7 @@
   }
 
   function isTextSelectionTool() {
-    return activeTool === 'select' || activeTool === 'highlight';
+    return activeTool === 'select' || TEXT_MARK_TOOLS.has(activeTool);
   }
 
   function htmlViewportActive() {
@@ -615,12 +616,12 @@
     zoomAt(zoomLevel * factor, event.clientX, event.clientY);
   }
 
-  /** @param {{ x: number; y: number; width: number; height: number }[]} rects */
+  /** @param {{ x: number; y: number; width: number; height: number; color?: [number, number, number] }[]} rects */
   function mergeTextHighlightRects(rects) {
     const sorted = rects
       .map((rect) => ({ ...rect }))
       .sort((left, right) => left.y - right.y || left.x - right.x);
-    /** @type {{ x: number; y: number; width: number; height: number }[]} */
+    /** @type {{ x: number; y: number; width: number; height: number; color?: [number, number, number] }[]} */
     const merged = [];
     for (const rect of sorted) {
       const previous = merged.at(-1);
@@ -628,7 +629,8 @@
       const centerY = rect.y + rect.height / 2;
       const sameLine = previous && Math.abs(previousCenterY - centerY) <= Math.max(2, Math.min(previous.height, rect.height) * 0.35);
       const touchesHorizontally = previous && rect.x <= previous.x + previous.width + 3 && rect.x + rect.width >= previous.x - 3;
-      if (sameLine && touchesHorizontally) {
+      const sameColor = previous && JSON.stringify(previous.color ?? null) === JSON.stringify(rect.color ?? null);
+      if (sameLine && touchesHorizontally && sameColor) {
         const left = Math.min(previous.x, rect.x);
         const right = Math.max(previous.x + previous.width, rect.x + rect.width);
         const top = Math.min(previous.y, rect.y);
@@ -644,8 +646,70 @@
     return merged;
   }
 
+  /** @param {DOMRect} rect @param {HTMLElement} shell */
+  function selectedTextColor(rect, shell) {
+    const canvas = shell.querySelector('canvas');
+    const context = canvas?.getContext('2d', { willReadFrequently: true });
+    const canvasRect = canvas?.getBoundingClientRect();
+    if (!canvas || !context || !canvasRect?.width || !canvasRect.height) {
+      return /** @type {[number, number, number]} */ ([0, 0, 0]);
+    }
+
+    const scaleX = canvas.width / canvasRect.width;
+    const scaleY = canvas.height / canvasRect.height;
+    const left = Math.max(0, Math.floor((rect.left - canvasRect.left) * scaleX));
+    const top = Math.max(0, Math.floor((rect.top - canvasRect.top) * scaleY));
+    const width = Math.min(canvas.width - left, Math.max(1, Math.ceil(rect.width * scaleX)));
+    const height = Math.min(canvas.height - top, Math.max(1, Math.ceil(rect.height * scaleY)));
+    if (width <= 0 || height <= 0) return /** @type {[number, number, number]} */ ([0, 0, 0]);
+
+    const pixels = context.getImageData(left, top, width, height).data;
+    const stride = Math.max(1, Math.ceil(Math.sqrt((width * height) / 12_000)));
+    /** @type {Map<string, { count: number; red: number; green: number; blue: number }>} */
+    const buckets = new Map();
+    for (let y = 0; y < height; y += stride) {
+      for (let x = 0; x < width; x += stride) {
+        const offset = (y * width + x) * 4;
+        if (pixels[offset + 3] < 128) continue;
+        const red = pixels[offset];
+        const green = pixels[offset + 1];
+        const blue = pixels[offset + 2];
+        const key = `${Math.round(red / 24)}:${Math.round(green / 24)}:${Math.round(blue / 24)}`;
+        const bucket = buckets.get(key) ?? { count: 0, red: 0, green: 0, blue: 0 };
+        bucket.count += 1;
+        bucket.red += red;
+        bucket.green += green;
+        bucket.blue += blue;
+        buckets.set(key, bucket);
+      }
+    }
+    const ranked = [...buckets.values()].sort((leftBucket, rightBucket) => rightBucket.count - leftBucket.count);
+    const background = ranked[0];
+    if (!background) return /** @type {[number, number, number]} */ ([0, 0, 0]);
+    const backgroundColor = [background.red, background.green, background.blue].map((value) => value / background.count);
+    const ink = ranked.slice(1).find((bucket) => {
+      const color = [bucket.red, bucket.green, bucket.blue].map((value) => value / bucket.count);
+      return Math.hypot(
+        color[0] - backgroundColor[0],
+        color[1] - backgroundColor[1],
+        color[2] - backgroundColor[2]
+      ) >= 42;
+    });
+    if (!ink) return /** @type {[number, number, number]} */ ([0, 0, 0]);
+    return /** @type {[number, number, number]} */ ([ink.red, ink.green, ink.blue].map(
+      (value) => Math.max(0, Math.min(1, value / ink.count / 255))
+    ));
+  }
+
+  /** @param {[number, number, number] | undefined} color */
+  function textMarkCssColor(color) {
+    const [red, green, blue] = color ?? [0, 0, 0];
+    return `rgb(${Math.round(red * 255)} ${Math.round(green * 255)} ${Math.round(blue * 255)})`;
+  }
+
   function commitTextHighlight() {
-    if (activeTool !== 'highlight') return;
+    if (!TEXT_MARK_TOOLS.has(activeTool)) return;
+    const markType = /** @type {'highlight' | 'underline' | 'crossout'} */ (activeTool);
     queueMicrotask(() => {
       const selection = window.getSelection();
       if (!selection || selection.isCollapsed || selection.rangeCount === 0 || !viewer) return;
@@ -668,21 +732,28 @@
             x: ((rect.left - pageRect.left) / pageRect.width) * pageWidth,
             y: ((rect.top - pageRect.top) / pageRect.height) * pageHeight,
             width: (rect.width / pageRect.width) * pageWidth,
-            height: (rect.height / pageRect.height) * pageHeight
+            height: (rect.height / pageRect.height) * pageHeight,
+            ...(markType === 'highlight' ? {} : { color: selectedTextColor(rect, shell) })
           }))
           .sort((left, right) => left.y - right.y || left.x - right.x);
         const merged = mergeTextHighlightRects(rects);
         if (merged.length) {
-          // Keep a single non-overlapping rectangle set per page. Drawing the
-          // same selection again therefore never stacks translucent ink.
+          const existingMarks = textHighlights[pageIndex] ?? [];
+          // Keep one non-overlapping rectangle set per mark type and page.
+          // Repeating a selection therefore never stacks duplicate ink.
           const combinedRects = mergeTextHighlightRects([
-            ...(textHighlights[pageIndex] ?? []).flatMap((highlight) => highlight.rects),
+            ...existingMarks
+              .filter((mark) => (mark.type ?? 'highlight') === markType)
+              .flatMap((mark) => mark.rects),
             ...merged
           ]);
-          const highlight = { id: nextAnnotationId++, rects: combinedRects };
+          const highlight = { id: nextAnnotationId++, type: markType, rects: combinedRects };
           textHighlights = {
             ...textHighlights,
-            [pageIndex]: [highlight]
+            [pageIndex]: [
+              ...existingMarks.filter((mark) => (mark.type ?? 'highlight') !== markType),
+              highlight
+            ]
           };
         }
       });
@@ -2117,9 +2188,9 @@
       const pageSize = pageSizes[Number(page)];
       if (!pageSize?.width || !pageSize.height) return [];
       return highlights.flatMap((highlight) => highlight.rects.map((rect, rectIndex) => ({
-        id: `highlight-${highlight.id}-${rectIndex}`,
+        id: `${highlight.type ?? 'highlight'}-${highlight.id}-${rectIndex}`,
         page: Number(page),
-        type: 'highlight',
+        type: highlight.type ?? 'highlight',
         x: rect.x / pageSize.width,
         y: rect.y / pageSize.height,
         width: rect.width / pageSize.width,
@@ -2127,6 +2198,7 @@
         rotation: 0,
         radiusX: 0,
         radiusY: 0,
+        color: rect.color ?? [],
         text: ''
       })));
     });
@@ -2143,9 +2215,10 @@
       return [page, highlights.map((highlight) => ({
         ...highlight,
         rects: highlight.rects.map((rect, rectIndex) => {
-          const resolvedRect = resolvedById.get(`highlight-${highlight.id}-${rectIndex}`);
+          const resolvedRect = resolvedById.get(`${highlight.type ?? 'highlight'}-${highlight.id}-${rectIndex}`);
           if (!resolvedRect || resolvedRect.page !== pageIndex) return rect;
           return {
+            ...rect,
             x: resolvedRect.x * pageSize.width,
             y: resolvedRect.y * pageSize.height,
             width: resolvedRect.width * pageSize.width,
@@ -2235,7 +2308,7 @@
     class:zoom-out={zoomingOut}
     class:drawing-mode={activeTool === 'marker' || activeTool === 'pen'}
     class:shape-mode={SHAPE_TOOLS.has(activeTool)}
-    class:highlight-mode={activeTool === 'highlight'}
+    class:highlight-mode={TEXT_MARK_TOOLS.has(activeTool)}
     class:eraser-mode={activeTool === 'eraser'}
     class="pdf-viewer"
     role="region"
@@ -2277,13 +2350,26 @@
           >
             {#each (textHighlights[index] ?? []) as highlight (highlight.id)}
               {#each highlight.rects as rect}
-                <rect
-                  x={rect.x}
-                  y={rect.y}
-                  width={rect.width}
-                  height={rect.height}
-                  rx={Math.min(2, rect.height * 0.12)}
-                />
+                {#if (highlight.type ?? 'highlight') === 'highlight'}
+                  <rect
+                    class="text-highlight"
+                    x={rect.x}
+                    y={rect.y}
+                    width={rect.width}
+                    height={rect.height}
+                    rx={Math.min(2, rect.height * 0.12)}
+                  />
+                {:else}
+                  <line
+                    class="text-decoration"
+                    x1={rect.x}
+                    y1={rect.y + rect.height * ((highlight.type ?? 'highlight') === 'underline' ? 0.9 : 0.52)}
+                    x2={rect.x + rect.width}
+                    y2={rect.y + rect.height * ((highlight.type ?? 'highlight') === 'underline' ? 0.9 : 0.52)}
+                    stroke={textMarkCssColor(rect.color)}
+                    style:--decoration-width={`${Math.max(1.25, Math.min(2.2, rect.height * 0.09))}px`}
+                  />
+                {/if}
               {/each}
             {/each}
           </svg>
@@ -2784,7 +2870,7 @@
     overflow: hidden;
     border: 1px solid rgba(0, 0, 0, 0.12);
     border-radius: 13px;
-    background: rgba(107, 107, 107, 0.05);
+    background: #fff;
     box-shadow: 0 10px 35px rgba(0, 0, 0, 0.08);
     animation: preparation-dialog-in 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
   }
@@ -2951,9 +3037,16 @@
     mix-blend-mode: multiply;
   }
 
-  .text-highlight-layer rect {
+  .text-highlight-layer .text-highlight {
     fill: #ffe43b;
     opacity: 1;
+  }
+
+  .text-highlight-layer .text-decoration {
+    fill: none;
+    stroke-width: var(--decoration-width, 1.5px);
+    stroke-linecap: round;
+    opacity: 0.96;
   }
 
   .pen-layer {

@@ -50,7 +50,7 @@
   let embeddedFontFamilies = {};
 
   $: foregroundAnnotations = visualAnnotations.filter(
-    (annotation) => annotation?.type !== 'highlight' && annotation?.type !== 'marker'
+    (annotation) => !['highlight', 'underline', 'crossout', 'marker'].includes(annotation?.type)
   );
   $: if (htmlFrame && visualAnnotations) {
     visualAnnotations;
@@ -593,7 +593,7 @@
   export function resolvedTextHighlights() {
     syncUnderTextAnnotationLayers();
     return visualAnnotations.flatMap((annotation) => {
-      if (annotation?.type !== 'highlight') return [];
+      if (!['highlight', 'underline', 'crossout'].includes(annotation?.type)) return [];
       const id = String(annotation.id || '');
       const resolved = resolvedTextHighlightRects.get(id) ?? {
         x: Number(annotation.x || 0),
@@ -2193,11 +2193,13 @@
       docuflexClampTextBoxToPage(box);
       box.dataset.docuflexMoved = 'true';
       docuflexBeginTextBoxVisualEditing(box, false);
+      parent.postMessage({ source: 'docuflex-html-editor', type: 'geometry' }, '*');
       event.preventDefault();
     });
     handle.addEventListener('pointerup', (event) => {
       drag = null;
       handle.releasePointerCapture(event.pointerId);
+      parent.postMessage({ source: 'docuflex-html-editor', type: 'geometry' }, '*');
     });
     let resizeDrag = null;
     resize.addEventListener('pointerdown', (event) => {
@@ -2221,11 +2223,13 @@
       docuflexBeginTextBoxVisualEditing(box);
       docuflexOpenTextBoxEditor(box, 'preserve');
       docuflexGrowTextBoxToEditor(box);
+      parent.postMessage({ source: 'docuflex-html-editor', type: 'geometry' }, '*');
       event.preventDefault();
     });
     resize.addEventListener('pointerup', (event) => {
       resizeDrag = null;
       resize.releasePointerCapture(event.pointerId);
+      parent.postMessage({ source: 'docuflex-html-editor', type: 'geometry' }, '*');
     });
     lines.forEach((line) => {
       line.node.addEventListener('focus', () => {
@@ -2896,7 +2900,7 @@ ${setupScript}`;
     /** @type {Map<number, any[]>} */
     const annotationsByPage = new Map();
     visualAnnotations.forEach((annotation) => {
-      if (annotation?.type !== 'highlight' && annotation?.type !== 'marker') return;
+      if (!['highlight', 'underline', 'crossout', 'marker'].includes(annotation?.type)) return;
       const page = Number(annotation.page);
       const pageAnnotations = annotationsByPage.get(page) ?? [];
       pageAnnotations.push(annotation);
@@ -2937,20 +2941,58 @@ ${setupScript}`;
       svgLayer.style.overflow = 'hidden';
       svgLayer.style.pointerEvents = 'none';
       svgLayer.style.mixBlendMode = 'multiply';
-      svgLayer.replaceChildren();
+      const existingGroups = new Map([...svgLayer.querySelectorAll(':scope > g[data-docuflex-annotation-id]')]
+        .map((node) => [node.getAttribute('data-docuflex-annotation-id') ?? '', node]));
+      const activeGroupIds = new Set();
 
-      pageAnnotations.forEach((annotation) => {
-        if (annotation.type === 'highlight') {
+      pageAnnotations.forEach((annotation, annotationIndex) => {
+        const annotationId = String(annotation.id || `${annotation.type}-${annotationIndex}`);
+        activeGroupIds.add(annotationId);
+        let group = existingGroups.get(annotationId);
+        if (!group || group.getAttribute('data-docuflex-annotation-type') !== annotation.type) {
+          group?.remove();
+          group = doc.createElementNS(svgNamespace, 'g');
+          group.setAttribute('data-docuflex-annotation-id', annotationId);
+          group.setAttribute('data-docuflex-annotation-type', annotation.type);
+          svgLayer.appendChild(group);
+        }
+
+        if (['highlight', 'underline', 'crossout'].includes(annotation.type)) {
           const boundRect = boundTextHighlightRect(annotation, htmlPage);
           resolvedTextHighlightRects.set(String(annotation.id || ''), boundRect);
-          const rect = doc.createElementNS(svgNamespace, 'rect');
-          rect.setAttribute('x', `${boundRect.x}`);
-          rect.setAttribute('y', `${boundRect.y}`);
-          rect.setAttribute('width', `${boundRect.width}`);
-          rect.setAttribute('height', `${boundRect.height}`);
-          rect.setAttribute('rx', '0.002');
-          rect.setAttribute('fill', '#ffe43b');
-          svgLayer.appendChild(rect);
+          if (annotation.type === 'highlight') {
+            let rect = group.querySelector(':scope > rect');
+            if (!rect) {
+              group.replaceChildren();
+              rect = doc.createElementNS(svgNamespace, 'rect');
+              group.appendChild(rect);
+            }
+            rect.setAttribute('x', `${boundRect.x}`);
+            rect.setAttribute('y', `${boundRect.y}`);
+            rect.setAttribute('width', `${boundRect.width}`);
+            rect.setAttribute('height', `${boundRect.height}`);
+            rect.setAttribute('rx', '0.002');
+            rect.setAttribute('fill', '#ffe43b');
+          } else {
+            const lineY = boundRect.y + boundRect.height * (annotation.type === 'underline' ? 0.9 : 0.52);
+            const color = Array.isArray(annotation.color) && annotation.color.length >= 3
+              ? annotation.color.slice(0, 3).map((/** @type {any} */ component) => Math.max(0, Math.min(1, Number(component) || 0)))
+              : [0, 0, 0];
+            let line = group.querySelector(':scope > line');
+            if (!line) {
+              group.replaceChildren();
+              line = doc.createElementNS(svgNamespace, 'line');
+              group.appendChild(line);
+            }
+            line.setAttribute('x1', `${boundRect.x}`);
+            line.setAttribute('y1', `${lineY}`);
+            line.setAttribute('x2', `${boundRect.x + boundRect.width}`);
+            line.setAttribute('y2', `${lineY}`);
+            line.setAttribute('stroke', `rgb(${color.map((/** @type {number} */ component) => Math.round(component * 255)).join(' ')})`);
+            line.setAttribute('stroke-width', `${Math.max(0.0012, Math.min(0.0025, boundRect.height * 0.09))}`);
+            line.setAttribute('stroke-linecap', 'round');
+            line.setAttribute('opacity', '0.96');
+          }
           return;
         }
 
@@ -2961,7 +3003,13 @@ ${setupScript}`;
         const pathData = points.map((point, pointIndex) =>
           `${pointIndex ? 'L' : 'M'} ${Number(point.x || 0)} ${Number(point.y || 0)}`
         ).join(' ');
-        const edge = doc.createElementNS(svgNamespace, 'path');
+        let paths = group.querySelectorAll(':scope > path');
+        if (paths.length !== 2) {
+          group.replaceChildren();
+          group.append(doc.createElementNS(svgNamespace, 'path'), doc.createElementNS(svgNamespace, 'path'));
+          paths = group.querySelectorAll(':scope > path');
+        }
+        const edge = paths[0];
         edge.setAttribute('d', pathData);
         edge.setAttribute('fill', 'none');
         edge.setAttribute('stroke', '#f4cd19');
@@ -2969,15 +3017,17 @@ ${setupScript}`;
         edge.setAttribute('stroke-linecap', 'round');
         edge.setAttribute('stroke-linejoin', 'round');
         edge.setAttribute('opacity', '0.13');
-        svgLayer.appendChild(edge);
-        const ink = edge.cloneNode(false);
-        if (ink.nodeType === 1) {
-          const inkPath = /** @type {SVGPathElement} */ (ink);
-          inkPath.setAttribute('stroke', '#ffe43b');
-          inkPath.setAttribute('stroke-width', '0.0175');
-          inkPath.setAttribute('opacity', '0.34');
-          svgLayer.appendChild(inkPath);
-        }
+        const ink = paths[1];
+        ink.setAttribute('d', pathData);
+        ink.setAttribute('fill', 'none');
+        ink.setAttribute('stroke', '#ffe43b');
+        ink.setAttribute('stroke-width', '0.0175');
+        ink.setAttribute('stroke-linecap', 'round');
+        ink.setAttribute('stroke-linejoin', 'round');
+        ink.setAttribute('opacity', '0.34');
+      });
+      existingGroups.forEach((group, annotationId) => {
+        if (!activeGroupIds.has(annotationId)) group.remove();
       });
     });
   }
@@ -3271,7 +3321,6 @@ ${setupScript}`;
     doc.addEventListener('wheel', handleHtmlWheel, { passive: false, capture: true });
     doc.addEventListener('pointerdown', handleHtmlPointerDown, true);
     doc.addEventListener('pointermove', handleHtmlPointerMove, true);
-    doc.addEventListener('pointermove', scheduleHtmlGeometrySync, true);
     doc.addEventListener('pointerup', endHtmlPan, true);
     doc.addEventListener('pointercancel', endHtmlPan, true);
     doc.addEventListener('auxclick', preventHtmlMiddleClick, true);
@@ -3636,6 +3685,11 @@ ${setupScript}`;
       detectedFont = detectedFontFromFrameInfo(font);
       htmlBoldActive = Boolean(font.bold);
       htmlItalicActive = Boolean(font.italic);
+    }
+
+    if (data.type === 'geometry') {
+      scheduleHtmlGeometrySync();
+      return;
     }
 
     if (data.type === 'dirty') {
