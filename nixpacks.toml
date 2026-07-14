@@ -1,6 +1,6 @@
 [phases.setup]
 nixPkgs = ["...", "jdk21_headless", "curl"]
-nixLibs = ["...", "fontconfig", "freetype", "glib", "libxcb", "libX11"]
+nixLibs = ["...", "fontconfig", "freetype", "glib", "libxcb", "xorg.libX11"]
 
 [phases.build]
 cmds = ["bash scripts/install-pdf2htmlex-linux.sh", "npm run build", "npm run backend:compile"]
