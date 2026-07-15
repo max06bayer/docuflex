@@ -44,7 +44,7 @@
   $: activeDocument = tabs.find((tab) => tab.id === activeTab);
   /** @type {HTMLInputElement | undefined} */
   let fileInput;
-  /** @type {{ downloadPdf: () => Promise<void> } | undefined} */
+  /** @type {{ downloadPdf: () => Promise<void>; openSearchPanel: () => void } | undefined} */
   let pdfEditor;
   let isDownloading = false;
 
@@ -249,7 +249,10 @@
           class="utility-button"
           aria-label={utility.label}
           title={utility.label}
-          onclick={() => utility.id === 'home' && (activeTab = null)}
+          onclick={() => {
+            if (utility.id === 'home') activeTab = null;
+            else if (utility.id === 'search') pdfEditor?.openSearchPanel();
+          }}
         >
           <img src={utility.icon} alt="" />
         </button>

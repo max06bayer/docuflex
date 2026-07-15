@@ -50,6 +50,17 @@
   let editorTransition = '';
   let editorTransitionGeneration = 0;
   let ocrTextLayerActive = false;
+  let searchPanelOpen = false;
+  let searchQuery = '';
+  /** @type {HTMLInputElement | undefined} */
+  let searchInput;
+  /** @type {Record<number, { x: number; y: number; width: number; height: number }[]>} */
+  let searchMatches = {};
+  /** @type {{ pageIndex: number; rects: { x: number; y: number; width: number; height: number }[] }[]} */
+  let searchOccurrences = [];
+  let activeSearchOccurrence = -1;
+  /** @type {number | undefined} */
+  let searchUpdateFrame;
   /** @type {any[]} */
   let htmlVisualAnnotations = [];
   let zoomLevel = 1;
@@ -181,6 +192,8 @@
       await recognizeDocumentText();
       return;
     }
+    if (nextTool === 'search') showSearchPanel();
+    else if (previousTool === 'search') resetSearchPanel();
     if (nextTool === 'protect') protectPanelOpen = true;
     else if (previousTool === 'protect') protectPanelOpen = false;
     if (nextTool === 'sign') {
@@ -243,6 +256,180 @@
     } finally {
       if (generation === editorTransitionGeneration) editorTransition = '';
     }
+  }
+
+  function showSearchPanel() {
+    searchPanelOpen = true;
+    void tick().then(() => searchInput?.focus());
+    scheduleSearchUpdate();
+  }
+
+  function resetSearchPanel() {
+    searchPanelOpen = false;
+    searchQuery = '';
+    searchMatches = {};
+    searchOccurrences = [];
+    activeSearchOccurrence = -1;
+    if (searchUpdateFrame !== undefined) cancelAnimationFrame(searchUpdateFrame);
+    searchUpdateFrame = undefined;
+  }
+
+  function closeSearchPanel() {
+    resetSearchPanel();
+    if (activeTool === 'search') activeTool = 'select';
+  }
+
+  export function openSearchPanel() {
+    activeTool = 'search';
+    showSearchPanel();
+  }
+
+  /** @param {Event} event */
+  function handleSearchInput(event) {
+    searchQuery = /** @type {HTMLInputElement} */ (event.currentTarget).value;
+    scheduleSearchUpdate();
+  }
+
+  /** @param {KeyboardEvent} event */
+  function handleSearchKeydown(event) {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    if (event.shiftKey) previousSearchOccurrence();
+    else nextSearchOccurrence();
+  }
+
+  /** @param {number} index @param {ScrollBehavior} [behavior] */
+  function scrollToSearchOccurrence(index, behavior = 'smooth') {
+    const occurrence = searchOccurrences[index];
+    const rect = occurrence?.rects[0];
+    const pageSize = occurrence ? pageSizes[occurrence.pageIndex] : null;
+    const page = occurrence ? viewer?.querySelectorAll('.pdf-page')[occurrence.pageIndex] : null;
+    if (!viewer || !(page instanceof HTMLElement) || !pageSize || !rect) return;
+
+    const viewerRect = viewer.getBoundingClientRect();
+    const pageRect = page.getBoundingClientRect();
+    const targetX = pageRect.left + (rect.x + rect.width / 2) * (pageRect.width / pageSize.width);
+    const targetY = pageRect.top + (rect.y + rect.height / 2) * (pageRect.height / pageSize.height);
+    viewer.scrollTo({
+      left: Math.max(0, viewer.scrollLeft + targetX - viewerRect.left - viewer.clientWidth / 2),
+      top: Math.max(0, viewer.scrollTop + targetY - viewerRect.top - viewer.clientHeight * 0.36),
+      behavior
+    });
+  }
+
+  function previousSearchOccurrence() {
+    if (activeSearchOccurrence <= 0) return;
+    activeSearchOccurrence -= 1;
+    scrollToSearchOccurrence(activeSearchOccurrence);
+  }
+
+  function nextSearchOccurrence() {
+    if (activeSearchOccurrence < 0 || activeSearchOccurrence >= searchOccurrences.length - 1) return;
+    activeSearchOccurrence += 1;
+    scrollToSearchOccurrence(activeSearchOccurrence);
+  }
+
+  function scheduleSearchUpdate() {
+    if (searchUpdateFrame !== undefined) cancelAnimationFrame(searchUpdateFrame);
+    searchUpdateFrame = requestAnimationFrame(() => {
+      searchUpdateFrame = undefined;
+      updateSearchMatches();
+    });
+  }
+
+  function updateSearchMatches() {
+    const query = searchQuery.trim().toLocaleLowerCase();
+    if (!query || !viewer) {
+      searchMatches = {};
+      searchOccurrences = [];
+      activeSearchOccurrence = -1;
+      return;
+    }
+
+    /** @type {Record<number, { x: number; y: number; width: number; height: number }[]>} */
+    const nextMatches = {};
+    /** @type {{ pageIndex: number; rects: { x: number; y: number; width: number; height: number }[] }[]} */
+    const nextOccurrences = [];
+    const pages = viewer.querySelectorAll('.pdf-page');
+    pages.forEach((page, pageIndex) => {
+      if (!(page instanceof HTMLElement)) return;
+      const textLayer = page.querySelector('.textLayer');
+      const pageSize = pageSizes[pageIndex];
+      if (!(textLayer instanceof HTMLElement) || !pageSize) return;
+
+      /** @type {{ node: Text; start: number; end: number }[]} */
+      const textNodes = [];
+      let pageText = '';
+      /** @type {DOMRect | null} */
+      let previousTextRect = null;
+      let previousText = '';
+      const walker = document.createTreeWalker(textLayer, NodeFilter.SHOW_TEXT);
+      let currentNode = walker.nextNode();
+      while (currentNode) {
+        if (currentNode instanceof Text && currentNode.data) {
+          const currentTextRect = currentNode.parentElement?.getBoundingClientRect() ?? null;
+          if (previousTextRect && currentTextRect && !/\s$/.test(previousText) && !/^\s/.test(currentNode.data)) {
+            const sameLine = Math.abs(
+              (previousTextRect.top + previousTextRect.bottom) / 2 -
+              (currentTextRect.top + currentTextRect.bottom) / 2
+            ) <= Math.min(previousTextRect.height, currentTextRect.height) * 0.45;
+            const visualGap = currentTextRect.left - previousTextRect.right;
+            if (!sameLine || visualGap > Math.min(previousTextRect.height, currentTextRect.height) * 0.1) {
+              pageText += ' ';
+            }
+          }
+          const start = pageText.length;
+          pageText += currentNode.data;
+          textNodes.push({ node: currentNode, start, end: pageText.length });
+          previousTextRect = currentTextRect;
+          previousText = currentNode.data;
+        }
+        currentNode = walker.nextNode();
+      }
+
+      const normalizedText = pageText.toLocaleLowerCase();
+      const pageRect = page.getBoundingClientRect();
+      if (!pageRect.width || !pageRect.height) return;
+      const scaleX = pageSize.width / pageRect.width;
+      const scaleY = pageSize.height / pageRect.height;
+      const rects = [];
+      let matchStart = normalizedText.indexOf(query);
+      while (matchStart !== -1) {
+        const matchEnd = matchStart + query.length;
+        const startNode = textNodes.find((entry) => matchStart >= entry.start && matchStart < entry.end);
+        const endNode = textNodes.find((entry) => matchEnd > entry.start && matchEnd <= entry.end);
+        /** @type {{ x: number; y: number; width: number; height: number }[]} */
+        const occurrenceRects = [];
+        if (startNode && endNode) {
+          const range = document.createRange();
+          range.setStart(startNode.node, matchStart - startNode.start);
+          range.setEnd(endNode.node, matchEnd - endNode.start);
+          for (const rangeRect of range.getClientRects()) {
+            const left = Math.max(pageRect.left, rangeRect.left);
+            const top = Math.max(pageRect.top, rangeRect.top);
+            const right = Math.min(pageRect.right, rangeRect.right);
+            const bottom = Math.min(pageRect.bottom, rangeRect.bottom);
+            if (right - left < 0.5 || bottom - top < 0.5) continue;
+            occurrenceRects.push({
+              x: (left - pageRect.left) * scaleX,
+              y: (top - pageRect.top) * scaleY,
+              width: (right - left) * scaleX,
+              height: (bottom - top) * scaleY
+            });
+          }
+        }
+        if (occurrenceRects.length) {
+          rects.push(...occurrenceRects);
+          nextOccurrences.push({ pageIndex, rects: occurrenceRects });
+        }
+        matchStart = normalizedText.indexOf(query, Math.max(matchStart + query.length, matchStart + 1));
+      }
+      if (rects.length) nextMatches[pageIndex] = rects;
+    });
+    searchMatches = nextMatches;
+    searchOccurrences = nextOccurrences;
+    activeSearchOccurrence = nextOccurrences.length ? 0 : -1;
+    if (activeSearchOccurrence === 0) scrollToSearchOccurrence(0, 'auto');
   }
 
   async function recognizeDocumentText() {
@@ -2895,6 +3082,7 @@
       ]);
       status = '';
       pdfReady = true;
+      if (searchPanelOpen && searchQuery) scheduleSearchUpdate();
       if (zoomLevel !== 1) scheduleSharpRender(0);
     } catch (error) {
       if (generation !== loadGeneration) return;
@@ -3232,6 +3420,7 @@
 
   onDestroy(() => {
     loadGeneration += 1;
+    if (searchUpdateFrame !== undefined) cancelAnimationFrame(searchUpdateFrame);
     stopSignatureCamera();
     cancelSharpRenders();
     textLayerBuilders.forEach((builder) => builder.cancel());
@@ -3307,6 +3496,22 @@
         {@const activeTextEditorShape = editingTextShape?.pageIndex === index ? findShape(index, editingTextShape.id) : null}
         <div class="pdf-page" aria-label={`Page ${index + 1}`}>
           <canvas></canvas>
+          <svg
+            class="annotation-layer search-highlight-layer"
+            viewBox={`0 0 ${pageSizes[index]?.width ?? 1} ${pageSizes[index]?.height ?? 1}`}
+            preserveAspectRatio="none"
+            aria-hidden="true"
+          >
+            {#each (searchMatches[index] ?? []) as rect}
+              <rect
+                x={rect.x}
+                y={rect.y}
+                width={rect.width}
+                height={rect.height}
+                rx={Math.min(2, rect.height * 0.1)}
+              />
+            {/each}
+          </svg>
           <svg
             class="annotation-layer marker-layer"
             viewBox={`0 0 ${pageSizes[index]?.width ?? 1} ${pageSizes[index]?.height ?? 1}`}
@@ -3966,6 +4171,56 @@
       </div>
     </div>
   {/if}
+  {#if searchPanelOpen}
+    <div
+      class="protect-panel search-panel"
+      role="dialog"
+      aria-label="Search PDF"
+      transition:fly={{ x: 18, duration: 240, easing: cubicOut }}
+    >
+      <header class="protect-panel-header">
+        <img src="/search.svg" alt="" />
+        <h2>Search</h2>
+        <button class="protect-panel-close" type="button" aria-label="Close search" onclick={closeSearchPanel}>
+          <span></span>
+          <span></span>
+        </button>
+      </header>
+      <div class="search-panel-content">
+        <div class="search-controls">
+          <div class="password-field search-field">
+            <input
+              bind:this={searchInput}
+              type="search"
+              placeholder="Search"
+              aria-label="Search document"
+              value={searchQuery}
+              oninput={handleSearchInput}
+              onkeydown={handleSearchKeydown}
+            />
+          </div>
+          <button
+            class="search-direction search-previous"
+            type="button"
+            aria-label="Previous search result"
+            disabled={activeSearchOccurrence <= 0}
+            onclick={previousSearchOccurrence}
+          >
+            <img src="/arrowright.svg" alt="" />
+          </button>
+          <button
+            class="search-direction search-next"
+            type="button"
+            aria-label="Next search result"
+            disabled={activeSearchOccurrence < 0 || activeSearchOccurrence >= searchOccurrences.length - 1}
+            onclick={nextSearchOccurrence}
+          >
+            <img src="/arrowright.svg" alt="" />
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
   {#if protectPanelOpen}
     <div
       class:encrypted={encryptionEnabled}
@@ -4370,6 +4625,71 @@
 
   .protect-panel.encrypted {
     height: 342px;
+  }
+
+  .protect-panel.search-panel {
+    height: 126px;
+  }
+
+  .search-panel-content {
+    display: grid;
+    align-content: center;
+    min-height: 0;
+    padding: 17px 18px 18px;
+    background: #fafafa;
+  }
+
+  .search-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 36px 36px;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .search-field {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .search-field input::-webkit-search-cancel-button {
+    display: none;
+  }
+
+  .search-direction {
+    display: grid;
+    place-items: center;
+    box-sizing: border-box;
+    width: 36px;
+    height: 40px;
+    padding: 0;
+    border: 1px solid #d7d7d7;
+    border-radius: 8px;
+    background: #f3f3f3;
+    cursor: pointer;
+    transition: border-color 160ms ease, background-color 160ms ease, opacity 160ms ease;
+  }
+
+  .search-direction:not(:disabled):hover {
+    border-color: #bdbdbd;
+    background: #ececec;
+  }
+
+  .search-direction:disabled {
+    opacity: 0.3;
+    cursor: default;
+  }
+
+  .search-direction img {
+    width: 17px;
+    height: 18px;
+    pointer-events: none;
+  }
+
+  .search-previous img {
+    transform: rotate(-90deg);
+  }
+
+  .search-next img {
+    transform: rotate(90deg);
   }
 
   .protect-panel.has-error {
@@ -5432,6 +5752,16 @@
   .marker-layer {
     z-index: 1;
     mix-blend-mode: multiply;
+  }
+
+  .search-highlight-layer {
+    z-index: 1;
+    mix-blend-mode: multiply;
+  }
+
+  .search-highlight-layer rect {
+    fill: #ffe43b;
+    opacity: 0.72;
   }
 
   .marker-edge {

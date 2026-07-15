@@ -93,6 +93,13 @@
   /** @type {string | null} */
   let expandedGroup = null;
 
+  $: {
+    const activeGroup = groups.find((group) => group.tools.some((tool) => tool.id === activeTool));
+    if (activeGroup && groupSelections[activeGroup.id] !== activeTool) {
+      groupSelections = { ...groupSelections, [activeGroup.id]: activeTool };
+    }
+  }
+
   /** @param {string} groupId @param {string} tool */
   function selectTool(groupId, tool) {
     activeTool = tool;
