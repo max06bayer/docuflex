@@ -50,6 +50,17 @@ import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
 import org.apache.pdfbox.pdmodel.graphics.form.PDFormXObject;
 import org.apache.pdfbox.pdmodel.graphics.blend.BlendMode;
 import org.apache.pdfbox.pdmodel.graphics.state.PDExtendedGraphicsState;
+import org.apache.pdfbox.pdmodel.interactive.annotation.PDAppearanceCharacteristicsDictionary;
+import org.apache.pdfbox.pdmodel.interactive.annotation.PDAppearanceDictionary;
+import org.apache.pdfbox.pdmodel.interactive.annotation.PDAppearanceEntry;
+import org.apache.pdfbox.pdmodel.interactive.annotation.PDAppearanceStream;
+import org.apache.pdfbox.pdmodel.interactive.annotation.PDAnnotationWidget;
+import org.apache.pdfbox.pdmodel.interactive.form.PDAcroForm;
+import org.apache.pdfbox.pdmodel.interactive.form.PDCheckBox;
+import org.apache.pdfbox.pdmodel.interactive.form.PDField;
+import org.apache.pdfbox.pdmodel.interactive.form.PDTextField;
+import org.apache.pdfbox.pdmodel.graphics.color.PDColor;
+import org.apache.pdfbox.pdmodel.graphics.color.PDDeviceRGB;
 import org.apache.pdfbox.util.Matrix;
 import org.apache.pdfbox.rendering.ImageType;
 import org.apache.pdfbox.rendering.PDFRenderer;
@@ -200,6 +211,7 @@ public class DocuflexPdfServer {
     try (PDDocument document = Loader.loadPDF(pdfBytes, sourcePassword)) {
       document.setAllSecurityToBeRemoved(true);
       List<Integer> redactedPages = new ArrayList<>();
+      List<AnnotationStroke> formFields = new ArrayList<>();
       for (int pageIndex = 0; pageIndex < document.getNumberOfPages(); pageIndex += 1) {
         List<AnnotationStroke> markers = new ArrayList<>();
         List<AnnotationStroke> textMarks = new ArrayList<>();
@@ -219,6 +231,8 @@ public class DocuflexPdfServer {
             redactions.add(annotation);
           } else if ("pen".equals(annotation.type)) {
             if (!annotation.points.isEmpty()) pens.add(annotation);
+          } else if ("checkbox".equals(annotation.type) || "input".equals(annotation.type)) {
+            formFields.add(annotation);
           } else {
             shapes.add(annotation);
           }
@@ -244,6 +258,9 @@ public class DocuflexPdfServer {
       }
       if (!redactedPages.isEmpty()) {
         flattenRedactedPages(document, redactedPages);
+      }
+      if (!formFields.isEmpty()) {
+        applyFormFields(document, formFields);
       }
 
       if (!encryptionPassword.isEmpty()) {
@@ -359,6 +376,149 @@ public class DocuflexPdfServer {
       }
       rendered.flush();
     }
+  }
+
+  private static void applyFormFields(PDDocument document, List<AnnotationStroke> formAnnotations) throws IOException {
+    PDAcroForm acroForm = document.getDocumentCatalog().getAcroForm();
+    if (acroForm == null) {
+      acroForm = new PDAcroForm(document);
+      document.getDocumentCatalog().setAcroForm(acroForm);
+    }
+    PDResources resources = acroForm.getDefaultResources();
+    if (resources == null) {
+      resources = new PDResources();
+      acroForm.setDefaultResources(resources);
+    }
+    if (resources.getFont(COSName.getPDFName("Helv")) == null) {
+      resources.put(COSName.getPDFName("Helv"), new PDType1Font(Standard14Fonts.FontName.HELVETICA));
+    }
+    if (acroForm.getDefaultAppearance() == null || acroForm.getDefaultAppearance().isBlank()) {
+      acroForm.setDefaultAppearance("/Helv 0 Tf 0 g");
+    }
+    acroForm.setNeedAppearances(false);
+
+    int generatedIndex = 1;
+    for (AnnotationStroke annotation : formAnnotations) {
+      if (annotation.page < 0 || annotation.page >= document.getNumberOfPages()) continue;
+      String requestedName = annotation.fieldName == null ? "" : annotation.fieldName.trim();
+      PDField existing = requestedName.isEmpty() ? null : acroForm.getField(requestedName);
+      if (annotation.existingField && existing != null) {
+        PDPage page = document.getPage(annotation.page);
+        PDRectangle rectangle = formFieldRectangle(page, annotation);
+        for (PDAnnotationWidget widget : existing.getWidgets()) {
+          widget.setRectangle(rectangle);
+          widget.setPage(page);
+        }
+        if ("checkbox".equals(annotation.type) && existing instanceof PDCheckBox checkbox) {
+          if (annotation.fieldChecked) checkbox.check();
+          else checkbox.unCheck();
+        } else if ("input".equals(annotation.type) && existing instanceof PDTextField textField) {
+          textField.setValue(annotation.fieldValue == null ? "" : annotation.fieldValue);
+        }
+        continue;
+      }
+
+      String fieldName = requestedName.isEmpty() ? "DocuflexField" + generatedIndex : requestedName;
+      while (acroForm.getField(fieldName) != null) fieldName = "DocuflexField" + (++generatedIndex);
+      generatedIndex += 1;
+      PDPage page = document.getPage(annotation.page);
+      PDRectangle rectangle = formFieldRectangle(page, annotation);
+      if (rectangle.getWidth() < 1 || rectangle.getHeight() < 1) continue;
+
+      if ("input".equals(annotation.type)) {
+        PDTextField textField = new PDTextField(acroForm);
+        textField.setPartialName(fieldName);
+        textField.setDefaultAppearance("/Helv 0 Tf 0 g");
+        PDAnnotationWidget widget = textField.getWidgets().get(0);
+        configureFormWidget(widget, page, rectangle);
+        acroForm.getFields().add(textField);
+        page.getAnnotations().add(widget);
+        textField.setValue(annotation.fieldValue == null ? "" : annotation.fieldValue);
+      } else if ("checkbox".equals(annotation.type)) {
+        PDCheckBox checkbox = new PDCheckBox(acroForm);
+        checkbox.setPartialName(fieldName);
+        PDAnnotationWidget widget = checkbox.getWidgets().get(0);
+        configureFormWidget(widget, page, rectangle);
+        setCheckboxAppearance(document, widget, rectangle.getWidth(), rectangle.getHeight());
+        acroForm.getFields().add(checkbox);
+        page.getAnnotations().add(widget);
+        if (annotation.fieldChecked) checkbox.check();
+        else checkbox.unCheck();
+      }
+    }
+  }
+
+  private static PDRectangle formFieldRectangle(PDPage page, AnnotationStroke shape) {
+    PdfPoint topLeft = shapePoint(page, shape, 0, 0);
+    PdfPoint topRight = shapePoint(page, shape, 1, 0);
+    PdfPoint bottomLeft = shapePoint(page, shape, 0, 1);
+    PdfPoint bottomRight = shapePoint(page, shape, 1, 1);
+    float left = Math.min(Math.min(topLeft.x, topRight.x), Math.min(bottomLeft.x, bottomRight.x));
+    float right = Math.max(Math.max(topLeft.x, topRight.x), Math.max(bottomLeft.x, bottomRight.x));
+    float bottom = Math.min(Math.min(topLeft.y, topRight.y), Math.min(bottomLeft.y, bottomRight.y));
+    float top = Math.max(Math.max(topLeft.y, topRight.y), Math.max(bottomLeft.y, bottomRight.y));
+    return new PDRectangle(left, bottom, right - left, top - bottom);
+  }
+
+  private static void configureFormWidget(PDAnnotationWidget widget, PDPage page, PDRectangle rectangle) {
+    widget.setRectangle(rectangle);
+    widget.setPage(page);
+    widget.setPrinted(true);
+    PDAppearanceCharacteristicsDictionary appearance =
+        new PDAppearanceCharacteristicsDictionary(new org.apache.pdfbox.cos.COSDictionary());
+    appearance.setBorderColour(new PDColor(new float[] {0.45f, 0.45f, 0.45f}, PDDeviceRGB.INSTANCE));
+    appearance.setBackground(new PDColor(new float[] {1f, 1f, 1f}, PDDeviceRGB.INSTANCE));
+    widget.setAppearanceCharacteristics(appearance);
+    COSArray border = new COSArray();
+    border.add(COSInteger.ZERO);
+    border.add(COSInteger.ZERO);
+    border.add(COSInteger.ONE);
+    widget.setBorder(border);
+  }
+
+  private static void setCheckboxAppearance(
+      PDDocument document,
+      PDAnnotationWidget widget,
+      float width,
+      float height) throws IOException {
+    PDAppearanceStream off = checkboxAppearanceStream(document, width, height, false);
+    PDAppearanceStream on = checkboxAppearanceStream(document, width, height, true);
+    org.apache.pdfbox.cos.COSDictionary normal = new org.apache.pdfbox.cos.COSDictionary();
+    normal.setItem(COSName.Off, off);
+    normal.setItem(COSName.getPDFName("Yes"), on);
+    PDAppearanceDictionary dictionary = new PDAppearanceDictionary();
+    dictionary.setNormalAppearance(new PDAppearanceEntry(normal));
+    widget.setAppearance(dictionary);
+    widget.setAppearanceState("Off");
+  }
+
+  private static PDAppearanceStream checkboxAppearanceStream(
+      PDDocument document,
+      float width,
+      float height,
+      boolean checked) throws IOException {
+    PDAppearanceStream stream = new PDAppearanceStream(document);
+    stream.setBBox(new PDRectangle(width, height));
+    stream.setResources(new PDResources());
+    try (PDPageContentStream content = new PDPageContentStream(document, stream)) {
+      content.setNonStrokingColor(1f, 1f, 1f);
+      content.addRect(0, 0, width, height);
+      content.fill();
+      content.setStrokingColor(0.42f, 0.42f, 0.42f);
+      content.setLineWidth(Math.max(0.75f, Math.min(width, height) * 0.055f));
+      content.addRect(0.6f, 0.6f, Math.max(0, width - 1.2f), Math.max(0, height - 1.2f));
+      content.stroke();
+      if (checked) {
+        content.setStrokingColor(0.04f, 0.47f, 0.98f);
+        content.setLineWidth(Math.max(1.2f, Math.min(width, height) * 0.12f));
+        content.setLineCapStyle(1);
+        content.moveTo(width * 0.2f, height * 0.5f);
+        content.lineTo(width * 0.42f, height * 0.25f);
+        content.lineTo(width * 0.82f, height * 0.76f);
+        content.stroke();
+      }
+    }
+    return stream;
   }
 
   private static void drawShapeLayer(
@@ -2780,7 +2940,8 @@ public class DocuflexPdfServer {
       boolean isStroke = "marker".equals(type) || "pen".equals(type);
       boolean isShape = "triangle".equals(type) || "rectangle".equals(type) || "circle".equals(type) ||
           "check".equals(type) || "cross".equals(type) || "arrow".equals(type) || "line".equals(type) ||
-          "textfield".equals(type) || "signature".equals(type) || "highlight".equals(type) || "underline".equals(type) ||
+          "textfield".equals(type) || "signature".equals(type) || "checkbox".equals(type) || "input".equals(type) ||
+          "highlight".equals(type) || "underline".equals(type) ||
           "crossout".equals(type) || "blackout".equals(type) || "whiteout".equals(type);
       if (!isStroke && !isShape) {
         throw new IllegalArgumentException("Unsupported annotation type: " + type);
@@ -2809,7 +2970,9 @@ public class DocuflexPdfServer {
         annotations.add(new AnnotationStroke(
             asInt(annotation.get("page")), type, List.of(),
             x, y, width, height, rotation, Math.max(0, radiusX), Math.max(0, radiusY),
-            color, optionalString(annotation.get("text")), imageData));
+            color, optionalString(annotation.get("text")), imageData,
+            optionalString(annotation.get("fieldName")), optionalString(annotation.get("fieldValue")),
+            optionalBoolean(annotation.get("fieldValue")), optionalBoolean(annotation.get("existingField"))));
         continue;
       }
       List<NormalizedPoint> points = new ArrayList<>();
@@ -2827,7 +2990,7 @@ public class DocuflexPdfServer {
         }
       }
       annotations.add(new AnnotationStroke(
-          asInt(annotation.get("page")), type, points, 0, 0, 0, 0, 0, 0, 0, List.of(), "", ""));
+          asInt(annotation.get("page")), type, points, 0, 0, 0, 0, 0, 0, 0, List.of(), "", "", "", "", false, false));
     }
     return annotations;
   }
@@ -3036,7 +3199,11 @@ public class DocuflexPdfServer {
       double radiusY,
       List<Double> color,
       String text,
-      String imageData) {}
+      String imageData,
+      String fieldName,
+      String fieldValue,
+      boolean fieldChecked,
+      boolean existingField) {}
 
   private record NormalizedPoint(double x, double y) {}
 

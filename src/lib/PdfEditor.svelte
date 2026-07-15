@@ -7,7 +7,7 @@
 
   /** @typedef {{ x: number; y: number; pressure: number }} StrokePoint */
   /** @typedef {{ id: number; type: 'marker' | 'pen'; points: StrokePoint[] }} AnnotationStroke */
-  /** @typedef {{ id: number; type: 'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'textfield' | 'signature'; x: number; y: number; width: number; height: number; rotation: number; text?: string; imageData?: string }} AnnotationShape */
+  /** @typedef {{ id: number; type: 'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'textfield' | 'signature' | 'checkbox' | 'input'; x: number; y: number; width: number; height: number; rotation: number; text?: string; imageData?: string; fieldName?: string; fieldValue?: string | boolean; existingField?: boolean; readOnly?: boolean }} AnnotationShape */
   /** @typedef {{ id: number; type: 'highlight' | 'underline' | 'crossout' | 'blackout' | 'whiteout'; rects: { x: number; y: number; width: number; height: number; color?: [number, number, number] }[] }} TextHighlight */
 
   /** @type {File} */
@@ -94,6 +94,8 @@
   let drawingShape = null;
   /** @type {any} */
   let shapeInteraction = null;
+  /** @type {{ pointerId: number; pageIndex: number; id: number; clientX: number; clientY: number; start: StrokePoint } | null} */
+  let pendingFormDrag = null;
   /** @type {{ pageIndex: number; x: number | null; y: number | null; shape: AnnotationShape } | null} */
   let shapeGuides = null;
   let protectPanelOpen = false;
@@ -142,7 +144,7 @@
   const CLICK_ZOOM_FACTOR = 1.25;
   const MAX_CANVAS_PIXELS = 24_000_000;
   const ERASER_RADIUS = 17;
-  const SHAPE_TOOLS = new Set(['triangle', 'rectangle', 'circle', 'check', 'cross', 'arrow', 'line', 'textfield']);
+  const SHAPE_TOOLS = new Set(['triangle', 'rectangle', 'circle', 'check', 'cross', 'arrow', 'line', 'textfield', 'checkbox', 'input']);
   const LINE_SHAPE_TOOLS = new Set(['arrow', 'line']);
   const HTML_VIEW_TOOLS = new Set(['edit', 'pan', 'zoom']);
   const TEXT_MARK_TOOLS = new Set(['highlight', 'underline', 'crossout', 'blackout', 'whiteout']);
@@ -1319,7 +1321,12 @@
         : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
           ? 100
           : 1;
-    const factor = Math.exp(-event.deltaY * deltaScale * 0.002);
+    // Browsers expose a macOS trackpad pinch as a Ctrl-modified wheel event,
+    // while the explicit zoom shortcut uses Cmd. Pinch deltas are much
+    // smaller, so keep shortcut scrolling at its original sensitivity and
+    // accelerate only the native pinch gesture.
+    const sensitivity = event.metaKey ? 0.002 : 0.01;
+    const factor = Math.exp(-event.deltaY * deltaScale * sensitivity);
     zoomAt(zoomLevel * factor, event.clientX, event.clientY);
   }
 
@@ -1623,6 +1630,53 @@
     commitActiveTextField();
   }
 
+  /** @param {PointerEvent} event @param {number} pageIndex @param {AnnotationShape} shape */
+  function handlePdfFormPointerDown(event, pageIndex, shape) {
+    if (activeTool !== 'select' || shape.readOnly) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    const target = event.target;
+    const input = target instanceof HTMLInputElement ? target : null;
+    const localX = input ? event.clientX - input.getBoundingClientRect().left : 0;
+    const textEnd = input && shape.type === 'input' ? textFieldTextWidth(input.value) + 16 : 0;
+    const dragFromUnusedArea = shape.type === 'checkbox' || Boolean(input && localX >= Math.min(input.clientWidth - 14, textEnd));
+    if (dragFromUnusedArea && viewer) {
+      const shell = viewer.querySelectorAll('.pdf-page')[pageIndex];
+      if (shell instanceof HTMLElement) {
+        pendingFormDrag = {
+          pointerId: event.pointerId,
+          pageIndex,
+          id: shape.id,
+          clientX: event.clientX,
+          clientY: event.clientY,
+          start: pointOnPage(event, shell)
+        };
+      }
+    }
+    event.stopPropagation();
+  }
+
+  /** @param {Event} event @param {number} pageIndex @param {AnnotationShape} shape */
+  function updatePdfFormField(event, pageIndex, shape) {
+    const input = event.currentTarget;
+    if (!(input instanceof HTMLInputElement)) return;
+    replaceShape(pageIndex, {
+      ...shape,
+      fieldValue: shape.type === 'checkbox' ? input.checked : input.value
+    });
+  }
+
+  /** @param {MouseEvent} event @param {AnnotationShape} shape */
+  function updatePdfFormCursor(event, shape) {
+    const input = event.currentTarget;
+    if (!(input instanceof HTMLInputElement) || shape.type !== 'input') return;
+    const localX = event.clientX - input.getBoundingClientRect().left;
+    const textEnd = textFieldTextWidth(input.value) + 16;
+    input.style.cursor = localX >= Math.min(input.clientWidth - 14, textEnd) ? 'move' : 'text';
+  }
+
   /** @param {number} value @param {number} minimum @param {number} maximum */
   function clamp(value, minimum, maximum) {
     return Math.max(minimum, Math.min(maximum, value));
@@ -1862,13 +1916,16 @@
     const start = pointOnPage(event, shell);
     const shape = {
       id: nextAnnotationId++,
-      type: /** @type {'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'textfield'} */ (activeTool),
+      type: /** @type {'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'textfield' | 'checkbox' | 'input'} */ (activeTool),
       x: start.x,
       y: start.y,
       width: 0.01,
       height: 0.01,
       rotation: 0,
-      text: activeTool === 'textfield' ? '' : undefined
+      text: activeTool === 'textfield' ? '' : undefined,
+      fieldName: activeTool === 'checkbox' || activeTool === 'input' ? `DocuflexField${nextAnnotationId - 1}` : undefined,
+      fieldValue: activeTool === 'checkbox' ? false : activeTool === 'input' ? '' : undefined,
+      existingField: false
     };
     shapes = { ...shapes, [pageIndex]: [...(shapes[pageIndex] ?? []), shape] };
     setShapeSelection(pageIndex, [shape.id]);
@@ -2422,6 +2479,29 @@
   /** @param {PointerEvent} event */
   function handleViewerPointerMove(event) {
     updateEraserCursor(event);
+    if (viewer && pendingFormDrag && event.pointerId === pendingFormDrag.pointerId) {
+      const distance = Math.hypot(event.clientX - pendingFormDrag.clientX, event.clientY - pendingFormDrag.clientY);
+      if (distance >= 4) {
+        const pending = pendingFormDrag;
+        const shape = findShape(pending.pageIndex, pending.id);
+        const shell = viewer.querySelectorAll('.pdf-page')[pending.pageIndex];
+        pendingFormDrag = null;
+        if (shape && shell instanceof HTMLElement) {
+          event.preventDefault();
+          window.getSelection()?.removeAllRanges();
+          setShapeSelection(pending.pageIndex, [shape.id]);
+          shapeInteraction = {
+            pointerId: event.pointerId,
+            kind: 'move',
+            pageIndex: pending.pageIndex,
+            id: shape.id,
+            start: pending.start,
+            initial: { ...shape }
+          };
+          viewer.setPointerCapture(event.pointerId);
+        }
+      }
+    }
     if (viewer && drawingShape && event.pointerId === drawingShape.pointerId) {
       const shell = viewer.querySelectorAll('.pdf-page')[drawingShape.pageIndex];
       if (shell instanceof HTMLElement) updateShapeCreation(event, shell);
@@ -2474,6 +2554,7 @@
   /** @param {PointerEvent} event */
   function endPan(event) {
     if (!viewer) return;
+    if (pendingFormDrag?.pointerId === event.pointerId) pendingFormDrag = null;
     if (drawingShape && event.pointerId === drawingShape.pointerId) {
       const finishedPageIndex = drawingShape.pageIndex;
       const shell = viewer.querySelectorAll('.pdf-page')[drawingShape.pageIndex];
@@ -2487,8 +2568,10 @@
         };
         replaceShape(drawingShape.pageIndex, shapeFromEndpoints(shape, drawingShape.start, end));
       } else if (shape && pageSize && !isLinearShape(shape) && (shape.width < 3 || shape.height < 3)) {
-        const preferredWidth = shape.type === 'textfield' ? 180 : shape.type === 'check' || shape.type === 'cross' ? 48 : 120;
-        const preferredHeight = shape.type === 'textfield' ? 40 : preferredWidth;
+        const preferredWidth = shape.type === 'textfield' || shape.type === 'input'
+          ? 180
+          : shape.type === 'checkbox' ? 24 : shape.type === 'check' || shape.type === 'cross' ? 48 : 120;
+        const preferredHeight = shape.type === 'textfield' ? 40 : shape.type === 'input' ? 34 : shape.type === 'checkbox' ? 24 : preferredWidth;
         const defaultWidth = Math.min(preferredWidth, pageSize.width / 3);
         const defaultHeight = Math.min(preferredHeight, pageSize.height / 4);
         replaceShape(drawingShape.pageIndex, {
@@ -2505,6 +2588,11 @@
       if (shape?.type === 'textfield') {
         editingTextShape = { pageIndex: finishedPageIndex, id: shape.id };
         tick().then(() => focusTextEditor(shape.id));
+      } else if (shape?.type === 'input') {
+        tick().then(() => {
+          const input = viewer?.querySelector(`input[data-form-field="${shape.id}"]`);
+          if (input instanceof HTMLInputElement) input.focus();
+        });
       }
     }
     if (shapeInteraction && event.pointerId === shapeInteraction.pointerId) {
@@ -2598,6 +2686,7 @@
         canvas: nextCanvas,
         canvasContext: context,
         viewport: renderViewport,
+        annotationMode: 2,
         transform: outputScale === 1 ? undefined : [outputScale, 0, 0, outputScale, 0, 0]
       });
       sharpRenderTasks.add(task);
@@ -2683,7 +2772,7 @@
       pageCount = document.numPages;
       await tick();
       await Promise.all([
-        renderPages(pdfViewer, document, generation),
+        renderPages(pdfViewer, document, generation, resetAnnotations),
         renderThumbnails(document, generation)
       ]);
       status = '';
@@ -2700,8 +2789,9 @@
    * @param {typeof import('pdfjs-dist/web/pdf_viewer.mjs')} pdfViewer
    * @param {import('pdfjs-dist').PDFDocumentProxy} document
    * @param {number} generation
+   * @param {boolean} loadFormWidgets
    */
-  async function renderPages(pdfViewer, document, generation) {
+  async function renderPages(pdfViewer, document, generation, loadFormWidgets) {
     const shells = viewer?.querySelectorAll('.pdf-page') ?? [];
     for (let index = 0; index < shells.length; index += 1) {
       if (generation !== loadGeneration) return;
@@ -2717,6 +2807,36 @@
       shell.style.width = `${viewport.width}px`;
       shell.style.height = `${viewport.height}px`;
       pageSizes = { ...pageSizes, [index]: { width: viewport.width, height: viewport.height } };
+      if (loadFormWidgets) {
+        const pageAnnotations = await page.getAnnotations({ intent: 'display' });
+        const formShapes = pageAnnotations.flatMap((/** @type {any} */ annotation) => {
+          if (annotation.subtype !== 'Widget' || !Array.isArray(annotation.rect)) return [];
+          const isCheckbox = annotation.fieldType === 'Btn' && Boolean(annotation.checkBox);
+          const isTextInput = annotation.fieldType === 'Tx';
+          if (!isCheckbox && !isTextInput) return [];
+          const converted = viewport.convertToViewportRectangle(annotation.rect);
+          const x = Math.min(converted[0], converted[2]);
+          const y = Math.min(converted[1], converted[3]);
+          const width = Math.abs(converted[2] - converted[0]);
+          const height = Math.abs(converted[3] - converted[1]);
+          if (width < 1 || height < 1) return [];
+          const rawValue = Array.isArray(annotation.fieldValue) ? annotation.fieldValue[0] : annotation.fieldValue;
+          return [{
+            id: nextAnnotationId++,
+            type: /** @type {'checkbox' | 'input'} */ (isCheckbox ? 'checkbox' : 'input'),
+            x,
+            y,
+            width,
+            height,
+            rotation: 0,
+            fieldName: String(annotation.fieldName ?? annotation.id ?? `Field${nextAnnotationId}`),
+            fieldValue: isCheckbox ? Boolean(rawValue && rawValue !== 'Off') : String(rawValue ?? ''),
+            existingField: true,
+            readOnly: Boolean(annotation.readOnly)
+          }];
+        });
+        if (formShapes.length) shapes = { ...shapes, [index]: [...(shapes[index] ?? []), ...formShapes] };
+      }
       shell.style.setProperty('--total-scale-factor', `${viewport.scale}`);
       shell.style.setProperty('--scale-round-x', '1px');
       shell.style.setProperty('--scale-round-y', '1px');
@@ -2737,6 +2857,7 @@
           canvas,
           canvasContext: context,
           viewport,
+          annotationMode: 2,
           transform: outputScale === 1 ? undefined : [outputScale, 0, 0, outputScale, 0, 0]
         }).promise,
         textLayerBuilder.render({ viewport, images: /** @type {any} */ (null) })
@@ -2902,7 +3023,10 @@
           radiusX: 0,
           radiusY: 0,
           text: shape.text ?? '',
-          imageData: shape.imageData ?? ''
+          imageData: shape.imageData ?? '',
+          fieldName: shape.fieldName ?? '',
+          fieldValue: shape.fieldValue ?? '',
+          existingField: Boolean(shape.existingField)
         };
       });
     });
@@ -3144,6 +3268,8 @@
                     height={shape.height}
                     preserveAspectRatio="none"
                   />
+                {:else if shape.type === 'checkbox' || shape.type === 'input'}
+                  <g></g>
                 {:else if shape.type === 'rectangle'}
                   <rect
                     class="pdf-shape"
@@ -3232,6 +3358,52 @@
               </g>
             {/each}
           </svg>
+          <div class="pdf-form-layer" aria-label={`Form fields on page ${index + 1}`}>
+            {#each (shapes[index] ?? []).filter((shape) => shape.type === 'checkbox' || shape.type === 'input') as shape (shape.id)}
+              <div
+                class:existing={shape.existingField}
+                class:readonly={shape.readOnly}
+                class="pdf-form-widget"
+                role="group"
+                aria-label={shape.fieldName || (shape.type === 'checkbox' ? 'PDF checkbox' : 'PDF text input')}
+                data-shape-id={shape.id}
+                data-shape-page={index}
+                style:left={`${shape.x}px`}
+                style:top={`${shape.y}px`}
+                style:width={`${shape.width}px`}
+                style:height={`${shape.height}px`}
+                onpointerdown={(event) => handlePdfFormPointerDown(event, index, shape)}
+              >
+                {#if shape.type === 'checkbox'}
+                  <input
+                    class="pdf-checkbox-field"
+                    data-form-field={shape.id}
+                    type="checkbox"
+                    aria-label={shape.fieldName || 'PDF checkbox'}
+                    checked={Boolean(shape.fieldValue)}
+                    disabled={shape.readOnly}
+                    onchange={(event) => updatePdfFormField(event, index, shape)}
+                  />
+                {:else}
+                  <input
+                    class="pdf-input-field"
+                    data-form-field={shape.id}
+                    type="text"
+                    aria-label={shape.fieldName || 'PDF text input'}
+                    value={String(shape.fieldValue ?? '')}
+                    readonly={shape.readOnly}
+                    oninput={(event) => updatePdfFormField(event, index, shape)}
+                    onmousemove={(event) => updatePdfFormCursor(event, shape)}
+                    ondblclick={(event) => {
+                      event.stopPropagation();
+                      event.currentTarget.focus();
+                      event.currentTarget.select();
+                    }}
+                  />
+                {/if}
+              </div>
+            {/each}
+          </div>
           {#if currentSelection}
             <svg
               class="annotation-layer shape-selection-layer"
@@ -3361,17 +3533,19 @@
                     stroke-width={2 / zoomLevel}
                   />
                 {/each}
-                {#each [[-1, -1], [1, -1], [-1, 1], [1, 1]] as corner}
-                  <circle
-                    class="shape-rotate-zone"
-                    data-shape-id={currentSelection.id}
-                    data-shape-page={index}
-                    data-shape-rotate
-                    cx={currentSelection.x + (corner[0] < 0 ? -15 / zoomLevel : currentSelection.width + 15 / zoomLevel)}
-                    cy={currentSelection.y + (corner[1] < 0 ? -15 / zoomLevel : currentSelection.height + 15 / zoomLevel)}
-                    r={10 / zoomLevel}
-                  />
-                {/each}
+                {#if currentSelection.type !== 'checkbox' && currentSelection.type !== 'input'}
+                  {#each [[-1, -1], [1, -1], [-1, 1], [1, 1]] as corner}
+                    <circle
+                      class="shape-rotate-zone"
+                      data-shape-id={currentSelection.id}
+                      data-shape-page={index}
+                      data-shape-rotate
+                      cx={currentSelection.x + (corner[0] < 0 ? -15 / zoomLevel : currentSelection.width + 15 / zoomLevel)}
+                      cy={currentSelection.y + (corner[1] < 0 ? -15 / zoomLevel : currentSelection.height + 15 / zoomLevel)}
+                      r={10 / zoomLevel}
+                    />
+                  {/each}
+                {/if}
                 {#if currentSelection}
                   {@const badgeLabel = `${Math.round(currentSelection.width)} × ${Math.round(currentSelection.height)}`}
                   {@const badgeWidth = Math.max(54, badgeLabel.length * 7 + 8) / zoomLevel}
@@ -5040,6 +5214,80 @@
     z-index: 3;
   }
 
+  .pdf-form-layer {
+    position: absolute;
+    z-index: 6;
+    inset: 0;
+    pointer-events: none;
+  }
+
+  .pdf-form-widget {
+    position: absolute;
+    box-sizing: border-box;
+    pointer-events: auto;
+  }
+
+  .pdf-input-field,
+  .pdf-checkbox-field {
+    box-sizing: border-box;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    outline: 0;
+    border: 1px solid rgba(45, 139, 205, 0.72);
+    border-radius: 2px;
+    background: rgba(177, 220, 250, 0.48);
+    color: #171717;
+    transition: background-color 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
+  }
+
+  .pdf-input-field {
+    min-width: 0;
+    padding: 1px 5px;
+    font-family: Helvetica, Arial, sans-serif;
+    font-size: 15px;
+    line-height: 1;
+  }
+
+  .pdf-input-field:focus,
+  .pdf-checkbox-field:focus {
+    border-color: #0878f9;
+    background: rgba(185, 226, 255, 0.62);
+    box-shadow: 0 0 0 2px rgba(8, 120, 249, 0.18);
+  }
+
+  .pdf-checkbox-field {
+    position: relative;
+    appearance: none;
+    -webkit-appearance: none;
+    cursor: grab;
+  }
+
+  .pdf-checkbox-field:active {
+    cursor: grabbing;
+  }
+
+  .pdf-checkbox-field:checked {
+    border-color: #0878f9;
+    background: #0878f9;
+  }
+
+  .pdf-checkbox-field:checked::after {
+    position: absolute;
+    top: 16%;
+    left: 31%;
+    width: 28%;
+    height: 52%;
+    border: solid #fff;
+    border-width: 0 2px 2px 0;
+    content: '';
+    transform: rotate(45deg);
+  }
+
+  .pdf-form-widget.readonly {
+    opacity: 0.78;
+  }
+
   .pdf-text-editor-overlay {
     position: absolute;
     z-index: 6;
@@ -5135,7 +5383,7 @@
   }
 
   .shape-selection-layer {
-    z-index: 5;
+    z-index: 7;
     overflow: visible;
   }
 
