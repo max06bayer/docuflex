@@ -7,7 +7,7 @@
 
   /** @typedef {{ x: number; y: number; pressure: number }} StrokePoint */
   /** @typedef {{ id: number; type: 'marker' | 'pen'; points: StrokePoint[] }} AnnotationStroke */
-  /** @typedef {{ id: number; type: 'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'textfield' | 'signature' | 'checkbox' | 'input'; x: number; y: number; width: number; height: number; rotation: number; text?: string; imageData?: string; fieldName?: string; fieldValue?: string | boolean; existingField?: boolean; readOnly?: boolean }} AnnotationShape */
+  /** @typedef {{ id: number; type: 'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'measure' | 'crop' | 'textfield' | 'signature' | 'checkbox' | 'input'; x: number; y: number; width: number; height: number; rotation: number; text?: string; imageData?: string; fieldName?: string; fieldValue?: string | boolean; existingField?: boolean; readOnly?: boolean }} AnnotationShape */
   /** @typedef {{ id: number; type: 'highlight' | 'underline' | 'crossout' | 'blackout' | 'whiteout'; rects: { x: number; y: number; width: number; height: number; color?: [number, number, number] }[] }} TextHighlight */
 
   /** @type {File} */
@@ -144,8 +144,8 @@
   const CLICK_ZOOM_FACTOR = 1.25;
   const MAX_CANVAS_PIXELS = 24_000_000;
   const ERASER_RADIUS = 17;
-  const SHAPE_TOOLS = new Set(['triangle', 'rectangle', 'circle', 'check', 'cross', 'arrow', 'line', 'textfield', 'checkbox', 'input']);
-  const LINE_SHAPE_TOOLS = new Set(['arrow', 'line']);
+  const SHAPE_TOOLS = new Set(['triangle', 'rectangle', 'circle', 'check', 'cross', 'arrow', 'line', 'measure', 'crop', 'textfield', 'checkbox', 'input']);
+  const LINE_SHAPE_TOOLS = new Set(['arrow', 'line', 'measure']);
   const HTML_VIEW_TOOLS = new Set(['edit', 'pan', 'zoom']);
   const TEXT_MARK_TOOLS = new Set(['highlight', 'underline', 'crossout', 'blackout', 'whiteout']);
   const MIN_SHAPE_SIZE = 8;
@@ -184,6 +184,11 @@
     } else if (previousTool === 'sign') {
       signPanelOpen = false;
       addSignaturePanelOpen = false;
+    }
+    if (nextTool === 'crop') prepareCropTool();
+    else if (previousTool === 'crop') {
+      if (selectedShape) setShapeSelection(selectedShape.pageIndex, []);
+      shapeGuides = null;
     }
     if (nextTool === 'edit') {
       if (htmlEditorStarted && htmlEditorReady) {
@@ -1710,6 +1715,37 @@
     };
   }
 
+  /** @param {number} cssLength */
+  function measureDetails(cssLength) {
+    const points = cssLength / BASE_PAGE_SCALE;
+    const millimetres = points * 25.4 / 72;
+    const primaryPrecision = millimetres < 10 ? 2 : 1;
+    return {
+      points,
+      millimetres,
+      primary: `${millimetres.toFixed(primaryPrecision)} mm`
+    };
+  }
+
+  /** @param {number} rotation */
+  function measureAngleLabel(rotation) {
+    let angle = ((rotation + 180) % 360 + 360) % 360 - 180;
+    if (Math.abs(angle) < 0.05) angle = 0;
+    return `${angle.toFixed(Math.abs(angle) < 10 && angle !== 0 ? 1 : 0)}°`;
+  }
+
+  /** @param {AnnotationShape} shape */
+  function measureSecondaryLabel(shape) {
+    const details = measureDetails(shape.width);
+    return `${details.points.toFixed(1)} pt  ·  ${measureAngleLabel(shape.rotation)}`;
+  }
+
+  /** @param {number} rotation */
+  function measureLabelFlip(rotation) {
+    const normalized = ((rotation % 360) + 360) % 360;
+    return normalized > 90 && normalized < 270 ? 180 : 0;
+  }
+
   /** @param {AnnotationShape} shape @param {{ width: number; height: number }} pageSize */
   function shapeGuideSegments(shape, pageSize) {
     if (isLinearShape(shape)) {
@@ -1782,6 +1818,36 @@
     selectedShape = ids.length ? { pageIndex, id: ids[ids.length - 1] } : null;
     const bounds = selectionBounds(selectedShapesOnPage(pageIndex));
     multiSelectionFrame = ids.length > 1 && bounds ? { pageIndex, ...bounds } : null;
+  }
+
+  function prepareCropTool() {
+    let preferredPage = selectionAnchor ?? [...selectedPages][0] ?? selectedShape?.pageIndex ?? 0;
+    if (!pageSizes[preferredPage]) {
+      preferredPage = Number(Object.keys(pageSizes)[0] ?? 0);
+    }
+    if (!pageSizes[preferredPage]) return;
+
+    const nextShapes = { ...shapes };
+    let preferredCrop = null;
+    for (const [pageKey, pageSize] of Object.entries(pageSizes)) {
+      const pageIndex = Number(pageKey);
+      const pageShapes = shapes[pageIndex] ?? [];
+      const existing = pageShapes.find((shape) => shape.type === 'crop') ?? null;
+      const crop = existing ?? {
+        id: nextAnnotationId++,
+        type: /** @type {'crop'} */ ('crop'),
+        x: 0,
+        y: 0,
+        width: pageSize.width,
+        height: pageSize.height,
+        rotation: 0
+      };
+      if (!existing) nextShapes[pageIndex] = [...pageShapes, crop];
+      if (pageIndex === preferredPage) preferredCrop = crop;
+    }
+    shapes = nextShapes;
+    if (preferredCrop) setShapeSelection(preferredPage, [preferredCrop.id]);
+    shapeGuides = null;
   }
 
   /** @param {number} pageIndex @param {AnnotationShape[]} replacements */
@@ -1914,9 +1980,10 @@
   /** @param {PointerEvent} event @param {HTMLElement} shell @param {number} pageIndex */
   function beginShapeCreation(event, shell, pageIndex) {
     const start = pointOnPage(event, shell);
+    const previousShapes = shapes[pageIndex] ?? [];
     const shape = {
       id: nextAnnotationId++,
-      type: /** @type {'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'textfield' | 'checkbox' | 'input'} */ (activeTool),
+      type: /** @type {'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'measure' | 'crop' | 'textfield' | 'checkbox' | 'input'} */ (activeTool),
       x: start.x,
       y: start.y,
       width: 0.01,
@@ -1927,7 +1994,10 @@
       fieldValue: activeTool === 'checkbox' ? false : activeTool === 'input' ? '' : undefined,
       existingField: false
     };
-    shapes = { ...shapes, [pageIndex]: [...(shapes[pageIndex] ?? []), shape] };
+    const retainedShapes = activeTool === 'crop'
+      ? previousShapes.filter((candidate) => candidate.type !== 'crop')
+      : previousShapes;
+    shapes = { ...shapes, [pageIndex]: [...retainedShapes, shape] };
     setShapeSelection(pageIndex, [shape.id]);
     drawingShape = { pointerId: event.pointerId, pageIndex, id: shape.id, start };
     shapeGuides = { pageIndex, x: null, y: null, shape };
@@ -2286,8 +2356,10 @@
     if (pointerTarget instanceof Element && pointerTarget.closest('[data-text-editor]')) return;
 
     const shapeHit = shapeTarget(event);
-    if (event.button === 0 && shapeHit && activeTool === 'select') {
-      const shape = findShape(shapeHit.pageIndex, shapeHit.id);
+    const hitShape = shapeHit ? findShape(shapeHit.pageIndex, shapeHit.id) : null;
+    const canTransformHitShape = activeTool === 'select' || (activeTool === 'crop' && hitShape?.type === 'crop');
+    if (event.button === 0 && shapeHit && canTransformHitShape) {
+      const shape = hitShape;
       const pages = [...viewer.querySelectorAll('.pdf-page')];
       const shell = pages[shapeHit.pageIndex];
       if (!shape || !(shell instanceof HTMLElement)) return;
@@ -2310,7 +2382,7 @@
       event.preventDefault();
       event.stopPropagation();
       window.getSelection()?.removeAllRanges();
-      if (event.shiftKey) {
+      if (event.shiftKey && activeTool === 'select') {
         const ids = selectedShape?.pageIndex === shapeHit.pageIndex ? new Set(selectedShapeIds) : new Set();
         if (ids.has(shapeHit.id)) ids.delete(shapeHit.id);
         else ids.add(shapeHit.id);
@@ -2415,7 +2487,7 @@
       if (selectedShape) setShapeSelection(selectedShape.pageIndex, []);
       shapeGuides = null;
     }
-    if (event.button === 0 && pageHit && SHAPE_TOOLS.has(activeTool)) {
+    if (event.button === 0 && pageHit && SHAPE_TOOLS.has(activeTool) && activeTool !== 'crop') {
       event.preventDefault();
       window.getSelection()?.removeAllRanges();
       beginShapeCreation(event, pageHit.shell, pageHit.pageIndex);
@@ -2568,23 +2640,27 @@
         };
         replaceShape(drawingShape.pageIndex, shapeFromEndpoints(shape, drawingShape.start, end));
       } else if (shape && pageSize && !isLinearShape(shape) && (shape.width < 3 || shape.height < 3)) {
-        const preferredWidth = shape.type === 'textfield' || shape.type === 'input'
+        const preferredWidth = shape.type === 'crop'
+          ? pageSize.width * 0.72
+          : shape.type === 'textfield' || shape.type === 'input'
           ? 180
           : shape.type === 'checkbox' ? 24 : shape.type === 'check' || shape.type === 'cross' ? 48 : 120;
-        const preferredHeight = shape.type === 'textfield' ? 40 : shape.type === 'input' ? 34 : shape.type === 'checkbox' ? 24 : preferredWidth;
-        const defaultWidth = Math.min(preferredWidth, pageSize.width / 3);
-        const defaultHeight = Math.min(preferredHeight, pageSize.height / 4);
+        const preferredHeight = shape.type === 'crop'
+          ? pageSize.height * 0.72
+          : shape.type === 'textfield' ? 40 : shape.type === 'input' ? 34 : shape.type === 'checkbox' ? 24 : preferredWidth;
+        const defaultWidth = shape.type === 'crop' ? preferredWidth : Math.min(preferredWidth, pageSize.width / 3);
+        const defaultHeight = shape.type === 'crop' ? preferredHeight : Math.min(preferredHeight, pageSize.height / 4);
         replaceShape(drawingShape.pageIndex, {
           ...shape,
-          x: clamp(drawingShape.start.x, 0, pageSize.width - defaultWidth),
-          y: clamp(drawingShape.start.y, 0, pageSize.height - defaultHeight),
+          x: shape.type === 'crop' ? (pageSize.width - defaultWidth) / 2 : clamp(drawingShape.start.x, 0, pageSize.width - defaultWidth),
+          y: shape.type === 'crop' ? (pageSize.height - defaultHeight) / 2 : clamp(drawingShape.start.y, 0, pageSize.height - defaultHeight),
           width: defaultWidth,
           height: defaultHeight
         });
       }
       drawingShape = null;
       shapeGuides = null;
-      activeTool = 'select';
+      if (shape?.type !== 'crop') activeTool = 'select';
       if (shape?.type === 'textfield') {
         editingTextShape = { pageIndex: finishedPageIndex, id: shape.id };
         tick().then(() => focusTextEditor(shape.id));
@@ -3011,7 +3087,12 @@
     const exportedShapes = Object.entries(shapes).flatMap(([page, pageShapes]) => {
       const pageSize = pageSizes[Number(page)];
       if (!pageSize?.width || !pageSize.height) return [];
-      return pageShapes.map((shape) => {
+      return pageShapes.filter((shape) => {
+        if (shape.type === 'measure') return false;
+        if (shape.type !== 'crop') return true;
+        return shape.x > 0.01 || shape.y > 0.01 ||
+          shape.width < pageSize.width - 0.02 || shape.height < pageSize.height - 0.02;
+      }).map((shape) => {
         return {
           page: Number(page),
           type: shape.type,
@@ -3180,6 +3261,7 @@
         {@const currentSelectedShapes = selectedShape?.pageIndex === index ? (shapes[index] ?? []).filter((shape) => selectedShapeIds.has(shape.id)) : []}
         {@const singleSelection = currentSelectedShapes.length === 1 ? currentSelectedShapes[0] : null}
         {@const currentSelection = currentSelectedShapes.length > 1 && multiSelectionFrame?.pageIndex === index && selectedShape ? frameAsShape(multiSelectionFrame, selectedShape.id) : singleSelection}
+        {@const cropShape = (shapes[index] ?? []).find((shape) => shape.type === 'crop')}
         {@const activeTextEditorShape = editingTextShape?.pageIndex === index ? findShape(index, editingTextShape.id) : null}
         <div class="pdf-page" aria-label={`Page ${index + 1}`}>
           <canvas></canvas>
@@ -3229,6 +3311,7 @@
             class="annotation-layer shape-layer"
             viewBox={`0 0 ${pageSizes[index]?.width ?? 1} ${pageSizes[index]?.height ?? 1}`}
             preserveAspectRatio="none"
+            style:--shape-ui-scale={1 / zoomLevel}
             aria-label={`Shapes on page ${index + 1}`}
           >
             {#each (shapes[index] ?? []) as shape (shape.id)}
@@ -3268,7 +3351,7 @@
                     height={shape.height}
                     preserveAspectRatio="none"
                   />
-                {:else if shape.type === 'checkbox' || shape.type === 'input'}
+                {:else if shape.type === 'checkbox' || shape.type === 'input' || shape.type === 'crop'}
                   <g></g>
                 {:else if shape.type === 'rectangle'}
                   <rect
@@ -3302,6 +3385,67 @@
                   <g data-shape-id={shape.id} data-shape-page={index}>
                     <line class="pdf-shape shape-symbol" x1={shape.x + shape.width * 0.14} y1={shape.y + shape.height * 0.14} x2={shape.x + shape.width * 0.86} y2={shape.y + shape.height * 0.86} />
                     <line class="pdf-shape shape-symbol" x1={shape.x + shape.width * 0.86} y1={shape.y + shape.height * 0.14} x2={shape.x + shape.width * 0.14} y2={shape.y + shape.height * 0.86} />
+                  </g>
+                {:else if shape.type === 'measure'}
+                  {@const measureY = shape.y + shape.height / 2}
+                  {@const measurePrimary = measureDetails(shape.width).primary}
+                  {@const measureSecondary = measureSecondaryLabel(shape)}
+                  {@const measureBadgeWidth = Math.max(96, measurePrimary.length * 8.1, measureSecondary.length * 5.7) / zoomLevel}
+                  {@const measureBadgeHeight = 37 / zoomLevel}
+                  {@const measureBadgeX = shape.x + shape.width / 2 - measureBadgeWidth / 2}
+                  {@const measureBadgeY = measureY - 50 / zoomLevel}
+                  <line
+                    class="shape-linear-hit measure-hit"
+                    data-shape-id={shape.id}
+                    data-shape-page={index}
+                    x1={shape.x}
+                    y1={measureY}
+                    x2={shape.x + shape.width}
+                    y2={measureY}
+                  />
+                  <line class="measure-halo" x1={shape.x} y1={measureY} x2={shape.x + shape.width} y2={measureY} />
+                  <line class="measure-rule" x1={shape.x} y1={measureY} x2={shape.x + shape.width} y2={measureY} />
+                  {#each Array(11) as _, tickIndex}
+                    {@const isMajorTick = tickIndex === 0 || tickIndex === 5 || tickIndex === 10}
+                    {@const tickHeight = (isMajorTick ? 10 : tickIndex % 5 === 0 ? 8 : 5.5) / zoomLevel}
+                    <line
+                      class:major={isMajorTick}
+                      class="measure-tick"
+                      x1={shape.x + shape.width * tickIndex / 10}
+                      x2={shape.x + shape.width * tickIndex / 10}
+                      y1={measureY - tickHeight}
+                      y2={measureY + tickHeight}
+                    />
+                  {/each}
+                  <circle class="measure-endpoint" cx={shape.x} cy={measureY} r={2.8 / zoomLevel} />
+                  <circle class="measure-endpoint" cx={shape.x + shape.width} cy={measureY} r={2.8 / zoomLevel} />
+                  <g
+                    class="measure-badge"
+                    transform={`rotate(${measureLabelFlip(shape.rotation)} ${shape.x + shape.width / 2} ${measureY})`}
+                  >
+                    <rect
+                      x={measureBadgeX}
+                      y={measureBadgeY}
+                      width={measureBadgeWidth}
+                      height={measureBadgeHeight}
+                      rx={8 / zoomLevel}
+                    />
+                    <text
+                      class="measure-primary"
+                      x={shape.x + shape.width / 2}
+                      y={measureBadgeY + 13 / zoomLevel}
+                      font-size={13 / zoomLevel}
+                    >{measurePrimary}</text>
+                    <text
+                      class="measure-secondary"
+                      x={shape.x + shape.width / 2}
+                      y={measureBadgeY + 27 / zoomLevel}
+                      font-size={9.5 / zoomLevel}
+                    >{measureSecondary}</text>
+                    <path
+                      class="measure-badge-pointer"
+                      d={`M ${shape.x + shape.width / 2 - 5 / zoomLevel} ${measureBadgeY + measureBadgeHeight - 0.5 / zoomLevel} L ${shape.x + shape.width / 2} ${measureBadgeY + measureBadgeHeight + 5 / zoomLevel} L ${shape.x + shape.width / 2 + 5 / zoomLevel} ${measureBadgeY + measureBadgeHeight - 0.5 / zoomLevel} Z`}
+                    />
                   </g>
                 {:else if shape.type === 'line'}
                   <line
@@ -3404,7 +3548,92 @@
               </div>
             {/each}
           </div>
-          {#if currentSelection}
+          {#if cropShape}
+            {@const cropPageWidth = pageSizes[index]?.width ?? 1}
+            {@const cropPageHeight = pageSizes[index]?.height ?? 1}
+            <svg
+              class="annotation-layer crop-overlay-layer"
+              viewBox={`0 0 ${cropPageWidth} ${cropPageHeight}`}
+              preserveAspectRatio="none"
+              style:--shape-ui-scale={1 / zoomLevel}
+              aria-hidden="true"
+            >
+              <path
+                class="crop-shade"
+                fill-rule="evenodd"
+                d={`M 0 0 H ${cropPageWidth} V ${cropPageHeight} H 0 Z M ${cropShape.x} ${cropShape.y} H ${cropShape.x + cropShape.width} V ${cropShape.y + cropShape.height} H ${cropShape.x} Z`}
+              />
+              {#if activeTool === 'crop'}
+                <rect
+                  class="crop-hit"
+                  data-shape-id={cropShape.id}
+                  data-shape-page={index}
+                  x={cropShape.x}
+                  y={cropShape.y}
+                  width={cropShape.width}
+                  height={cropShape.height}
+                />
+                <rect
+                  class="crop-edge"
+                  x={cropShape.x}
+                  y={cropShape.y}
+                  width={cropShape.width}
+                  height={cropShape.height}
+                />
+                {#each [1 / 3, 2 / 3] as fraction}
+                  <line
+                    class="crop-grid"
+                    x1={cropShape.x + cropShape.width * fraction}
+                    x2={cropShape.x + cropShape.width * fraction}
+                    y1={cropShape.y}
+                    y2={cropShape.y + cropShape.height}
+                  />
+                  <line
+                    class="crop-grid"
+                    x1={cropShape.x}
+                    x2={cropShape.x + cropShape.width}
+                    y1={cropShape.y + cropShape.height * fraction}
+                    y2={cropShape.y + cropShape.height * fraction}
+                  />
+                {/each}
+                {#each [
+                  ['0,-1', cropShape.x, cropShape.y, cropShape.x + cropShape.width, cropShape.y],
+                  ['0,1', cropShape.x, cropShape.y + cropShape.height, cropShape.x + cropShape.width, cropShape.y + cropShape.height],
+                  ['-1,0', cropShape.x, cropShape.y, cropShape.x, cropShape.y + cropShape.height],
+                  ['1,0', cropShape.x + cropShape.width, cropShape.y, cropShape.x + cropShape.width, cropShape.y + cropShape.height]
+                ] as edge}
+                  <line
+                    class="crop-resize-edge"
+                    data-shape-id={cropShape.id}
+                    data-shape-page={index}
+                    data-shape-handle={edge[0]}
+                    x1={Number(edge[1])}
+                    y1={Number(edge[2])}
+                    x2={Number(edge[3])}
+                    y2={Number(edge[4])}
+                    stroke-width={18 / zoomLevel}
+                  />
+                {/each}
+                {#each [[-1, -1], [1, -1], [-1, 1], [1, 1]] as handle}
+                  {@const cropHandleSize = 10 / zoomLevel}
+                  {@const cropHandleX = cropShape.x + ((handle[0] + 1) * cropShape.width) / 2}
+                  {@const cropHandleY = cropShape.y + ((handle[1] + 1) * cropShape.height) / 2}
+                  <rect
+                    class="crop-resize-handle"
+                    data-shape-id={cropShape.id}
+                    data-shape-page={index}
+                    data-shape-handle={`${handle[0]},${handle[1]}`}
+                    x={cropHandleX - cropHandleSize / 2}
+                    y={cropHandleY - cropHandleSize / 2}
+                    width={cropHandleSize}
+                    height={cropHandleSize}
+                    stroke-width={2 / zoomLevel}
+                  />
+                {/each}
+              {/if}
+            </svg>
+          {/if}
+          {#if currentSelection && currentSelection.type !== 'crop'}
             <svg
               class="annotation-layer shape-selection-layer"
               viewBox={`0 0 ${pageSizes[index]?.width ?? 1} ${pageSizes[index]?.height ?? 1}`}
@@ -3464,13 +3693,13 @@
                     />
                   {/each}
                 {:else}
-                <rect
-                  class="shape-selection-box"
-                  x={currentSelection.x}
-                  y={currentSelection.y}
-                  width={currentSelection.width}
-                  height={currentSelection.height}
-                />
+                  <rect
+                    class="shape-selection-box"
+                    x={currentSelection.x}
+                    y={currentSelection.y}
+                    width={currentSelection.width}
+                    height={currentSelection.height}
+                  />
                 <line
                   class="shape-edge-handle"
                   data-shape-id={currentSelection.id}
@@ -3546,7 +3775,6 @@
                     />
                   {/each}
                 {/if}
-                {#if currentSelection}
                   {@const badgeLabel = `${Math.round(currentSelection.width)} × ${Math.round(currentSelection.height)}`}
                   {@const badgeWidth = Math.max(54, badgeLabel.length * 7 + 8) / zoomLevel}
                   {@const badgeHeight = 20 / zoomLevel}
@@ -3560,7 +3788,6 @@
                       font-size={14 / zoomLevel}
                     >{badgeLabel}</text>
                   </g>
-                {/if}
                 {/if}
               </g>
             </svg>
@@ -5214,6 +5441,71 @@
     z-index: 3;
   }
 
+  .crop-overlay-layer {
+    z-index: 8;
+    overflow: hidden;
+  }
+
+  .crop-overlay-layer .crop-shade {
+    fill: rgba(13, 18, 27, 0.72);
+    stroke: none;
+    pointer-events: none;
+  }
+
+  .crop-edge {
+    fill: none;
+    stroke: #0d99ff;
+    stroke-width: calc(1.5px * var(--shape-ui-scale));
+    stroke-dasharray: calc(3px * var(--shape-ui-scale)) calc(3px * var(--shape-ui-scale));
+    pointer-events: none;
+  }
+
+  .crop-grid {
+    stroke: rgba(255, 255, 255, 0.44);
+    stroke-width: calc(0.8px * var(--shape-ui-scale));
+    stroke-dasharray: calc(3px * var(--shape-ui-scale)) calc(4px * var(--shape-ui-scale));
+    pointer-events: none;
+  }
+
+  .crop-hit {
+    fill: transparent;
+    stroke: none;
+    pointer-events: all;
+    cursor: move;
+  }
+
+  .crop-resize-edge {
+    fill: none;
+    stroke: transparent;
+    pointer-events: stroke;
+  }
+
+  .crop-resize-edge[data-shape-handle='0,-1'],
+  .crop-resize-edge[data-shape-handle='0,1'] {
+    cursor: ns-resize;
+  }
+
+  .crop-resize-edge[data-shape-handle='-1,0'],
+  .crop-resize-edge[data-shape-handle='1,0'] {
+    cursor: ew-resize;
+  }
+
+  .crop-resize-handle {
+    fill: #fff;
+    stroke: #0d99ff;
+    pointer-events: all;
+  }
+
+  .crop-resize-handle[data-shape-handle='-1,-1'],
+  .crop-resize-handle[data-shape-handle='1,1'] {
+    cursor: nwse-resize;
+  }
+
+  .crop-resize-handle[data-shape-handle='1,-1'],
+  .crop-resize-handle[data-shape-handle='-1,1'] {
+    cursor: nesw-resize;
+  }
+
   .pdf-form-layer {
     position: absolute;
     z-index: 6;
@@ -5378,12 +5670,86 @@
     cursor: move;
   }
 
+  .measure-halo,
+  .measure-rule,
+  .measure-tick {
+    fill: none;
+    pointer-events: none;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .measure-halo {
+    stroke: rgba(255, 255, 255, 0.92);
+    stroke-width: calc(5px * var(--shape-ui-scale));
+    stroke-linecap: round;
+  }
+
+  .measure-rule,
+  .measure-tick {
+    stroke: #1769e8;
+    stroke-linecap: round;
+  }
+
+  .measure-rule {
+    stroke-width: calc(2.25px * var(--shape-ui-scale));
+  }
+
+  .measure-tick {
+    stroke-width: calc(1.35px * var(--shape-ui-scale));
+    opacity: 0.9;
+  }
+
+  .measure-tick.major {
+    stroke-width: calc(2px * var(--shape-ui-scale));
+    opacity: 1;
+  }
+
+  .measure-endpoint {
+    fill: #fff;
+    stroke: #1769e8;
+    stroke-width: calc(2px * var(--shape-ui-scale));
+    pointer-events: none;
+  }
+
+  .measure-badge {
+    pointer-events: none;
+    filter: drop-shadow(0 3px 7px rgba(15, 37, 70, 0.25));
+  }
+
+  .measure-badge rect,
+  .measure-badge-pointer {
+    fill: #102a4c;
+    stroke: rgba(255, 255, 255, 0.22);
+    stroke-width: calc(1px * var(--shape-ui-scale));
+  }
+
+  .measure-badge text {
+    font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-weight: 500;
+    text-anchor: middle;
+    dominant-baseline: central;
+  }
+
+  .measure-primary {
+    fill: #fff;
+    letter-spacing: -0.01em;
+  }
+
+  .measure-secondary {
+    fill: #b9c9dc;
+    letter-spacing: 0.015em;
+  }
+
+  .measure-hit {
+    stroke-width: calc(22px * var(--shape-ui-scale));
+  }
+
   .pdf-viewer:not(.shape-mode):not(.drawing-mode):not(.eraser-mode) .pdf-shape {
     cursor: move;
   }
 
   .shape-selection-layer {
-    z-index: 7;
+    z-index: 9;
     overflow: visible;
   }
 

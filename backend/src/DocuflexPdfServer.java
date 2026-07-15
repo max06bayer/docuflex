@@ -212,6 +212,7 @@ public class DocuflexPdfServer {
       document.setAllSecurityToBeRemoved(true);
       List<Integer> redactedPages = new ArrayList<>();
       List<AnnotationStroke> formFields = new ArrayList<>();
+      List<AnnotationStroke> pageCrops = new ArrayList<>();
       for (int pageIndex = 0; pageIndex < document.getNumberOfPages(); pageIndex += 1) {
         List<AnnotationStroke> markers = new ArrayList<>();
         List<AnnotationStroke> textMarks = new ArrayList<>();
@@ -233,6 +234,8 @@ public class DocuflexPdfServer {
             if (!annotation.points.isEmpty()) pens.add(annotation);
           } else if ("checkbox".equals(annotation.type) || "input".equals(annotation.type)) {
             formFields.add(annotation);
+          } else if ("crop".equals(annotation.type)) {
+            pageCrops.add(annotation);
           } else {
             shapes.add(annotation);
           }
@@ -261,6 +264,9 @@ public class DocuflexPdfServer {
       }
       if (!formFields.isEmpty()) {
         applyFormFields(document, formFields);
+      }
+      if (!pageCrops.isEmpty()) {
+        applyPageCrops(document, pageCrops);
       }
 
       if (!encryptionPassword.isEmpty()) {
@@ -375,6 +381,27 @@ public class DocuflexPdfServer {
         content.drawImage(pageImage, 0, 0, displayWidth, displayHeight);
       }
       rendered.flush();
+    }
+  }
+
+  private static void applyPageCrops(PDDocument document, List<AnnotationStroke> crops) {
+    Map<Integer, AnnotationStroke> cropByPage = new LinkedHashMap<>();
+    for (AnnotationStroke crop : crops) {
+      if (crop.page >= 0 && crop.page < document.getNumberOfPages()) cropByPage.put(crop.page, crop);
+    }
+    for (Map.Entry<Integer, AnnotationStroke> entry : cropByPage.entrySet()) {
+      PDPage page = document.getPage(entry.getKey());
+      AnnotationStroke crop = entry.getValue();
+      PdfPoint topLeft = shapePoint(page, crop, 0, 0);
+      PdfPoint topRight = shapePoint(page, crop, 1, 0);
+      PdfPoint bottomLeft = shapePoint(page, crop, 0, 1);
+      PdfPoint bottomRight = shapePoint(page, crop, 1, 1);
+      float left = Math.min(Math.min(topLeft.x, topRight.x), Math.min(bottomLeft.x, bottomRight.x));
+      float right = Math.max(Math.max(topLeft.x, topRight.x), Math.max(bottomLeft.x, bottomRight.x));
+      float bottom = Math.min(Math.min(topLeft.y, topRight.y), Math.min(bottomLeft.y, bottomRight.y));
+      float top = Math.max(Math.max(topLeft.y, topRight.y), Math.max(bottomLeft.y, bottomRight.y));
+      if (right - left < 1 || top - bottom < 1) continue;
+      page.setCropBox(new PDRectangle(left, bottom, right - left, top - bottom));
     }
   }
 
@@ -2940,6 +2967,7 @@ public class DocuflexPdfServer {
       boolean isStroke = "marker".equals(type) || "pen".equals(type);
       boolean isShape = "triangle".equals(type) || "rectangle".equals(type) || "circle".equals(type) ||
           "check".equals(type) || "cross".equals(type) || "arrow".equals(type) || "line".equals(type) ||
+          "crop".equals(type) ||
           "textfield".equals(type) || "signature".equals(type) || "checkbox".equals(type) || "input".equals(type) ||
           "highlight".equals(type) || "underline".equals(type) ||
           "crossout".equals(type) || "blackout".equals(type) || "whiteout".equals(type);
