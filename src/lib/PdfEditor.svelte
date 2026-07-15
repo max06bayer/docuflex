@@ -112,7 +112,7 @@
   let unlockingPdf = false;
   let signPanelOpen = false;
   let addSignaturePanelOpen = false;
-  /** @type {'draw' | 'write' | 'image'} */
+  /** @type {'draw' | 'image'} */
   let signatureTab = 'image';
   /** @type {{ id: number; imageUrl: string; name: string; aspectRatio: number }[]} */
   let savedSignatures = [];
@@ -129,6 +129,12 @@
   let signatureCameraFrame;
   /** @type {HTMLInputElement | undefined} */
   let signatureUploadInput;
+  let signatureDrawOpen = false;
+  let signatureDrawHasInk = false;
+  /** @type {HTMLCanvasElement | undefined} */
+  let signatureDrawCanvas;
+  /** @type {{ pointerId: number; x: number; y: number } | null} */
+  let signatureDrawPointer = null;
 
   const BASE_PAGE_SCALE = 1.35;
   const MIN_ZOOM = 0.5;
@@ -247,6 +253,7 @@
   function closeSignPanel() {
     signPanelOpen = false;
     addSignaturePanelOpen = false;
+    closeSignatureDrawPad();
     if (activeTool === 'sign') activeTool = 'select';
   }
 
@@ -258,6 +265,7 @@
 
   function closeAddSignaturePanel() {
     addSignaturePanelOpen = false;
+    closeSignatureDrawPad();
   }
 
   function stopSignatureCamera() {
@@ -295,6 +303,100 @@
         : error instanceof Error ? error.message : 'Could not open the camera.';
     } finally {
       cameraStarting = false;
+    }
+  }
+
+  async function openSignatureDrawPad() {
+    signatureDrawOpen = true;
+    signatureDrawHasInk = false;
+    signatureDrawPointer = null;
+    await tick();
+    if (!signatureDrawCanvas) return;
+    const rect = signatureDrawCanvas.getBoundingClientRect();
+    const pixelRatio = Math.min(3, Math.max(1, window.devicePixelRatio || 1));
+    signatureDrawCanvas.width = Math.max(1, Math.round(rect.width * pixelRatio));
+    signatureDrawCanvas.height = Math.max(1, Math.round(rect.height * pixelRatio));
+    const context = signatureDrawCanvas.getContext('2d');
+    context?.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+  }
+
+  function closeSignatureDrawPad() {
+    signatureDrawOpen = false;
+    signatureDrawPointer = null;
+  }
+
+  function clearSignatureDrawPad() {
+    if (!signatureDrawCanvas) return;
+    const context = signatureDrawCanvas.getContext('2d');
+    context?.clearRect(0, 0, signatureDrawCanvas.width, signatureDrawCanvas.height);
+    signatureDrawHasInk = false;
+    signatureDrawPointer = null;
+  }
+
+  /** @param {PointerEvent} event */
+  function startSignatureDrawing(event) {
+    if (!signatureDrawCanvas || event.button !== 0) return;
+    const rect = signatureDrawCanvas.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    signatureDrawCanvas.setPointerCapture(event.pointerId);
+    signatureDrawPointer = { pointerId: event.pointerId, x, y };
+    const context = signatureDrawCanvas.getContext('2d');
+    if (!context) return;
+    context.fillStyle = '#111111';
+    context.beginPath();
+    context.arc(x, y, 1.35, 0, Math.PI * 2);
+    context.fill();
+    signatureDrawHasInk = true;
+    event.preventDefault();
+  }
+
+  /** @param {PointerEvent} event */
+  function continueSignatureDrawing(event) {
+    if (!signatureDrawCanvas || !signatureDrawPointer || signatureDrawPointer.pointerId !== event.pointerId) return;
+    const rect = signatureDrawCanvas.getBoundingClientRect();
+    const context = signatureDrawCanvas.getContext('2d');
+    if (!context) return;
+    const events = typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [event];
+    context.strokeStyle = '#111111';
+    context.lineWidth = event.pointerType === 'pen' && event.pressure > 0 ? 1.5 + event.pressure * 1.8 : 2.7;
+    context.lineCap = 'round';
+    context.lineJoin = 'round';
+    context.beginPath();
+    context.moveTo(signatureDrawPointer.x, signatureDrawPointer.y);
+    for (const point of events) {
+      const x = point.clientX - rect.left;
+      const y = point.clientY - rect.top;
+      context.lineTo(x, y);
+      signatureDrawPointer.x = x;
+      signatureDrawPointer.y = y;
+    }
+    context.stroke();
+    event.preventDefault();
+  }
+
+  /** @param {PointerEvent} event */
+  function finishSignatureDrawing(event) {
+    if (!signatureDrawPointer || signatureDrawPointer.pointerId !== event.pointerId) return;
+    signatureDrawPointer = null;
+    if (signatureDrawCanvas?.hasPointerCapture(event.pointerId)) signatureDrawCanvas.releasePointerCapture(event.pointerId);
+  }
+
+  async function saveDrawnSignature() {
+    if (!signatureDrawCanvas || !signatureDrawHasInk || signatureProcessing) return;
+    signatureProcessing = true;
+    try {
+      const extracted = await extractTransparentSignature(
+        signatureDrawCanvas,
+        signatureDrawCanvas.width,
+        signatureDrawCanvas.height
+      );
+      saveExtractedSignature(extracted);
+      closeSignatureDrawPad();
+    } catch (error) {
+      cameraError = error instanceof Error ? error.message : 'Could not save this signature.';
+    } finally {
+      signatureProcessing = false;
     }
   }
 
@@ -3392,6 +3494,35 @@
       </div>
     </div>
   {/if}
+  {#if signatureDrawOpen}
+    <div class="signature-camera-overlay" role="presentation" transition:fade={{ duration: 170 }}>
+      <div class="signature-camera-card signature-draw-card" role="dialog" aria-modal="true" aria-label="Draw signature" transition:fly={{ y: 10, duration: 230, easing: cubicOut }}>
+        <div class="signature-draw-field">
+          <canvas
+            bind:this={signatureDrawCanvas}
+            aria-label="Signature drawing field"
+            onpointerdown={startSignatureDrawing}
+            onpointermove={continueSignatureDrawing}
+            onpointerup={finishSignatureDrawing}
+            onpointercancel={finishSignatureDrawing}
+          ></canvas>
+          <div class="signature-draw-baseline"></div>
+          <button class="signature-camera-close" type="button" aria-label="Close signature drawing" onclick={closeSignatureDrawPad}>
+            <span></span><span></span>
+          </button>
+        </div>
+        <footer class="signature-camera-footer signature-draw-footer">
+          <span>Draw your signature above the line</span>
+          <div class="signature-draw-controls">
+            <button class="signature-action secondary" type="button" disabled={!signatureDrawHasInk || signatureProcessing} onclick={clearSignatureDrawPad}>Clear</button>
+            <button class="signature-action primary" type="button" disabled={!signatureDrawHasInk || signatureProcessing} onclick={saveDrawnSignature}>
+              <span>{signatureProcessing ? 'Saving…' : 'Add Signature'}</span>
+            </button>
+          </div>
+        </footer>
+      </div>
+    </div>
+  {/if}
   {#if protectPanelOpen}
     <div
       class:encrypted={encryptionEnabled}
@@ -3543,6 +3674,7 @@
     {#if addSignaturePanelOpen}
       <div
         class:below-signatures={savedSignatures.length > 0}
+        class:draw-mode={signatureTab === 'draw'}
         class="protect-panel add-signature-panel"
         style:top={`${savedSignatures.length > 0 ? Math.min(300, 132 + Math.min(savedSignatures.length, 2) * 112) + 32 : 164}px`}
         role="dialog"
@@ -3561,10 +3693,9 @@
           <div class="signature-tabs" role="tablist" aria-label="Signature method">
             <span
               class="signature-tab-indicator"
-              style={`transform: translateX(${signatureTab === 'draw' ? 0 : signatureTab === 'write' ? 100 : 200}%);`}
+              style={`transform: translateX(${signatureTab === 'draw' ? 0 : 100}%);`}
             ></span>
             <button class:active={signatureTab === 'draw'} type="button" role="tab" aria-selected={signatureTab === 'draw'} onclick={() => signatureTab = 'draw'}>Draw</button>
-            <button class:active={signatureTab === 'write'} type="button" role="tab" aria-selected={signatureTab === 'write'} onclick={() => signatureTab = 'write'}>Write</button>
             <button class:active={signatureTab === 'image'} type="button" role="tab" aria-selected={signatureTab === 'image'} onclick={() => signatureTab = 'image'}>Image</button>
           </div>
 
@@ -3575,8 +3706,6 @@
                   <p>Write your signature on paper and take a photo or upload a photo of your signature.</p>
                 {:else if signatureTab === 'draw'}
                   <p>Draw your signature using your mouse, trackpad, or touchscreen.</p>
-                {:else}
-                  <p>Write your name and choose a signature style.</p>
                 {/if}
                 {#if cameraError}<p class="signature-processing-error">{cameraError}</p>{/if}
               </div>
@@ -3592,6 +3721,11 @@
               <button class="signature-action secondary" type="button" disabled={signatureProcessing} onclick={chooseSignaturePhoto}>
                 <span class="signature-plus" aria-hidden="true"></span>
                 <span>{signatureProcessing ? 'Extracting…' : 'Upload Photo'}</span>
+              </button>
+            {:else}
+              <button class="signature-action primary" type="button" onclick={openSignatureDrawPad}>
+                <img src="/toolbar/small/sign.svg" alt="" />
+                <span>Draw Signature</span>
               </button>
             {/if}
           </footer>
@@ -4110,6 +4244,11 @@
   .protect-panel.add-signature-panel {
     top: 164px;
     height: 360px;
+    transition: top 300ms cubic-bezier(0.22, 1, 0.36, 1), height 260ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 200ms ease;
+  }
+
+  .protect-panel.add-signature-panel.draw-mode {
+    height: 260px;
   }
 
   .protect-panel.add-signature-panel.below-signatures {
@@ -4230,10 +4369,14 @@
     grid-template-rows: 64px 1fr 132px;
   }
 
+  .add-signature-panel.draw-mode .add-signature-content {
+    grid-template-rows: 64px 66px 80px;
+  }
+
   .signature-tabs {
     position: relative;
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(2, 1fr);
     align-self: center;
     box-sizing: border-box;
     height: 42px;
@@ -4242,8 +4385,7 @@
     border: 1px solid #d7d7d7;
     border-radius: 8px;
     background:
-      linear-gradient(#d7d7d7, #d7d7d7) calc(100% / 3) 0 / 1px 100% no-repeat,
-      linear-gradient(#d7d7d7, #d7d7d7) calc(200% / 3) 0 / 1px 100% no-repeat,
+      linear-gradient(#d7d7d7, #d7d7d7) 50% 0 / 1px 100% no-repeat,
       #f3f3f3;
   }
 
@@ -4251,7 +4393,7 @@
     position: absolute;
     z-index: 1;
     inset: 0 auto 0 0;
-    width: calc(100% / 3);
+    width: 50%;
     border-radius: 7px;
     background: #000;
     box-shadow: 0 3px 9px rgba(0, 0, 0, 0.12);
@@ -4309,6 +4451,10 @@
     padding-block: 17px;
   }
 
+  .add-signature-panel.draw-mode .signature-actions {
+    grid-template-rows: 44px;
+  }
+
   .signature-action {
     display: flex;
     align-items: center;
@@ -4347,6 +4493,7 @@
   .signature-action.primary img {
     width: 24px;
     height: 24px;
+    filter: brightness(0) invert(1);
   }
 
   .signature-action.secondary {
@@ -4421,6 +4568,55 @@
     color: #7a7a7a;
     font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     -webkit-font-smoothing: antialiased;
+  }
+
+  .signature-draw-card {
+    width: min(720px, 100%);
+  }
+
+  .signature-draw-field {
+    position: relative;
+    aspect-ratio: 2.6 / 1;
+    margin: 15px 15px 0;
+    overflow: hidden;
+    border: 1px solid #bcbcbc;
+    border-radius: 8px;
+    background: #fff;
+  }
+
+  .signature-draw-field canvas {
+    position: absolute;
+    z-index: 2;
+    display: block;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    cursor: crosshair;
+    touch-action: none;
+  }
+
+  .signature-draw-baseline {
+    position: absolute;
+    z-index: 1;
+    right: 9%;
+    bottom: 28%;
+    left: 9%;
+    height: 1px;
+    background: #b8b8b8;
+    pointer-events: none;
+  }
+
+  .signature-draw-controls {
+    display: flex;
+    gap: 10px;
+  }
+
+  .signature-draw-controls .signature-action.secondary {
+    min-width: 88px;
+  }
+
+  .signature-draw-controls .signature-action.primary {
+    min-width: 160px;
   }
 
   .signature-camera-preview {
