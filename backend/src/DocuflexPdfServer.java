@@ -648,8 +648,8 @@ public class DocuflexPdfServer {
         if ("watermark".equals(shape.type)) {
           drawWatermark(content, page, shape);
           continue;
-        } else if ("signature".equals(shape.type)) {
-          drawSignatureImage(document, content, page, shape);
+        } else if ("signature".equals(shape.type) || "image".equals(shape.type)) {
+          drawPlacedImage(document, content, page, shape);
           continue;
         } else if ("textfield".equals(shape.type)) {
           drawTextField(content, page, shape);
@@ -778,7 +778,7 @@ public class DocuflexPdfServer {
     return result.toString();
   }
 
-  private static void drawSignatureImage(
+  private static void drawPlacedImage(
       PDDocument document,
       PDPageContentStream content,
       PDPage page,
@@ -790,12 +790,12 @@ public class DocuflexPdfServer {
     try {
       imageBytes = Base64.getDecoder().decode(encoded);
     } catch (IllegalArgumentException error) {
-      throw new IOException("Invalid signature image data.", error);
+      throw new IOException("Invalid placed image data.", error);
     }
     if (imageBytes.length > 12 * 1024 * 1024) {
-      throw new IOException("Signature image is too large.");
+      throw new IOException("Placed image is too large.");
     }
-    PDImageXObject image = PDImageXObject.createFromByteArray(document, imageBytes, "signature.png");
+    PDImageXObject image = PDImageXObject.createFromByteArray(document, imageBytes, "placed-image.png");
     PdfPoint bottomLeft = shapePoint(page, shape, 0, 1);
     PdfPoint bottomRight = shapePoint(page, shape, 1, 1);
     PdfPoint topLeft = shapePoint(page, shape, 0, 0);
@@ -3122,7 +3122,7 @@ public class DocuflexPdfServer {
       boolean isShape = "triangle".equals(type) || "rectangle".equals(type) || "circle".equals(type) ||
           "check".equals(type) || "cross".equals(type) || "arrow".equals(type) || "line".equals(type) ||
           "crop".equals(type) || "watermark".equals(type) ||
-          "textfield".equals(type) || "signature".equals(type) || "checkbox".equals(type) || "input".equals(type) ||
+          "textfield".equals(type) || "signature".equals(type) || "image".equals(type) || "checkbox".equals(type) || "input".equals(type) ||
           "highlight".equals(type) || "underline".equals(type) ||
           "crossout".equals(type) || "blackout".equals(type) || "whiteout".equals(type);
       if (!isStroke && !isShape) {
@@ -3151,7 +3151,7 @@ public class DocuflexPdfServer {
           throw new IllegalArgumentException("Watermark text is too long.");
         }
         if (imageData.length() > 16 * 1024 * 1024) {
-          throw new IllegalArgumentException("Signature image data is too large.");
+          throw new IllegalArgumentException("Placed image data is too large.");
         }
         annotations.add(new AnnotationStroke(
             asInt(annotation.get("page")), type, List.of(),

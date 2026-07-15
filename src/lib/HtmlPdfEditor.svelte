@@ -3323,6 +3323,28 @@ ${setupScript}`;
     page?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
+  /** @param {'undo' | 'redo'} command */
+  function runHtmlHistoryCommand(command) {
+    const doc = htmlFrame?.contentDocument;
+    if (!doc) return;
+    htmlFrame?.contentWindow?.focus();
+    doc.execCommand(command, false);
+    doc.querySelectorAll('.t').forEach((node) => {
+      if (!(node instanceof HTMLElement)) return;
+      node.dataset.docuflexCurrentText = normalizedConvertedNodeText(node);
+    });
+    syncHtmlFormatState();
+    scheduleHtmlGeometrySync();
+  }
+
+  export function undo() {
+    runHtmlHistoryCommand('undo');
+  }
+
+  export function redo() {
+    runHtmlHistoryCommand('redo');
+  }
+
   function prepareConvertedHtmlEditor() {
     const doc = htmlFrame?.contentDocument;
     if (!doc) return;

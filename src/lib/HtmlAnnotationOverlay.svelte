@@ -45,7 +45,16 @@
           <path class="pen-ink" d={path} />
         {:else}
           <g transform={`rotate(${Number(annotation.rotation || 0)} ${centerX} ${centerY})`}>
-            {#if annotation.type === 'watermark'}
+            {#if annotation.type === 'image' || annotation.type === 'signature'}
+              <image
+                href={annotation.imageData}
+                {x}
+                {y}
+                {width}
+                {height}
+                preserveAspectRatio="none"
+              />
+            {:else if annotation.type === 'watermark'}
               <text
                 class="watermark"
                 x={centerX}

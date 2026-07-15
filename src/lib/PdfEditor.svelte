@@ -7,7 +7,7 @@
 
   /** @typedef {{ x: number; y: number; pressure: number }} StrokePoint */
   /** @typedef {{ id: number; type: 'marker' | 'pen'; points: StrokePoint[] }} AnnotationStroke */
-  /** @typedef {{ id: number; type: 'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'measure' | 'crop' | 'textfield' | 'signature' | 'checkbox' | 'input'; x: number; y: number; width: number; height: number; rotation: number; text?: string; imageData?: string; fieldName?: string; fieldValue?: string | boolean; existingField?: boolean; readOnly?: boolean }} AnnotationShape */
+  /** @typedef {{ id: number; type: 'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'measure' | 'crop' | 'textfield' | 'signature' | 'image' | 'checkbox' | 'input'; x: number; y: number; width: number; height: number; rotation: number; text?: string; imageData?: string; fieldName?: string; fieldValue?: string | boolean; existingField?: boolean; readOnly?: boolean }} AnnotationShape */
   /** @typedef {{ id: number; type: 'highlight' | 'underline' | 'crossout' | 'blackout' | 'whiteout'; rects: { x: number; y: number; width: number; height: number; color?: [number, number, number] }[] }} TextHighlight */
 
   /** @type {File} */
@@ -149,12 +149,23 @@
   let signatureCameraFrame;
   /** @type {HTMLInputElement | undefined} */
   let signatureUploadInput;
+  /** @type {HTMLInputElement | undefined} */
+  let imageUploadInput;
   let signatureDrawOpen = false;
   let signatureDrawHasInk = false;
   /** @type {HTMLCanvasElement | undefined} */
   let signatureDrawCanvas;
   /** @type {{ pointerId: number; x: number; y: number } | null} */
   let signatureDrawPointer = null;
+  /** @type {ReturnType<typeof captureHistoryState>[]} */
+  let undoHistory = [];
+  /** @type {ReturnType<typeof captureHistoryState>[]} */
+  let redoHistory = [];
+  /** @type {ReturnType<typeof captureHistoryState> | null} */
+  let currentHistoryState = null;
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let historyCommitTimer;
+  let applyingHistoryState = false;
 
   const BASE_PAGE_SCALE = 1.35;
   const MIN_ZOOM = 0.5;
@@ -183,6 +194,170 @@
     appliedWatermarkText;
     htmlVisualAnnotations = exportableAnnotations();
   }
+  $: {
+    workingFile;
+    annotations;
+    shapes;
+    textHighlights;
+    appliedWatermarkText;
+    encryptionEnabled;
+    protectionPassword;
+    ocrTextLayerActive;
+    cropPagesPrepared;
+    pdfReady;
+    editorTransition;
+    drawingStroke;
+    erasingPointerId;
+    drawingShape;
+    shapeInteraction;
+    editingTextShape;
+    scheduleHistoryCommit();
+  }
+
+  function captureHistoryState() {
+    return {
+      workingFile,
+      annotations,
+      shapes,
+      textHighlights,
+      appliedWatermarkText,
+      encryptionEnabled,
+      protectionPassword: encryptionEnabled ? protectionPassword : '',
+      ocrTextLayerActive,
+      cropPagesPrepared,
+      nextAnnotationId
+    };
+  }
+
+  /** @param {ReturnType<typeof captureHistoryState>} left @param {ReturnType<typeof captureHistoryState>} right */
+  function sameHistoryState(left, right) {
+    return left.workingFile === right.workingFile &&
+      left.annotations === right.annotations &&
+      left.shapes === right.shapes &&
+      left.textHighlights === right.textHighlights &&
+      left.appliedWatermarkText === right.appliedWatermarkText &&
+      left.encryptionEnabled === right.encryptionEnabled &&
+      left.protectionPassword === right.protectionPassword &&
+      left.ocrTextLayerActive === right.ocrTextLayerActive &&
+      left.cropPagesPrepared === right.cropPagesPrepared;
+  }
+
+  function historyInteractionActive() {
+    return Boolean(editorTransition || drawingStroke || erasingPointerId !== null || drawingShape || shapeInteraction || editingTextShape);
+  }
+
+  function scheduleHistoryCommit() {
+    if (typeof window === 'undefined' || applyingHistoryState || !pdfReady) return;
+    if (!currentHistoryState) {
+      currentHistoryState = captureHistoryState();
+      return;
+    }
+    if (historyCommitTimer) clearTimeout(historyCommitTimer);
+    historyCommitTimer = setTimeout(() => {
+      historyCommitTimer = undefined;
+      if (historyInteractionActive()) {
+        scheduleHistoryCommit();
+        return;
+      }
+      commitHistoryState();
+    }, 120);
+  }
+
+  function commitHistoryState() {
+    if (applyingHistoryState || !pdfReady) return;
+    const next = captureHistoryState();
+    if (!currentHistoryState) {
+      currentHistoryState = next;
+      return;
+    }
+    if (sameHistoryState(currentHistoryState, next)) return;
+    undoHistory = [...undoHistory.slice(-74), currentHistoryState];
+    currentHistoryState = next;
+    redoHistory = [];
+  }
+
+  /** @param {ReturnType<typeof captureHistoryState>} state */
+  async function restoreHistoryState(state) {
+    applyingHistoryState = true;
+    if (historyCommitTimer) clearTimeout(historyCommitTimer);
+    historyCommitTimer = undefined;
+    const fileChanged = workingFile !== state.workingFile;
+    workingFile = state.workingFile;
+    annotations = state.annotations;
+    shapes = state.shapes;
+    textHighlights = state.textHighlights;
+    appliedWatermarkText = state.appliedWatermarkText;
+    encryptionEnabled = state.encryptionEnabled;
+    protectionPassword = state.protectionPassword;
+    ocrTextLayerActive = state.ocrTextLayerActive;
+    cropPagesPrepared = state.cropPagesPrepared;
+    nextAnnotationId = state.nextAnnotationId;
+    editingTextShape = null;
+    drawingShape = null;
+    drawingStroke = null;
+    shapeInteraction = null;
+    erasingPointerId = null;
+    lastEraserPoint = null;
+    selectedShape = null;
+    selectedShapeIds = new Set();
+    multiSelectionFrame = null;
+    shapeGuides = null;
+    onProtectionChange({ enabled: encryptionEnabled, password: protectionPassword });
+    if (fileChanged) {
+      htmlEditorStarted = false;
+      htmlEditorReady = false;
+      htmlViewportMode = false;
+      await loadPdf(false);
+    }
+    currentHistoryState = captureHistoryState();
+    applyingHistoryState = false;
+  }
+
+  export async function undo() {
+    if (applyingHistoryState) return;
+    if (htmlViewportVisible && htmlEditor?.undo) {
+      htmlEditor.undo();
+      return;
+    }
+    if (historyCommitTimer) clearTimeout(historyCommitTimer);
+    historyCommitTimer = undefined;
+    commitHistoryState();
+    const previous = undoHistory.at(-1);
+    if (!previous || !currentHistoryState) return;
+    undoHistory = undoHistory.slice(0, -1);
+    redoHistory = [...redoHistory.slice(-74), currentHistoryState];
+    await restoreHistoryState(previous);
+  }
+
+  export async function redo() {
+    if (applyingHistoryState) return;
+    if (htmlViewportVisible && htmlEditor?.redo) {
+      htmlEditor.redo();
+      return;
+    }
+    if (historyCommitTimer) clearTimeout(historyCommitTimer);
+    historyCommitTimer = undefined;
+    commitHistoryState();
+    const next = redoHistory.at(-1);
+    if (!next || !currentHistoryState) return;
+    redoHistory = redoHistory.slice(0, -1);
+    undoHistory = [...undoHistory.slice(-74), currentHistoryState];
+    await restoreHistoryState(next);
+  }
+
+  /** @param {KeyboardEvent} event */
+  function handleHistoryShortcut(event) {
+    if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+    const target = event.target;
+    if (target instanceof HTMLElement && (target.matches('input, textarea, select') || target.isContentEditable)) return;
+    const key = event.key.toLowerCase();
+    const wantsUndo = key === 'z' && !event.shiftKey;
+    const wantsRedo = key === 'y' || (key === 'z' && event.shiftKey);
+    if (!wantsUndo && !wantsRedo) return;
+    event.preventDefault();
+    if (wantsUndo) void undo();
+    else void redo();
+  }
 
   function isTextSelectionTool() {
     return activeTool === 'select' || TEXT_MARK_TOOLS.has(activeTool);
@@ -195,6 +370,12 @@
   /** @param {string} previousTool @param {string} nextTool */
   async function handleToolTransition(previousTool, nextTool) {
     const generation = ++editorTransitionGeneration;
+    if (nextTool === 'image') {
+      if (imageUploadInput) imageUploadInput.value = '';
+      imageUploadInput?.click();
+      activeTool = 'select';
+      return;
+    }
     if (nextTool === 'ocr') {
       await recognizeDocumentText();
       return;
@@ -1017,6 +1198,75 @@
     }
   }
 
+  /** @param {Event} event */
+  async function importImageFile(event) {
+    const input = event.currentTarget;
+    if (!(input instanceof HTMLInputElement) || !input.files?.[0]) return;
+    const importedFile = input.files[0];
+    try {
+      if (!importedFile.type.startsWith('image/')) throw new Error('Choose an image file.');
+      if (importedFile.size > 24 * 1024 * 1024) throw new Error('The image is too large. Choose an image under 24 MB.');
+      const objectUrl = URL.createObjectURL(importedFile);
+      try {
+        const image = new Image();
+        image.decoding = 'async';
+        await new Promise((resolve, reject) => {
+          image.onload = resolve;
+          image.onerror = () => reject(new Error('Could not read this image.'));
+          image.src = objectUrl;
+        });
+        if (!image.naturalWidth || !image.naturalHeight) throw new Error('This image has no usable dimensions.');
+
+        let scale = Math.min(1, 4096 / Math.max(image.naturalWidth, image.naturalHeight));
+        let imageData = '';
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+          canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+          const context = canvas.getContext('2d');
+          if (!context) throw new Error('Could not process this image.');
+          context.drawImage(image, 0, 0, canvas.width, canvas.height);
+          imageData = canvas.toDataURL('image/png');
+          if (imageData.length <= 15 * 1024 * 1024) break;
+          scale *= 0.72;
+        }
+        if (!imageData || imageData.length > 15 * 1024 * 1024) throw new Error('The processed image is too large.');
+
+        const pageIndex = visibleSignaturePageIndex();
+        const pageSize = pageSizes[pageIndex];
+        if (!pageSize) throw new Error('No PDF page is ready for the image.');
+        const aspectRatio = image.naturalWidth / image.naturalHeight;
+        let width = Math.min(260, pageSize.width * 0.45);
+        let height = width / aspectRatio;
+        const maximumHeight = pageSize.height * 0.35;
+        if (height > maximumHeight) {
+          height = maximumHeight;
+          width = height * aspectRatio;
+        }
+        const shape = /** @type {AnnotationShape} */ ({
+          id: nextAnnotationId++,
+          type: 'image',
+          x: (pageSize.width - width) / 2,
+          y: (pageSize.height - height) / 2,
+          width,
+          height,
+          rotation: 0,
+          imageData
+        });
+        shapes = { ...shapes, [pageIndex]: [...(shapes[pageIndex] ?? []), shape] };
+        setShapeSelection(pageIndex, [shape.id]);
+        shapeGuides = { pageIndex, x: pageSize.width / 2, y: pageSize.height / 2, shape };
+      } finally {
+        URL.revokeObjectURL(objectUrl);
+      }
+    } catch (error) {
+      console.error(error);
+      window.alert(error instanceof Error ? error.message : 'Could not import this image.');
+    } finally {
+      input.value = '';
+    }
+  }
+
   function visibleSignaturePageIndex() {
     if (!viewer) return 0;
     const viewerRect = viewer.getBoundingClientRect();
@@ -1520,6 +1770,7 @@
     document.addEventListener('pointerdown', commitTextFieldOnOutsidePointer, true);
     window.addEventListener('keydown', updateZoomCursor);
     window.addEventListener('keydown', handleShapeKeyboard);
+    window.addEventListener('keydown', handleHistoryShortcut);
     window.addEventListener('keyup', updateZoomCursor);
     window.addEventListener('blur', resetZoomCursor);
     window.addEventListener('blur', endTextSelectionCursor);
@@ -1539,6 +1790,7 @@
       document.removeEventListener('pointerdown', commitTextFieldOnOutsidePointer, true);
       window.removeEventListener('keydown', updateZoomCursor);
       window.removeEventListener('keydown', handleShapeKeyboard);
+      window.removeEventListener('keydown', handleHistoryShortcut);
       window.removeEventListener('keyup', updateZoomCursor);
       window.removeEventListener('blur', resetZoomCursor);
       window.removeEventListener('blur', endTextSelectionCursor);
@@ -2321,8 +2573,9 @@
       next.y += ySnap.target - ySnap.value;
       guideY = ySnap.target;
     }
-    next.x = clamp(next.x, 0, Math.max(0, pageSize.width - next.width));
-    next.y = clamp(next.y, 0, Math.max(0, pageSize.height - next.height));
+    const minimumVisible = Math.min(12 / zoomLevel, shape.width / 2, shape.height / 2);
+    next.x = clamp(next.x, -next.width + minimumVisible, pageSize.width - minimumVisible);
+    next.y = clamp(next.y, -next.height + minimumVisible, pageSize.height - minimumVisible);
     return { shape: next, x: guideX, y: guideY };
   }
 
@@ -2363,8 +2616,17 @@
     const amount = event.shiftKey ? 10 : 1;
     const bounds = multiSelectionFrame ?? selectionBounds(selected);
     if (!bounds) return;
-    const deltaX = clamp(direction.x * amount, -bounds.x, pageSize.width - bounds.x - bounds.width);
-    const deltaY = clamp(direction.y * amount, -bounds.y, pageSize.height - bounds.y - bounds.height);
+    const minimumVisible = Math.min(12 / zoomLevel, bounds.width / 2, bounds.height / 2);
+    const deltaX = clamp(
+      direction.x * amount,
+      -bounds.width + minimumVisible - bounds.x,
+      pageSize.width - minimumVisible - bounds.x
+    );
+    const deltaY = clamp(
+      direction.y * amount,
+      -bounds.height + minimumVisible - bounds.y,
+      pageSize.height - minimumVisible - bounds.y
+    );
     replaceShapes(pageIndex, selected.map((shape) => ({ ...shape, x: shape.x + deltaX, y: shape.y + deltaY })));
     if (multiSelectionFrame) {
       multiSelectionFrame = { ...multiSelectionFrame, x: multiSelectionFrame.x + deltaX, y: multiSelectionFrame.y + deltaY };
@@ -2451,8 +2713,13 @@
 
     if (interaction.kind === 'multi-move') {
       const frame = interaction.initialFrame;
-      const deltaX = clamp(point.x - interaction.start.x, -frame.x, pageSize.width - frame.x - frame.width);
-      const deltaY = clamp(point.y - interaction.start.y, -frame.y, pageSize.height - frame.y - frame.height);
+      const minimumVisible = Math.min(12 / zoomLevel, frame.width / 2, frame.height / 2);
+      const minimumX = -frame.width + minimumVisible - frame.x;
+      const maximumX = pageSize.width - minimumVisible - frame.x;
+      const minimumY = -frame.height + minimumVisible - frame.y;
+      const maximumY = pageSize.height - minimumVisible - frame.y;
+      const deltaX = clamp(point.x - interaction.start.x, minimumX, maximumX);
+      const deltaY = clamp(point.y - interaction.start.y, minimumY, maximumY);
       replaceShapes(interaction.pageIndex, interaction.initialShapes.map((/** @type {AnnotationShape} */ shape) => ({
         ...shape,
         x: shape.x + deltaX,
@@ -2776,10 +3043,10 @@
       event.preventDefault();
       event.stopPropagation();
       window.getSelection()?.removeAllRanges();
-      if (event.shiftKey && activeTool === 'select') {
+      const alreadySelected = selectedShape?.pageIndex === shapeHit.pageIndex && selectedShapeIds.has(shapeHit.id);
+      if (event.shiftKey && activeTool === 'select' && !alreadySelected) {
         const ids = selectedShape?.pageIndex === shapeHit.pageIndex ? new Set(selectedShapeIds) : new Set();
-        if (ids.has(shapeHit.id)) ids.delete(shapeHit.id);
-        else ids.add(shapeHit.id);
+        ids.add(shapeHit.id);
         setShapeSelection(shapeHit.pageIndex, [...ids]);
         shapeGuides = null;
         return;
@@ -3605,6 +3872,7 @@
 
   onDestroy(() => {
     loadGeneration += 1;
+    if (historyCommitTimer) clearTimeout(historyCommitTimer);
     if (searchUpdateFrame !== undefined) cancelAnimationFrame(searchUpdateFrame);
     stopSignatureCamera();
     cancelSharpRenders();
@@ -3789,9 +4057,10 @@
                       {/each}
                     </g>
                   {/if}
-                {:else if shape.type === 'signature'}
+                {:else if shape.type === 'signature' || shape.type === 'image'}
                   <image
-                    class="pdf-signature"
+                    class:pdf-signature={shape.type === 'signature'}
+                    class:pdf-imported-image={shape.type === 'image'}
                     data-shape-id={shape.id}
                     data-shape-page={index}
                     href={shape.imageData}
@@ -4322,6 +4591,14 @@
     aria-label="Upload signature photo"
     bind:this={signatureUploadInput}
     onchange={uploadSignaturePhoto}
+  />
+  <input
+    class="signature-upload-input"
+    type="file"
+    accept="image/*"
+    aria-label="Import image"
+    bind:this={imageUploadInput}
+    onchange={importImageFile}
   />
   {#if cameraCaptureOpen}
     <div class="signature-camera-overlay" role="presentation" transition:fade={{ duration: 170 }}>
@@ -5766,7 +6043,8 @@
     min-width: 170px;
   }
 
-  .pdf-signature {
+  .pdf-signature,
+  .pdf-imported-image {
     cursor: default;
     pointer-events: all;
   }

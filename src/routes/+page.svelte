@@ -44,7 +44,7 @@
   $: activeDocument = tabs.find((tab) => tab.id === activeTab);
   /** @type {HTMLInputElement | undefined} */
   let fileInput;
-  /** @type {{ downloadPdf: () => Promise<void>; openSearchPanel: () => void } | undefined} */
+  /** @type {{ downloadPdf: () => Promise<void>; openSearchPanel: () => void; undo: () => Promise<void>; redo: () => Promise<void> } | undefined} */
   let pdfEditor;
   let isDownloading = false;
 
@@ -184,10 +184,10 @@
         <img class="logo" src="/logo.svg" alt="Docuflex" />
       </button>
       <nav class="history" aria-label="History navigation">
-        <button class="plain-button" aria-label="Go back" title="Go back">
+        <button class="plain-button" aria-label="Undo" title="Undo" onclick={() => pdfEditor?.undo()}>
           <img src="/arrowleft.svg" alt="" />
         </button>
-        <button class="plain-button" aria-label="Go forward" title="Go forward">
+        <button class="plain-button" aria-label="Redo" title="Redo" onclick={() => pdfEditor?.redo()}>
           <img src="/arrowright.svg" alt="" />
         </button>
       </nav>
