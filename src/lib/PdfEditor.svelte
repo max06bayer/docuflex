@@ -1,13 +1,13 @@
 <script>
   import { onDestroy, onMount, tick } from 'svelte';
   import { cubicOut } from 'svelte/easing';
-  import { fly } from 'svelte/transition';
+  import { fade, fly } from 'svelte/transition';
   import EditorToolbar from '$lib/EditorToolbar.svelte';
   import HtmlPdfEditor from '$lib/HtmlPdfEditor.svelte';
 
   /** @typedef {{ x: number; y: number; pressure: number }} StrokePoint */
   /** @typedef {{ id: number; type: 'marker' | 'pen'; points: StrokePoint[] }} AnnotationStroke */
-  /** @typedef {{ id: number; type: 'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'textfield'; x: number; y: number; width: number; height: number; rotation: number; text?: string }} AnnotationShape */
+  /** @typedef {{ id: number; type: 'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'textfield' | 'signature'; x: number; y: number; width: number; height: number; rotation: number; text?: string; imageData?: string }} AnnotationShape */
   /** @typedef {{ id: number; type: 'highlight' | 'underline' | 'crossout' | 'blackout' | 'whiteout'; rects: { x: number; y: number; width: number; height: number; color?: [number, number, number] }[] }} TextHighlight */
 
   /** @type {File} */
@@ -110,6 +110,25 @@
   let passwordUnlockError = '';
   let showPasswordUnlockValue = false;
   let unlockingPdf = false;
+  let signPanelOpen = false;
+  let addSignaturePanelOpen = false;
+  /** @type {'draw' | 'write' | 'image'} */
+  let signatureTab = 'image';
+  /** @type {{ id: number; imageUrl: string; name: string; aspectRatio: number }[]} */
+  let savedSignatures = [];
+  let nextSignatureId = 1;
+  let cameraCaptureOpen = false;
+  let cameraError = '';
+  let cameraStarting = false;
+  let signatureProcessing = false;
+  /** @type {MediaStream | null} */
+  let cameraStream = null;
+  /** @type {HTMLVideoElement | undefined} */
+  let signatureCameraVideo;
+  /** @type {HTMLDivElement | undefined} */
+  let signatureCameraFrame;
+  /** @type {HTMLInputElement | undefined} */
+  let signatureUploadInput;
 
   const BASE_PAGE_SCALE = 1.35;
   const MIN_ZOOM = 0.5;
@@ -151,6 +170,13 @@
     const generation = ++editorTransitionGeneration;
     if (nextTool === 'protect') protectPanelOpen = true;
     else if (previousTool === 'protect') protectPanelOpen = false;
+    if (nextTool === 'sign') {
+      signPanelOpen = true;
+      addSignaturePanelOpen = false;
+    } else if (previousTool === 'sign') {
+      signPanelOpen = false;
+      addSignaturePanelOpen = false;
+    }
     if (nextTool === 'edit') {
       if (htmlEditorStarted && htmlEditorReady) {
         htmlViewportMode = true;
@@ -216,6 +242,456 @@
     showProtectionConfirmPassword = false;
     showDisableProtectionPassword = false;
     if (activeTool === 'protect') activeTool = 'select';
+  }
+
+  function closeSignPanel() {
+    signPanelOpen = false;
+    addSignaturePanelOpen = false;
+    if (activeTool === 'sign') activeTool = 'select';
+  }
+
+  function openAddSignaturePanel() {
+    signatureTab = 'image';
+    cameraError = '';
+    addSignaturePanelOpen = true;
+  }
+
+  function closeAddSignaturePanel() {
+    addSignaturePanelOpen = false;
+  }
+
+  function stopSignatureCamera() {
+    cameraStream?.getTracks().forEach((track) => track.stop());
+    cameraStream = null;
+    if (signatureCameraVideo) signatureCameraVideo.srcObject = null;
+  }
+
+  function closeSignatureCamera() {
+    stopSignatureCamera();
+    cameraCaptureOpen = false;
+    cameraStarting = false;
+    cameraError = '';
+  }
+
+  async function openSignatureCamera() {
+    cameraCaptureOpen = true;
+    cameraStarting = true;
+    cameraError = '';
+    stopSignatureCamera();
+    await tick();
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) throw new Error('Camera access is not supported in this browser.');
+      cameraStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+        audio: false
+      });
+      if (!signatureCameraVideo) throw new Error('Could not initialize the camera preview.');
+      signatureCameraVideo.srcObject = cameraStream;
+      await signatureCameraVideo.play();
+    } catch (error) {
+      stopSignatureCamera();
+      cameraError = error instanceof Error && error.name === 'NotAllowedError'
+        ? 'Camera access was denied. Allow camera access or upload a photo instead.'
+        : error instanceof Error ? error.message : 'Could not open the camera.';
+    } finally {
+      cameraStarting = false;
+    }
+  }
+
+  /** @param {CanvasImageSource} source @param {number} sourceWidth @param {number} sourceHeight @param {{ x?: number; y?: number; width?: number; height?: number }} [crop] */
+  async function extractTransparentSignature(source, sourceWidth, sourceHeight, crop = {}) {
+    const cropX = crop.x ?? 0;
+    const cropY = crop.y ?? 0;
+    const cropWidth = crop.width ?? sourceWidth;
+    const cropHeight = crop.height ?? sourceHeight;
+    const scale = Math.min(1, 1600 / Math.max(cropWidth, cropHeight));
+    const width = Math.max(1, Math.round(cropWidth * scale));
+    const height = Math.max(1, Math.round(cropHeight * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    if (!context) throw new Error('Could not process the signature image.');
+    context.drawImage(source, cropX, cropY, cropWidth, cropHeight, 0, 0, width, height);
+    const image = context.getImageData(0, 0, width, height);
+    const pixels = image.data;
+
+    /** @type {number[]} */
+    const edgeReds = [];
+    /** @type {number[]} */
+    const edgeGreens = [];
+    /** @type {number[]} */
+    const edgeBlues = [];
+    let transparentSamples = 0;
+    const edgeStep = Math.max(1, Math.floor(Math.min(width, height) / 180));
+    /** @param {number} x @param {number} y */
+    const samplePixel = (x, y) => {
+      const offset = (y * width + x) * 4;
+      if (pixels[offset + 3] < 220) {
+        transparentSamples += 1;
+        return;
+      }
+      edgeReds.push(pixels[offset]);
+      edgeGreens.push(pixels[offset + 1]);
+      edgeBlues.push(pixels[offset + 2]);
+    };
+    for (let x = 0; x < width; x += edgeStep) {
+      samplePixel(x, 0);
+      samplePixel(x, height - 1);
+    }
+    for (let y = edgeStep; y < height - edgeStep; y += edgeStep) {
+      samplePixel(0, y);
+      samplePixel(width - 1, y);
+    }
+    const hasSourceTransparency = transparentSamples > edgeReds.length * 0.08;
+    /** @param {number[]} values */
+    const median = (values) => {
+      if (!values.length) return 255;
+      values.sort((a, b) => a - b);
+      return values[Math.floor(values.length / 2)];
+    };
+    const background = {
+      red: median(edgeReds),
+      green: median(edgeGreens),
+      blue: median(edgeBlues)
+    };
+    const backgroundLuminance = background.red * 0.2126 + background.green * 0.7152 + background.blue * 0.0722;
+
+    const pixelCount = width * height;
+    const luminance = new Float32Array(pixelCount);
+    const integral = new Float64Array((width + 1) * (height + 1));
+    for (let y = 0; y < height; y += 1) {
+      let rowSum = 0;
+      for (let x = 0; x < width; x += 1) {
+        const pixelIndex = y * width + x;
+        const offset = pixelIndex * 4;
+        const value = pixels[offset] * 0.2126 + pixels[offset + 1] * 0.7152 + pixels[offset + 2] * 0.0722;
+        luminance[pixelIndex] = value;
+        rowSum += value;
+        integral[(y + 1) * (width + 1) + x + 1] = integral[y * (width + 1) + x + 1] + rowSum;
+      }
+    }
+
+    const radius = Math.max(7, Math.min(32, Math.round(Math.min(width, height) / 28)));
+    const scores = new Float32Array(pixelCount);
+    const inkMask = new Uint8Array(pixelCount);
+    for (let y = 0; y < height; y += 1) {
+      const y0 = Math.max(0, y - radius);
+      const y1 = Math.min(height - 1, y + radius);
+      for (let x = 0; x < width; x += 1) {
+        const pixelIndex = y * width + x;
+        const offset = pixelIndex * 4;
+        if (hasSourceTransparency) {
+          scores[pixelIndex] = pixels[offset + 3];
+          inkMask[pixelIndex] = pixels[offset + 3] > 20 ? 1 : 0;
+          continue;
+        }
+        const x0 = Math.max(0, x - radius);
+        const x1 = Math.min(width - 1, x + radius);
+        const stride = width + 1;
+        const localSum = integral[(y1 + 1) * stride + x1 + 1] - integral[y0 * stride + x1 + 1]
+          - integral[(y1 + 1) * stride + x0] + integral[y0 * stride + x0];
+        const localMean = localSum / ((x1 - x0 + 1) * (y1 - y0 + 1));
+        const red = pixels[offset];
+        const green = pixels[offset + 1];
+        const blue = pixels[offset + 2];
+        const redDelta = red - background.red;
+        const greenDelta = green - background.green;
+        const blueDelta = blue - background.blue;
+        const colorDistance = Math.sqrt(redDelta * redDelta * 0.3 + greenDelta * greenDelta * 0.59 + blueDelta * blueDelta * 0.11);
+        const localDarkness = Math.max(0, localMean - luminance[pixelIndex]);
+        const backgroundDarkness = Math.max(0, backgroundLuminance - luminance[pixelIndex]);
+        const blueInk = Math.max(0, (red + green) * 0.5 - blue);
+        const score = Math.max(
+          localDarkness * 1.9,
+          backgroundDarkness * 1.05,
+          blueInk * 1.55 + localDarkness * 0.45,
+          colorDistance - 25
+        );
+        scores[pixelIndex] = score;
+        inkMask[pixelIndex] = score >= 27 ? 1 : 0;
+      }
+    }
+
+    // Keep handwriting-like connected components only. Large objects entering
+    // from the crop edge (hands, table, shadows) are deliberately discarded.
+    const visited = new Uint8Array(pixelCount);
+    const kept = new Uint8Array(pixelCount);
+    const minimumArea = Math.max(3, Math.round(pixelCount * 0.000004));
+    const maximumArea = Math.max(80, Math.round(pixelCount * 0.11));
+    /** @type {number[]} */
+    const queue = [];
+    for (let start = 0; start < pixelCount; start += 1) {
+      if (!inkMask[start] || visited[start]) continue;
+      queue.length = 0;
+      queue.push(start);
+      visited[start] = 1;
+      /** @type {number[]} */
+      const component = [];
+      let componentLeft = width;
+      let componentTop = height;
+      let componentRight = 0;
+      let componentBottom = 0;
+      for (let cursor = 0; cursor < queue.length; cursor += 1) {
+        const index = queue[cursor];
+        component.push(index);
+        const x = index % width;
+        const y = Math.floor(index / width);
+        componentLeft = Math.min(componentLeft, x);
+        componentTop = Math.min(componentTop, y);
+        componentRight = Math.max(componentRight, x);
+        componentBottom = Math.max(componentBottom, y);
+        for (let dy = -1; dy <= 1; dy += 1) {
+          for (let dx = -1; dx <= 1; dx += 1) {
+            if (!dx && !dy) continue;
+            const nx = x + dx;
+            const ny = y + dy;
+            if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+            const neighbor = ny * width + nx;
+            if (inkMask[neighbor] && !visited[neighbor]) {
+              visited[neighbor] = 1;
+              queue.push(neighbor);
+            }
+          }
+        }
+      }
+      const touchesEdge = componentLeft <= 2 || componentTop <= 2 || componentRight >= width - 3 || componentBottom >= height - 3;
+      const boxArea = (componentRight - componentLeft + 1) * (componentBottom - componentTop + 1);
+      const density = component.length / Math.max(1, boxArea);
+      const looksLikeLargeObject = component.length > maximumArea || (boxArea > pixelCount * 0.18 && density > 0.16);
+      if (!touchesEdge && !looksLikeLargeObject && component.length >= minimumArea) {
+        component.forEach((index) => { kept[index] = 1; });
+      }
+    }
+
+    let inkRed = 0;
+    let inkGreen = 0;
+    let inkBlue = 0;
+    let inkSamples = 0;
+    for (let index = 0; index < pixelCount; index += 1) {
+      if (!kept[index] || scores[index] < (hasSourceTransparency ? 80 : 42)) continue;
+      const offset = index * 4;
+      inkRed += pixels[offset];
+      inkGreen += pixels[offset + 1];
+      inkBlue += pixels[offset + 2];
+      inkSamples += 1;
+    }
+    if (!inkSamples) throw new Error('No signature could be detected. Use dark ink on plain white paper and keep it inside the frame.');
+    let outputRed = inkRed / inkSamples;
+    let outputGreen = inkGreen / inkSamples;
+    let outputBlue = inkBlue / inkSamples;
+    // Preserve the detected hue, but compensate for the desaturation caused by
+    // paper glare and camera exposure. Neutral black ink stays neutral while
+    // coloured ink becomes crisp instead of taking on a grey cast.
+    let normalizedRed = outputRed / 255;
+    let normalizedGreen = outputGreen / 255;
+    let normalizedBlue = outputBlue / 255;
+    const maximumChannel = Math.max(normalizedRed, normalizedGreen, normalizedBlue);
+    const minimumChannel = Math.min(normalizedRed, normalizedGreen, normalizedBlue);
+    const channelRange = maximumChannel - minimumChannel;
+    const originalSaturation = maximumChannel > 0 ? channelRange / maximumChannel : 0;
+    const targetSaturation = originalSaturation > 0.035
+      ? Math.min(1, originalSaturation * 2.35 + 0.12)
+      : 0;
+    const targetValue = Math.max(0.08, Math.min(0.72, maximumChannel * 0.88));
+    if (channelRange > 0.0001 && targetSaturation > 0) {
+      const scale = targetValue * targetSaturation / channelRange;
+      const offset = targetValue - maximumChannel * scale;
+      normalizedRed = normalizedRed * scale + offset;
+      normalizedGreen = normalizedGreen * scale + offset;
+      normalizedBlue = normalizedBlue * scale + offset;
+    } else {
+      normalizedRed = targetValue;
+      normalizedGreen = targetValue;
+      normalizedBlue = targetValue;
+    }
+    outputRed = Math.round(normalizedRed * 255);
+    outputGreen = Math.round(normalizedGreen * 255);
+    outputBlue = Math.round(normalizedBlue * 255);
+
+    let left = width;
+    let top = height;
+    let right = -1;
+    let bottom = -1;
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        const offset = index * 4;
+        let alpha = 0;
+        if (kept[index]) {
+          const low = hasSourceTransparency ? 18 : 23;
+          const high = hasSourceTransparency ? 130 : 51;
+          alpha = Math.max(0, Math.min(1, (scores[index] - low) / (high - low)));
+          alpha = alpha * alpha * (3 - 2 * alpha);
+        }
+        pixels[offset] = outputRed;
+        pixels[offset + 1] = outputGreen;
+        pixels[offset + 2] = outputBlue;
+        pixels[offset + 3] = Math.round(alpha * 255);
+        if (pixels[offset + 3] > 12) {
+          left = Math.min(left, x);
+          top = Math.min(top, y);
+          right = Math.max(right, x);
+          bottom = Math.max(bottom, y);
+        }
+      }
+    }
+    if (right < left || bottom < top) throw new Error('No signature could be detected. Use darker ink and a plain, bright background.');
+    context.putImageData(image, 0, 0);
+    const padding = Math.max(4, Math.round(Math.min(width, height) * 0.025));
+    left = Math.max(0, left - padding);
+    top = Math.max(0, top - padding);
+    right = Math.min(width - 1, right + padding);
+    bottom = Math.min(height - 1, bottom + padding);
+    const output = document.createElement('canvas');
+    output.width = right - left + 1;
+    output.height = bottom - top + 1;
+    const outputContext = output.getContext('2d');
+    if (!outputContext) throw new Error('Could not create the transparent signature.');
+    outputContext.drawImage(canvas, left, top, output.width, output.height, 0, 0, output.width, output.height);
+    return { imageUrl: output.toDataURL('image/png'), aspectRatio: output.width / output.height };
+  }
+
+  /** @param {{ imageUrl: string; aspectRatio: number }} extracted */
+  function saveExtractedSignature(extracted) {
+    savedSignatures = [
+      ...savedSignatures,
+      {
+        id: nextSignatureId++,
+        imageUrl: extracted.imageUrl,
+        name: `Signature ${savedSignatures.length + 1}`,
+        aspectRatio: extracted.aspectRatio
+      }
+    ];
+    persistSavedSignatures();
+    addSignaturePanelOpen = false;
+  }
+
+  function persistSavedSignatures() {
+    try {
+      localStorage.setItem('docuflex.savedSignatures', JSON.stringify(savedSignatures.slice(-6)));
+    } catch (error) {
+      console.warn('Could not save signatures on this device:', error);
+    }
+  }
+
+  /** @param {MouseEvent} event @param {number} id */
+  function removeSavedSignature(event, id) {
+    event.stopPropagation();
+    savedSignatures = savedSignatures.filter((signature) => signature.id !== id);
+    persistSavedSignatures();
+  }
+
+  async function captureSignaturePhoto() {
+    if (!signatureCameraVideo || !signatureCameraFrame || !signatureCameraVideo.videoWidth || signatureProcessing) return;
+    signatureProcessing = true;
+    cameraError = '';
+    try {
+      const videoRect = signatureCameraVideo.getBoundingClientRect();
+      const frameRect = signatureCameraFrame.getBoundingClientRect();
+      const videoWidth = signatureCameraVideo.videoWidth;
+      const videoHeight = signatureCameraVideo.videoHeight;
+      const scale = Math.max(videoRect.width / videoWidth, videoRect.height / videoHeight);
+      const visibleSourceWidth = videoRect.width / scale;
+      const visibleSourceHeight = videoRect.height / scale;
+      const hiddenSourceX = (videoWidth - visibleSourceWidth) / 2;
+      const hiddenSourceY = (videoHeight - visibleSourceHeight) / 2;
+      const crop = {
+        x: hiddenSourceX + (frameRect.left - videoRect.left) / scale,
+        y: hiddenSourceY + (frameRect.top - videoRect.top) / scale,
+        width: frameRect.width / scale,
+        height: frameRect.height / scale
+      };
+      const extracted = await extractTransparentSignature(signatureCameraVideo, videoWidth, videoHeight, crop);
+      saveExtractedSignature(extracted);
+      closeSignatureCamera();
+    } catch (error) {
+      cameraError = error instanceof Error ? error.message : 'Could not extract the signature.';
+    } finally {
+      signatureProcessing = false;
+    }
+  }
+
+  function chooseSignaturePhoto() {
+    signatureUploadInput?.click();
+  }
+
+  /** @param {Event} event */
+  async function uploadSignaturePhoto(event) {
+    const input = event.currentTarget;
+    if (!(input instanceof HTMLInputElement) || !input.files?.[0] || signatureProcessing) return;
+    const file = input.files[0];
+    signatureProcessing = true;
+    cameraError = '';
+    try {
+      const imageUrl = URL.createObjectURL(file);
+      try {
+        const image = new Image();
+        image.decoding = 'async';
+        await new Promise((resolve, reject) => {
+          image.onload = resolve;
+          image.onerror = () => reject(new Error('Could not read this image.'));
+          image.src = imageUrl;
+        });
+        const extracted = await extractTransparentSignature(image, image.naturalWidth, image.naturalHeight);
+        saveExtractedSignature(extracted);
+      } finally {
+        URL.revokeObjectURL(imageUrl);
+      }
+    } catch (error) {
+      cameraError = error instanceof Error ? error.message : 'Could not extract the signature.';
+    } finally {
+      input.value = '';
+      signatureProcessing = false;
+    }
+  }
+
+  function visibleSignaturePageIndex() {
+    if (!viewer) return 0;
+    const viewerRect = viewer.getBoundingClientRect();
+    const viewportCenter = viewerRect.top + viewerRect.height / 2;
+    const pages = [...viewer.querySelectorAll('.pdf-page')];
+    let bestIndex = 0;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    pages.forEach((page, index) => {
+      const rect = page.getBoundingClientRect();
+      const distance = Math.abs(rect.top + rect.height / 2 - viewportCenter);
+      if (distance < bestDistance) {
+        bestIndex = index;
+        bestDistance = distance;
+      }
+    });
+    return bestIndex;
+  }
+
+  /** @param {{ imageUrl: string; aspectRatio: number }} signature */
+  function insertSavedSignature(signature) {
+    const pageIndex = visibleSignaturePageIndex();
+    const pageSize = pageSizes[pageIndex];
+    if (!pageSize) return;
+    let width = Math.min(190, pageSize.width * 0.38);
+    let height = width / Math.max(0.2, signature.aspectRatio);
+    const maximumHeight = Math.min(120, pageSize.height * 0.2);
+    if (height > maximumHeight) {
+      height = maximumHeight;
+      width = height * signature.aspectRatio;
+    }
+    const shape = /** @type {AnnotationShape} */ ({
+      id: nextAnnotationId++,
+      type: 'signature',
+      x: (pageSize.width - width) / 2,
+      y: (pageSize.height - height) / 2,
+      width,
+      height,
+      rotation: 0,
+      imageData: signature.imageUrl
+    });
+    shapes = { ...shapes, [pageIndex]: [...(shapes[pageIndex] ?? []), shape] };
+    activeTool = 'select';
+    signPanelOpen = false;
+    addSignaturePanelOpen = false;
+    setShapeSelection(pageIndex, [shape.id]);
+    shapeGuides = { pageIndex, x: pageSize.width / 2, y: pageSize.height / 2, shape };
   }
 
   function submitProtection() {
@@ -298,6 +774,18 @@
   }
 
   onMount(() => {
+    try {
+      const storedSignatures = JSON.parse(localStorage.getItem('docuflex.savedSignatures') ?? '[]');
+      if (Array.isArray(storedSignatures)) {
+        savedSignatures = storedSignatures.filter((signature) =>
+          signature && Number.isInteger(signature.id) && typeof signature.imageUrl === 'string' &&
+          signature.imageUrl.startsWith('data:image/png;base64,') && Number.isFinite(signature.aspectRatio)
+        ).slice(-6);
+        nextSignatureId = Math.max(0, ...savedSignatures.map((signature) => signature.id)) + 1;
+      }
+    } catch (error) {
+      console.warn('Could not restore saved signatures:', error);
+    }
     loadPdf();
     /** @type {{ x: number; y: number } | null} */
     let pointerStart = null;
@@ -2311,7 +2799,8 @@
           rotation: shape.rotation,
           radiusX: 0,
           radiusY: 0,
-          text: shape.text ?? ''
+          text: shape.text ?? '',
+          imageData: shape.imageData ?? ''
         };
       });
     });
@@ -2394,6 +2883,7 @@
 
   onDestroy(() => {
     loadGeneration += 1;
+    stopSignatureCamera();
     cancelSharpRenders();
     textLayerBuilders.forEach((builder) => builder.cancel());
     textLayerAbortController?.abort();
@@ -2540,6 +3030,18 @@
                       {/each}
                     </g>
                   {/if}
+                {:else if shape.type === 'signature'}
+                  <image
+                    class="pdf-signature"
+                    data-shape-id={shape.id}
+                    data-shape-page={index}
+                    href={shape.imageData}
+                    x={shape.x}
+                    y={shape.y}
+                    width={shape.width}
+                    height={shape.height}
+                    preserveAspectRatio="none"
+                  />
                 {:else if shape.type === 'rectangle'}
                   <rect
                     class="pdf-shape"
@@ -2860,6 +3362,36 @@
     ></div>
   {/if}
   <EditorToolbar bind:activeTool />
+  <input
+    class="signature-upload-input"
+    type="file"
+    accept="image/png,image/jpeg,image/webp,image/heic,image/heif"
+    aria-label="Upload signature photo"
+    bind:this={signatureUploadInput}
+    onchange={uploadSignaturePhoto}
+  />
+  {#if cameraCaptureOpen}
+    <div class="signature-camera-overlay" role="presentation" transition:fade={{ duration: 170 }}>
+      <div class="signature-camera-card" role="dialog" aria-modal="true" aria-label="Take signature photo" transition:fly={{ y: 10, duration: 230, easing: cubicOut }}>
+        <div class="signature-camera-preview">
+          <video bind:this={signatureCameraVideo} autoplay playsinline muted></video>
+          <div class="signature-camera-guide" bind:this={signatureCameraFrame}></div>
+          <button class="signature-camera-close" type="button" aria-label="Close camera" onclick={closeSignatureCamera}>
+            <span></span><span></span>
+          </button>
+          {#if cameraStarting}<div class="signature-camera-status">Starting camera…</div>{/if}
+          {#if cameraError}<div class="signature-camera-status error">{cameraError}</div>{/if}
+        </div>
+        <footer class="signature-camera-footer">
+          <span>Place Signature inside Frame</span>
+          <button class="signature-action primary" type="button" disabled={cameraStarting || signatureProcessing || Boolean(cameraError)} onclick={captureSignaturePhoto}>
+            <img src="/camera.svg" alt="" />
+            <span>{signatureProcessing ? 'Extracting…' : 'Take Photo'}</span>
+          </button>
+        </footer>
+      </div>
+    </div>
+  {/if}
   {#if protectPanelOpen}
     <div
       class:encrypted={encryptionEnabled}
@@ -2961,6 +3493,111 @@
         </footer>
       </form>
     </div>
+  {/if}
+  {#if signPanelOpen}
+    <div
+      class:has-signatures={savedSignatures.length > 0}
+      class="protect-panel sign-panel"
+      style={`--signature-count: ${Math.min(savedSignatures.length, 2)}`}
+      role="dialog"
+      aria-label="Sign"
+      transition:fly={{ x: 18, duration: 240, easing: cubicOut }}
+    >
+      <header class="protect-panel-header sign-panel-header">
+        <img src="/toolbar/small/sign.svg" alt="" />
+        <h2>Sign</h2>
+        <button
+          class="protect-panel-close"
+          type="button"
+          aria-label="Close signatures"
+          onclick={closeSignPanel}
+        >
+          <span></span>
+          <span></span>
+        </button>
+      </header>
+      <div class="saved-signature-content">
+        {#if savedSignatures.length > 0}
+          <div class="saved-signature-list">
+            {#each savedSignatures as signature (signature.id)}
+              <div class="saved-signature-row">
+                <button class="saved-signature" type="button" aria-label={`Insert ${signature.name}`} onclick={() => insertSavedSignature(signature)}>
+                  <img src={signature.imageUrl} alt={signature.name} />
+                </button>
+                <button class="saved-signature-remove" type="button" aria-label={`Delete ${signature.name}`} onclick={(event) => removeSavedSignature(event, signature.id)}>
+                  <span></span><span></span>
+                </button>
+              </div>
+            {/each}
+          </div>
+        {/if}
+        <footer class="saved-signature-actions">
+          <button class="signature-action secondary" type="button" onclick={openAddSignaturePanel}>
+            <span class="signature-plus" aria-hidden="true"></span>
+            <span>Add Signature</span>
+          </button>
+        </footer>
+      </div>
+    </div>
+
+    {#if addSignaturePanelOpen}
+      <div
+        class:below-signatures={savedSignatures.length > 0}
+        class="protect-panel add-signature-panel"
+        style:top={`${savedSignatures.length > 0 ? Math.min(300, 132 + Math.min(savedSignatures.length, 2) * 112) + 32 : 164}px`}
+        role="dialog"
+        aria-label="Add Signature"
+        transition:fly={{ y: -10, duration: 240, easing: cubicOut }}
+      >
+        <header class="protect-panel-header sign-panel-header">
+          <img src="/toolbar/small/sign.svg" alt="" />
+          <h2>Add Signature</h2>
+          <button class="protect-panel-close" type="button" aria-label="Close add signature" onclick={closeAddSignaturePanel}>
+            <span></span>
+            <span></span>
+          </button>
+        </header>
+        <div class="add-signature-content">
+          <div class="signature-tabs" role="tablist" aria-label="Signature method">
+            <span
+              class="signature-tab-indicator"
+              style={`transform: translateX(${signatureTab === 'draw' ? 0 : signatureTab === 'write' ? 100 : 200}%);`}
+            ></span>
+            <button class:active={signatureTab === 'draw'} type="button" role="tab" aria-selected={signatureTab === 'draw'} onclick={() => signatureTab = 'draw'}>Draw</button>
+            <button class:active={signatureTab === 'write'} type="button" role="tab" aria-selected={signatureTab === 'write'} onclick={() => signatureTab = 'write'}>Write</button>
+            <button class:active={signatureTab === 'image'} type="button" role="tab" aria-selected={signatureTab === 'image'} onclick={() => signatureTab = 'image'}>Image</button>
+          </div>
+
+          <div class="signature-tab-content">
+            {#key signatureTab}
+              <div class="signature-tab-copy" in:fly={{ x: 8, duration: 210, easing: cubicOut }} out:fade={{ duration: 100 }}>
+                {#if signatureTab === 'image'}
+                  <p>Write your signature on paper and take a photo or upload a photo of your signature.</p>
+                {:else if signatureTab === 'draw'}
+                  <p>Draw your signature using your mouse, trackpad, or touchscreen.</p>
+                {:else}
+                  <p>Write your name and choose a signature style.</p>
+                {/if}
+                {#if cameraError}<p class="signature-processing-error">{cameraError}</p>{/if}
+              </div>
+            {/key}
+          </div>
+
+          <footer class="signature-actions">
+            {#if signatureTab === 'image'}
+              <button class="signature-action primary" type="button" disabled={signatureProcessing} onclick={openSignatureCamera}>
+                <img src="/camera.svg" alt="" />
+                <span>Take Photo</span>
+              </button>
+              <button class="signature-action secondary" type="button" disabled={signatureProcessing} onclick={chooseSignaturePhoto}>
+                <span class="signature-plus" aria-hidden="true"></span>
+                <span>{signatureProcessing ? 'Extracting…' : 'Upload Photo'}</span>
+              </button>
+            {/if}
+          </footer>
+        </div>
+      </div>
+    {/if}
   {/if}
   {#if passwordUnlockOpen}
     <div class="preparation-overlay password-unlock-overlay" role="presentation">
@@ -3459,6 +4096,457 @@
     width: 24px;
     height: 24px;
     filter: brightness(0) invert(1);
+  }
+
+  .protect-panel.sign-panel {
+    height: 132px;
+    transition: height 300ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 200ms ease;
+  }
+
+  .protect-panel.sign-panel.has-signatures {
+    height: min(calc(132px + var(--signature-count) * 112px), 300px, calc(100% - 40px));
+  }
+
+  .protect-panel.add-signature-panel {
+    top: 164px;
+    height: 360px;
+  }
+
+  .protect-panel.add-signature-panel.below-signatures {
+    top: 332px;
+  }
+
+  .sign-panel-header > img {
+    width: 24px;
+    height: 24px;
+  }
+
+  .sign-panel-header h2 {
+    margin-bottom: 0;
+    padding-bottom: 2px;
+    line-height: 1.2;
+  }
+
+  .saved-signature-content,
+  .add-signature-content {
+    display: grid;
+    min-height: 0;
+    overflow: hidden;
+    background: #fafafa;
+  }
+
+  .saved-signature-content {
+    grid-template-rows: minmax(0, 1fr) 81px;
+  }
+
+  .sign-panel:not(.has-signatures) .saved-signature-content {
+    grid-template-rows: 81px;
+  }
+
+  .saved-signature-list {
+    min-height: 0;
+    overflow-y: auto;
+    border-bottom: 1px solid #cacaca;
+    scrollbar-width: none;
+  }
+
+  .saved-signature-list::-webkit-scrollbar {
+    display: none;
+  }
+
+  .saved-signature-row {
+    position: relative;
+    border-bottom: 1px solid #dedede;
+  }
+
+  .saved-signature {
+    display: grid;
+    place-items: center;
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 112px;
+    padding: 18px 30px;
+    border: 0;
+    background: #fafafa;
+    cursor: pointer;
+    transition: background-color 180ms ease;
+  }
+
+  .saved-signature:hover {
+    background: #f5f5f5;
+  }
+
+  .saved-signature img {
+    display: block;
+    max-width: 100%;
+    max-height: 76px;
+    object-fit: contain;
+  }
+
+  .saved-signature-remove {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .saved-signature-remove span {
+    position: absolute;
+    top: 13px;
+    left: 6px;
+    width: 16px;
+    height: 1.5px;
+    border-radius: 99px;
+    background: #929292;
+    transform: rotate(45deg);
+    transition: background-color 160ms ease;
+  }
+
+  .saved-signature-remove span + span {
+    transform: rotate(-45deg);
+  }
+
+  .saved-signature-remove:hover span {
+    background: #000;
+  }
+
+  .saved-signature-actions,
+  .signature-actions {
+    display: grid;
+    align-content: center;
+    box-sizing: border-box;
+    min-height: 0;
+    padding: 17px 18px;
+    background: #fafafa;
+  }
+
+  .add-signature-content {
+    grid-template-rows: 64px 1fr 132px;
+  }
+
+  .signature-tabs {
+    position: relative;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    align-self: center;
+    box-sizing: border-box;
+    height: 42px;
+    margin: 12px 18px 10px;
+    overflow: hidden;
+    border: 1px solid #d7d7d7;
+    border-radius: 8px;
+    background:
+      linear-gradient(#d7d7d7, #d7d7d7) calc(100% / 3) 0 / 1px 100% no-repeat,
+      linear-gradient(#d7d7d7, #d7d7d7) calc(200% / 3) 0 / 1px 100% no-repeat,
+      #f3f3f3;
+  }
+
+  .signature-tab-indicator {
+    position: absolute;
+    z-index: 1;
+    inset: 0 auto 0 0;
+    width: calc(100% / 3);
+    border-radius: 7px;
+    background: #000;
+    box-shadow: 0 3px 9px rgba(0, 0, 0, 0.12);
+    transition: transform 260ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .signature-tabs button {
+    position: relative;
+    z-index: 2;
+    min-width: 0;
+    padding: 0 8px;
+    border: 0;
+    background: transparent;
+    color: #7a7a7a;
+    font: inherit;
+    font-size: 18px;
+    font-weight: 400;
+    line-height: 1;
+    letter-spacing: -0.25px;
+    cursor: pointer;
+    transition: color 190ms ease;
+  }
+
+  .signature-tabs button.active {
+    color: #fff;
+  }
+
+  .signature-tab-content {
+    box-sizing: border-box;
+    min-height: 0;
+    padding: 8px 18px 12px;
+    overflow: hidden;
+    border-bottom: 1px solid #cacaca;
+  }
+
+  .signature-tab-copy p {
+    margin: 0;
+    color: #7a7a7a;
+    font-size: 18px;
+    font-weight: 400;
+    line-height: 1.42;
+    letter-spacing: -0.25px;
+  }
+
+  .signature-tab-copy .signature-processing-error {
+    margin-top: 8px;
+    color: #c83e3e;
+    font-size: 14px;
+    line-height: 1.3;
+  }
+
+  .signature-actions {
+    grid-template-rows: repeat(2, 44px);
+    gap: 10px;
+    padding-block: 17px;
+  }
+
+  .signature-action {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    box-sizing: border-box;
+    width: 100%;
+    height: 44px;
+    padding: 0 12px;
+    border-radius: 8px;
+    font: inherit;
+    font-size: 18px;
+    font-weight: 400;
+    line-height: 1;
+    letter-spacing: -0.3px;
+    cursor: pointer;
+    transition: background-color 220ms ease, border-color 180ms ease, box-shadow 220ms ease, transform 160ms ease;
+  }
+
+  .signature-action:active {
+    transform: scale(0.985);
+  }
+
+  .signature-action.primary {
+    border: 0;
+    background: #0878f9;
+    color: #fff;
+    box-shadow: 0 5px 16px rgba(8, 120, 249, 0.18);
+  }
+
+  .signature-action.primary:hover {
+    background: #006ff0;
+    box-shadow: 0 6px 18px rgba(8, 120, 249, 0.27);
+  }
+
+  .signature-action.primary img {
+    width: 24px;
+    height: 24px;
+  }
+
+  .signature-action.secondary {
+    border: 1px solid #d7d7d7;
+    background: #f3f3f3;
+    color: #7a7a7a;
+  }
+
+  .signature-action.secondary:hover {
+    border-color: #c8c8c8;
+    background: #eeeeee;
+  }
+
+  .signature-action:disabled {
+    cursor: wait;
+    opacity: 0.72;
+  }
+
+  .signature-plus {
+    position: relative;
+    width: 20px;
+    height: 20px;
+    flex: 0 0 20px;
+  }
+
+  .signature-plus::before,
+  .signature-plus::after {
+    position: absolute;
+    top: 9px;
+    left: 2px;
+    width: 16px;
+    height: 1.5px;
+    border-radius: 999px;
+    background: currentColor;
+    content: '';
+  }
+
+  .signature-plus::after {
+    transform: rotate(90deg);
+  }
+
+  .signature-upload-input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .signature-camera-overlay {
+    position: absolute;
+    z-index: 80;
+    display: grid;
+    place-items: start center;
+    inset: 0;
+    box-sizing: border-box;
+    padding: 52px 28px 90px;
+    overflow: auto;
+    background: rgba(245, 245, 245, 0.78);
+    backdrop-filter: blur(6px) saturate(0.9);
+    -webkit-backdrop-filter: blur(6px) saturate(0.9);
+  }
+
+  .signature-camera-card {
+    width: min(760px, 100%);
+    overflow: hidden;
+    border: 1.5px solid #cacaca;
+    border-radius: 13px;
+    background: #fafafa;
+    box-shadow: 0 12px 34px rgba(0, 0, 0, 0.1);
+    color: #7a7a7a;
+    font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .signature-camera-preview {
+    position: relative;
+    aspect-ratio: 16 / 9;
+    margin: 15px 15px 0;
+    overflow: hidden;
+    border: 1px solid #bcbcbc;
+    border-radius: 8px;
+    background: #222;
+  }
+
+  .signature-camera-preview video {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .signature-camera-guide {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 58%;
+    height: 48%;
+    border: 1.5px solid rgba(255, 255, 255, 0.94);
+    border-radius: 7px;
+    box-shadow: 0 0 0 999px rgba(0, 0, 0, 0.1);
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+  }
+
+  .signature-camera-close {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.38);
+    border-radius: 9px;
+    background: rgba(0, 0, 0, 0.28);
+    cursor: pointer;
+    backdrop-filter: blur(6px);
+  }
+
+  .signature-camera-close span {
+    position: absolute;
+    top: 14px;
+    left: 7px;
+    width: 16px;
+    height: 1.5px;
+    border-radius: 99px;
+    background: #fff;
+    transform: rotate(45deg);
+  }
+
+  .signature-camera-close span + span {
+    transform: rotate(-45deg);
+  }
+
+  .signature-camera-status {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    max-width: 72%;
+    padding: 10px 14px;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.58);
+    color: #fff;
+    font-size: 16px;
+    line-height: 1.3;
+    text-align: center;
+    transform: translate(-50%, -50%);
+    backdrop-filter: blur(8px);
+  }
+
+  .signature-camera-status.error {
+    background: rgba(140, 23, 23, 0.76);
+  }
+
+  .signature-camera-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+    box-sizing: border-box;
+    min-height: 66px;
+    padding: 10px 15px 13px;
+  }
+
+  .signature-camera-footer > span {
+    overflow: hidden;
+    font-size: 18px;
+    line-height: 1.2;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .signature-camera-footer .signature-action {
+    width: auto;
+    min-width: 170px;
+  }
+
+  .pdf-signature {
+    cursor: default;
+    pointer-events: all;
+  }
+
+  @media (max-width: 760px) {
+    .signature-camera-overlay {
+      padding: 24px 14px 80px;
+    }
+
+    .signature-camera-preview {
+      margin: 10px 10px 0;
+    }
+
+    .signature-camera-footer {
+      align-items: stretch;
+      flex-direction: column;
+    }
+
+    .signature-camera-footer .signature-action {
+      width: 100%;
+    }
   }
 
   .password-unlock-overlay {

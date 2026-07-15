@@ -374,7 +374,10 @@ public class DocuflexPdfServer {
 
       for (AnnotationStroke shape : shapes) {
         if (shape.width <= 0 || shape.height <= 0) continue;
-        if ("textfield".equals(shape.type)) {
+        if ("signature".equals(shape.type)) {
+          drawSignatureImage(document, content, page, shape);
+          continue;
+        } else if ("textfield".equals(shape.type)) {
           drawTextField(content, page, shape);
           continue;
         } else if ("check".equals(shape.type)) {
@@ -432,6 +435,36 @@ public class DocuflexPdfServer {
         content.fillAndStroke();
       }
     }
+  }
+
+  private static void drawSignatureImage(
+      PDDocument document,
+      PDPageContentStream content,
+      PDPage page,
+      AnnotationStroke shape) throws IOException {
+    if (shape.imageData == null || shape.imageData.isBlank()) return;
+    int comma = shape.imageData.indexOf(',');
+    String encoded = comma >= 0 ? shape.imageData.substring(comma + 1) : shape.imageData;
+    byte[] imageBytes;
+    try {
+      imageBytes = Base64.getDecoder().decode(encoded);
+    } catch (IllegalArgumentException error) {
+      throw new IOException("Invalid signature image data.", error);
+    }
+    if (imageBytes.length > 12 * 1024 * 1024) {
+      throw new IOException("Signature image is too large.");
+    }
+    PDImageXObject image = PDImageXObject.createFromByteArray(document, imageBytes, "signature.png");
+    PdfPoint bottomLeft = shapePoint(page, shape, 0, 1);
+    PdfPoint bottomRight = shapePoint(page, shape, 1, 1);
+    PdfPoint topLeft = shapePoint(page, shape, 0, 0);
+    content.drawImage(image, new Matrix(
+        bottomRight.x - bottomLeft.x,
+        bottomRight.y - bottomLeft.y,
+        topLeft.x - bottomLeft.x,
+        topLeft.y - bottomLeft.y,
+        bottomLeft.x,
+        bottomLeft.y));
   }
 
   private static void drawTextField(
@@ -2747,7 +2780,7 @@ public class DocuflexPdfServer {
       boolean isStroke = "marker".equals(type) || "pen".equals(type);
       boolean isShape = "triangle".equals(type) || "rectangle".equals(type) || "circle".equals(type) ||
           "check".equals(type) || "cross".equals(type) || "arrow".equals(type) || "line".equals(type) ||
-          "textfield".equals(type) || "highlight".equals(type) || "underline".equals(type) ||
+          "textfield".equals(type) || "signature".equals(type) || "highlight".equals(type) || "underline".equals(type) ||
           "crossout".equals(type) || "blackout".equals(type) || "whiteout".equals(type);
       if (!isStroke && !isShape) {
         throw new IllegalArgumentException("Unsupported annotation type: " + type);
@@ -2769,10 +2802,14 @@ public class DocuflexPdfServer {
         if (width <= 0 || height <= 0 || width > 2 || height > 2) {
           throw new IllegalArgumentException("Invalid shape size.");
         }
+        String imageData = optionalString(annotation.get("imageData"));
+        if (imageData.length() > 16 * 1024 * 1024) {
+          throw new IllegalArgumentException("Signature image data is too large.");
+        }
         annotations.add(new AnnotationStroke(
             asInt(annotation.get("page")), type, List.of(),
             x, y, width, height, rotation, Math.max(0, radiusX), Math.max(0, radiusY),
-            color, optionalString(annotation.get("text"))));
+            color, optionalString(annotation.get("text")), imageData));
         continue;
       }
       List<NormalizedPoint> points = new ArrayList<>();
@@ -2790,7 +2827,7 @@ public class DocuflexPdfServer {
         }
       }
       annotations.add(new AnnotationStroke(
-          asInt(annotation.get("page")), type, points, 0, 0, 0, 0, 0, 0, 0, List.of(), ""));
+          asInt(annotation.get("page")), type, points, 0, 0, 0, 0, 0, 0, 0, List.of(), "", ""));
     }
     return annotations;
   }
@@ -2998,7 +3035,8 @@ public class DocuflexPdfServer {
       double radiusX,
       double radiusY,
       List<Double> color,
-      String text) {}
+      String text,
+      String imageData) {}
 
   private record NormalizedPoint(double x, double y) {}
 
