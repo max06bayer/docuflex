@@ -50,6 +50,7 @@
   let editorTransition = '';
   let editorTransitionGeneration = 0;
   let ocrTextLayerActive = false;
+  let cropPagesPrepared = false;
   let searchPanelOpen = false;
   let searchQuery = '';
   /** @type {HTMLInputElement | undefined} */
@@ -203,7 +204,7 @@
       signPanelOpen = false;
       addSignaturePanelOpen = false;
     }
-    if (nextTool === 'crop') prepareCropTool();
+    if (nextTool === 'crop') await prepareCropTool(generation);
     else if (previousTool === 'crop') {
       if (selectedShape) setShapeSelection(selectedShape.pageIndex, []);
       shapeGuides = null;
@@ -2049,8 +2050,140 @@
     multiSelectionFrame = ids.length > 1 && bounds ? { pageIndex, ...bounds } : null;
   }
 
-  function prepareCropTool() {
+  /** @param {string} base64 */
+  function base64ToBytes(base64) {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return bytes;
+  }
+
+  /**
+   * @param {number} pageIndex
+   * @param {{ x: number; y: number; width: number; height: number }} bounds
+   * @param {{ width: number; height: number }} oldSize
+   * @param {{ width: number; height: number }} newSize
+   */
+  function remapPageContentToExpandedBounds(pageIndex, bounds, oldSize, newSize) {
+    const offsetX = bounds.x * newSize.width;
+    const offsetY = bounds.y * newSize.height;
+    const scaleX = bounds.width * newSize.width / Math.max(0.001, oldSize.width);
+    const scaleY = bounds.height * newSize.height / Math.max(0.001, oldSize.height);
+    const transformRect = (/** @type {{ x: number; y: number; width: number; height: number }} */ rect) => ({
+      ...rect,
+      x: offsetX + rect.x * scaleX,
+      y: offsetY + rect.y * scaleY,
+      width: rect.width * scaleX,
+      height: rect.height * scaleY
+    });
+
+    if (annotations[pageIndex]) {
+      annotations = {
+        ...annotations,
+        [pageIndex]: annotations[pageIndex].map((stroke) => ({
+          ...stroke,
+          points: stroke.points.map((point) => ({
+            ...point,
+            x: offsetX + point.x * scaleX,
+            y: offsetY + point.y * scaleY
+          }))
+        }))
+      };
+    }
+    if (shapes[pageIndex]) {
+      shapes = {
+        ...shapes,
+        [pageIndex]: shapes[pageIndex].map((shape) => ({
+          ...shape,
+          x: offsetX + shape.x * scaleX,
+          y: offsetY + shape.y * scaleY,
+          width: shape.width * scaleX,
+          height: shape.height * scaleY
+        }))
+      };
+    }
+    if (textHighlights[pageIndex]) {
+      textHighlights = {
+        ...textHighlights,
+        [pageIndex]: textHighlights[pageIndex].map((highlight) => ({
+          ...highlight,
+          rects: highlight.rects.map((rect) => transformRect(rect))
+        }))
+      };
+    }
+  }
+
+  async function expandCroppedPagesForEditing() {
+    const oldPageSizes = { ...pageSizes };
+    const sourceBytes = await workingFile.arrayBuffer();
+    const response = await fetch('/api/pdf/uncrop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pdfBase64: arrayBufferToBase64(sourceBytes) })
+    });
+    const result = await response.json().catch(() => null);
+    if (!response.ok || !result?.pdfBase64 || !Array.isArray(result.pages)) {
+      throw new Error(result?.error ?? `Could not prepare the full page for cropping (${response.status}).`);
+    }
+    cropPagesPrepared = true;
+    if (!result.changed) return;
+
+    for (let pageIndex = 0; pageIndex < result.pages.length; pageIndex += 1) {
+      const bounds = result.pages[pageIndex];
+      const oldSize = oldPageSizes[pageIndex];
+      if (!bounds?.cropped || !oldSize || bounds.width <= 0 || bounds.height <= 0) continue;
+      const newSize = {
+        width: oldSize.width / bounds.width,
+        height: oldSize.height / bounds.height
+      };
+      remapPageContentToExpandedBounds(pageIndex, bounds, oldSize, newSize);
+    }
+
+    workingFile = new File([base64ToBytes(result.pdfBase64)], workingFile.name, {
+      type: 'application/pdf',
+      lastModified: Date.now()
+    });
+    htmlEditorStarted = false;
+    htmlEditorReady = false;
+    htmlViewportMode = false;
+    await loadPdf(false);
+
+    const nextShapes = { ...shapes };
+    for (let pageIndex = 0; pageIndex < result.pages.length; pageIndex += 1) {
+      const bounds = result.pages[pageIndex];
+      const pageSize = pageSizes[pageIndex];
+      if (!bounds?.cropped || !pageSize) continue;
+      const pageShapes = nextShapes[pageIndex] ?? [];
+      if (pageShapes.some((shape) => shape.type === 'crop')) continue;
+      nextShapes[pageIndex] = [...pageShapes, {
+        id: nextAnnotationId++,
+        type: /** @type {'crop'} */ ('crop'),
+        x: bounds.x * pageSize.width,
+        y: bounds.y * pageSize.height,
+        width: bounds.width * pageSize.width,
+        height: bounds.height * pageSize.height,
+        rotation: 0
+      }];
+    }
+    shapes = nextShapes;
+  }
+
+  /** @param {number} generation */
+  async function prepareCropTool(generation) {
     let preferredPage = selectionAnchor ?? [...selectedPages][0] ?? selectedShape?.pageIndex ?? 0;
+    if (!cropPagesPrepared) {
+      editorTransition = 'Preparing Full Page for Cropping';
+      try {
+        await expandCroppedPagesForEditing();
+      } catch (error) {
+        console.error(error);
+        window.alert(error instanceof Error ? error.message : 'Could not prepare the full page for cropping.');
+      } finally {
+        if (generation === editorTransitionGeneration) editorTransition = '';
+      }
+    }
+    if (generation !== editorTransitionGeneration || activeTool !== 'crop') return;
+
     if (!pageSizes[preferredPage]) {
       preferredPage = Number(Object.keys(pageSizes)[0] ?? 0);
     }

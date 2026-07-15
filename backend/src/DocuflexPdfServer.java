@@ -78,6 +78,7 @@ public class DocuflexPdfServer {
     server.createContext("/edit", DocuflexPdfServer::handleEdit);
     server.createContext("/fonts", DocuflexPdfServer::handleFonts);
     server.createContext("/decrypt", DocuflexPdfServer::handleDecrypt);
+    server.createContext("/uncrop", DocuflexPdfServer::handleUncrop);
     server.createContext("/export", DocuflexPdfServer::handleExport);
     server.start();
     System.out.println("Docuflex PDFBox server listening on http://" + HOST + ":" + PORT);
@@ -201,6 +202,89 @@ public class DocuflexPdfServer {
     } catch (Exception error) {
       sendJson(exchange, 400, "{\"error\":\"Incorrect password or unsupported encrypted PDF.\"}");
     }
+  }
+
+  private static void handleUncrop(HttpExchange exchange) throws IOException {
+    addCors(exchange);
+    if ("OPTIONS".equals(exchange.getRequestMethod())) {
+      sendNoContent(exchange);
+      return;
+    }
+    if (!"POST".equals(exchange.getRequestMethod())) {
+      sendJson(exchange, 405, "{\"error\":\"POST required\"}");
+      return;
+    }
+
+    try {
+      String body = readRequestBody(exchange);
+      Map<String, Object> payload = asObject(new JsonParser(body).parse());
+      byte[] pdfBytes = Base64.getDecoder().decode(asString(payload.get("pdfBase64")));
+      ByteArrayOutputStream output = new ByteArrayOutputStream();
+      StringBuilder pagesJson = new StringBuilder("[");
+      boolean changed = false;
+
+      try (PDDocument document = Loader.loadPDF(pdfBytes)) {
+        for (int pageIndex = 0; pageIndex < document.getNumberOfPages(); pageIndex += 1) {
+          if (pageIndex > 0) pagesJson.append(',');
+          PDPage page = document.getPage(pageIndex);
+          PDRectangle mediaBox = page.getMediaBox();
+          PDRectangle cropBox = page.getCropBox();
+          int rotation = ((page.getRotation() % 360) + 360) % 360;
+          NormalizedPoint first = pdfPointToNormalized(mediaBox, rotation, cropBox.getLowerLeftX(), cropBox.getLowerLeftY());
+          NormalizedPoint second = pdfPointToNormalized(mediaBox, rotation, cropBox.getUpperRightX(), cropBox.getLowerLeftY());
+          NormalizedPoint third = pdfPointToNormalized(mediaBox, rotation, cropBox.getLowerLeftX(), cropBox.getUpperRightY());
+          NormalizedPoint fourth = pdfPointToNormalized(mediaBox, rotation, cropBox.getUpperRightX(), cropBox.getUpperRightY());
+          double left = clamp(Math.min(Math.min(first.x, second.x), Math.min(third.x, fourth.x)), 0, 1);
+          double right = clamp(Math.max(Math.max(first.x, second.x), Math.max(third.x, fourth.x)), 0, 1);
+          double top = clamp(Math.min(Math.min(first.y, second.y), Math.min(third.y, fourth.y)), 0, 1);
+          double bottom = clamp(Math.max(Math.max(first.y, second.y), Math.max(third.y, fourth.y)), 0, 1);
+          boolean cropped = left > 0.0001 || top > 0.0001 || right < 0.9999 || bottom < 0.9999;
+          changed |= cropped;
+          pagesJson.append('{')
+              .append("\"x\":").append(left).append(',')
+              .append("\"y\":").append(top).append(',')
+              .append("\"width\":").append(Math.max(0, right - left)).append(',')
+              .append("\"height\":").append(Math.max(0, bottom - top)).append(',')
+              .append("\"cropped\":").append(cropped)
+              .append('}');
+
+          if (cropped) {
+            page.setCropBox(new PDRectangle(
+                mediaBox.getLowerLeftX(),
+                mediaBox.getLowerLeftY(),
+                mediaBox.getWidth(),
+                mediaBox.getHeight()));
+          }
+        }
+        if (changed) document.save(output);
+      }
+      pagesJson.append(']');
+      byte[] expandedBytes = changed ? output.toByteArray() : pdfBytes;
+      String response = "{"
+          + "\"pdfBase64\":\"" + Base64.getEncoder().encodeToString(expandedBytes) + "\","
+          + "\"changed\":" + changed + ","
+          + "\"pages\":" + pagesJson
+          + "}";
+      sendJson(exchange, 200, response);
+    } catch (Exception error) {
+      error.printStackTrace();
+      sendJson(exchange, 400, "{\"error\":\"" + escapeJson(error.getMessage()) + "\"}");
+    }
+  }
+
+  private static NormalizedPoint pdfPointToNormalized(
+      PDRectangle box,
+      int rotation,
+      double pointX,
+      double pointY) {
+    double relativeX = (pointX - box.getLowerLeftX()) / Math.max(0.0001, box.getWidth());
+    double relativeY = (pointY - box.getLowerLeftY()) / Math.max(0.0001, box.getHeight());
+    return switch (rotation) {
+      case 90 -> new NormalizedPoint(relativeY, relativeX);
+      case 180 -> new NormalizedPoint(1 - relativeX, relativeY);
+      case 270 -> new NormalizedPoint(1 - relativeY, 1 - relativeX);
+      default -> new NormalizedPoint(relativeX, 1 - relativeY);
+    };
   }
 
   private static byte[] applyAnnotations(
