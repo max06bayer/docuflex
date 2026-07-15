@@ -7,7 +7,7 @@
 
   /** @typedef {{ x: number; y: number; pressure: number }} StrokePoint */
   /** @typedef {{ id: number; type: 'marker' | 'pen'; points: StrokePoint[] }} AnnotationStroke */
-  /** @typedef {{ id: number; type: 'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'measure' | 'crop' | 'textfield' | 'signature' | 'image' | 'checkbox' | 'input'; x: number; y: number; width: number; height: number; rotation: number; text?: string; imageData?: string; fieldName?: string; fieldValue?: string | boolean; existingField?: boolean; readOnly?: boolean }} AnnotationShape */
+  /** @typedef {{ id: number; type: 'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'measure' | 'crop' | 'textfield' | 'signature' | 'image' | 'checkbox' | 'input'; x: number; y: number; width: number; height: number; rotation: number; text?: string; imageData?: string; fieldName?: string; fieldValue?: string | boolean; existingField?: boolean; readOnly?: boolean; opacity?: number; cornerRadius?: number; fillPresent?: boolean; fillEnabled?: boolean; fillColor?: string; fillAlpha?: number; strokePresent?: boolean; strokeEnabled?: boolean; strokeColor?: string; strokeAlpha?: number; strokeWidth?: number; shadowPresent?: boolean; shadowEnabled?: boolean; shadowOpacity?: number; shadowBlur?: number; shadowX?: number; shadowY?: number; backgroundBlurPresent?: boolean; backgroundBlurEnabled?: boolean; backgroundBlur?: number }} AnnotationShape */
   /** @typedef {{ id: number; type: 'highlight' | 'underline' | 'crossout' | 'blackout' | 'whiteout'; rects: { x: number; y: number; width: number; height: number; color?: [number, number, number] }[] }} TextHighlight */
 
   /** @type {File} */
@@ -166,8 +166,22 @@
   /** @type {ReturnType<typeof setTimeout> | undefined} */
   let historyCommitTimer;
   let applyingHistoryState = false;
+  /** @type {{ pageIndex: number; id: number } | null} */
+  let hoveredShape = null;
+  /** @type {{ property: 'fillColor' | 'strokeColor'; hue: number; saturation: number; value: number; alpha: number } | null} */
+  let colorPicker = null;
+  /** @type {HTMLInputElement | null} */
+  let inspectorXInput = null;
+  /** @type {HTMLInputElement | null} */
+  let inspectorYInput = null;
+  /** @type {HTMLInputElement | null} */
+  let inspectorWidthInput = null;
+  /** @type {HTMLInputElement | null} */
+  let inspectorHeightInput = null;
+  /** @type {HTMLInputElement | null} */
+  let inspectorRotationInput = null;
 
-  const BASE_PAGE_SCALE = 1.35;
+  const BASE_PAGE_SCALE = 1.55;
   const MIN_ZOOM = 0.5;
   const MAX_ZOOM = 4;
   const CLICK_ZOOM_FACTOR = 1.25;
@@ -212,6 +226,25 @@
     shapeInteraction;
     editingTextShape;
     scheduleHistoryCommit();
+  }
+  $: {
+    shapes;
+    selectedShape;
+    multiSelectionFrame;
+    const frame = inspectorFrame();
+    const selected = inspectorSelection();
+    syncInspectorInput(inspectorXInput, frame?.x);
+    syncInspectorInput(inspectorYInput, frame?.y);
+    syncInspectorInput(inspectorWidthInput, frame?.width);
+    syncInspectorInput(inspectorHeightInput, frame?.height);
+    syncInspectorInput(inspectorRotationInput, selected.length === 1 ? selected[0].rotation : multiSelectionFrame?.rotation);
+  }
+
+  /** @param {HTMLInputElement | null} input @param {number | undefined} value */
+  function syncInspectorInput(input, value) {
+    if (!input || value === undefined || document.activeElement === input) return;
+    const next = String(Math.round(value));
+    if (input.value !== next) input.value = next;
   }
 
   function captureHistoryState() {
@@ -2326,8 +2359,400 @@
     return (shapes[pageIndex] ?? []).filter((shape) => selectedShapeIds.has(shape.id));
   }
 
+  function inspectorSelection() {
+    return selectedShape ? selectedShapesOnPage(selectedShape.pageIndex).filter((shape) => shape.type !== 'crop') : [];
+  }
+
+  function inspectorFrame() {
+    const selected = inspectorSelection();
+    return selected.length === 1 ? selected[0] : selectionBounds(selected);
+  }
+
+  /** @param {AnnotationShape} shape */
+  function shapeHasFill(shape) {
+    return ['triangle', 'rectangle', 'circle'].includes(shape.type);
+  }
+
+  /** @param {AnnotationShape} shape */
+  function shapeSupportsStroke(shape) {
+    return ['triangle', 'rectangle', 'circle', 'check', 'cross', 'arrow', 'line', 'image'].includes(shape.type);
+  }
+
+  /** @param {AnnotationShape} shape @param {'fill' | 'stroke' | 'shadow' | 'backgroundBlur'} property */
+  function shapePropertyPresent(shape, property) {
+    if (property === 'fill') return shape.fillPresent ?? shapeHasFill(shape);
+    if (property === 'stroke') return shape.strokePresent ?? shapeSupportsStroke(shape);
+    if (property === 'shadow') return shape.shadowPresent ?? false;
+    return shape.backgroundBlurPresent ?? false;
+  }
+
+  /** @param {AnnotationShape} shape @param {'fill' | 'stroke' | 'shadow' | 'backgroundBlur'} property */
+  function shapePropertyEnabled(shape, property) {
+    if (property === 'fill') return shape.fillEnabled ?? shapeHasFill(shape);
+    if (property === 'stroke') return shape.strokeEnabled ?? shapeSupportsStroke(shape);
+    if (property === 'shadow') return shape.shadowEnabled ?? true;
+    return shape.backgroundBlurEnabled ?? true;
+  }
+
+  /** @param {AnnotationShape} shape */
+  function shapeFill(shape) {
+    if (!shapePropertyEnabled(shape, 'fill')) return 'transparent';
+    return colorWithAlpha(shape.fillColor ?? '#ff4d55', shape.fillAlpha ?? 1);
+  }
+
+  /** @param {AnnotationShape} shape */
+  function shapeStroke(shape) {
+    if (!shapePropertyEnabled(shape, 'stroke')) return 'transparent';
+    return colorWithAlpha(shape.strokeColor ?? (shapeHasFill(shape) ? '#de3542' : '#ff4d55'), shape.strokeAlpha ?? 1);
+  }
+
+  /** @param {AnnotationShape} shape */
+  function shapeEffectStyle(shape) {
+    const opacity = clamp(shape.opacity ?? 1, 0, 1);
+    const shadow = shapePropertyPresent(shape, 'shadow') && shapePropertyEnabled(shape, 'shadow')
+      ? `drop-shadow(${shape.shadowX ?? 0}px ${shape.shadowY ?? 3}px ${shape.shadowBlur ?? 6}px rgba(0,0,0,${clamp(shape.shadowOpacity ?? 0.25, 0, 1)}))`
+      : 'none';
+    return `opacity:${opacity};filter:${shadow};--shape-fill:${shapeFill(shape)};--shape-stroke:${shapeStroke(shape)};--shape-stroke-width:${Math.max(0, shape.strokeWidth ?? (shapeHasFill(shape) ? 1.35 : 1.4))}px`;
+  }
+
+  /** @param {AnnotationShape} shape */
+  function shapeClipStyle(shape) {
+    const radius = Math.max(0, shape.cornerRadius ?? 0);
+    return radius ? `clip-path:inset(0 round ${radius}px)` : '';
+  }
+
+  /** @param {AnnotationShape} shape */
+  function shapeBackdropStyle(shape) {
+    const blur = Math.max(0, shape.backgroundBlur ?? 8);
+    const radius = Math.max(0, shape.cornerRadius ?? 0);
+    const clip = shape.type === 'circle'
+      ? 'border-radius:50%'
+      : shape.type === 'triangle'
+        ? 'clip-path:polygon(50% 0,100% 100%,0 100%)'
+        : `border-radius:${radius}px`;
+    return `width:100%;height:100%;backdrop-filter:blur(${blur}px);-webkit-backdrop-filter:blur(${blur}px);${clip}`;
+  }
+
+  /** @param {string} color */
+  function normalizedHex(color) {
+    const value = color.trim().replace(/^#/, '').toUpperCase();
+    return /^[0-9A-F]{6}$/.test(value) ? `#${value}` : null;
+  }
+
+  /** @param {string} color @param {number} alpha */
+  function colorWithAlpha(color, alpha) {
+    const hex = normalizedHex(color) ?? '#000000';
+    return `rgba(${Number.parseInt(hex.slice(1, 3), 16)},${Number.parseInt(hex.slice(3, 5), 16)},${Number.parseInt(hex.slice(5, 7), 16)},${clamp(alpha, 0, 1)})`;
+  }
+
+  /** @param {string} color */
+  function hexToHsv(color) {
+    const [red, green, blue] = normalizedRgb(color);
+    const maximum = Math.max(red, green, blue);
+    const minimum = Math.min(red, green, blue);
+    const delta = maximum - minimum;
+    let hue = 0;
+    if (delta) {
+      if (maximum === red) hue = 60 * (((green - blue) / delta) % 6);
+      else if (maximum === green) hue = 60 * ((blue - red) / delta + 2);
+      else hue = 60 * ((red - green) / delta + 4);
+    }
+    if (hue < 0) hue += 360;
+    return { hue, saturation: maximum ? delta / maximum : 0, value: maximum };
+  }
+
+  /** @param {number} hue @param {number} saturation @param {number} value */
+  function hsvToHex(hue, saturation, value) {
+    const chroma = value * saturation;
+    const section = ((hue % 360) + 360) % 360 / 60;
+    const secondary = chroma * (1 - Math.abs(section % 2 - 1));
+    const [red, green, blue] = section < 1 ? [chroma, secondary, 0]
+      : section < 2 ? [secondary, chroma, 0]
+        : section < 3 ? [0, chroma, secondary]
+          : section < 4 ? [0, secondary, chroma]
+            : section < 5 ? [secondary, 0, chroma]
+              : [chroma, 0, secondary];
+    const match = value - chroma;
+    return `#${[red, green, blue].map((channel) => Math.round((channel + match) * 255).toString(16).padStart(2, '0')).join('').toUpperCase()}`;
+  }
+
+  /** @param {'fillColor' | 'strokeColor'} property */
+  function openColorPicker(property) {
+    const shape = inspectorSelection()[0];
+    if (!shape) return;
+    if (colorPicker?.property === property) {
+      colorPicker = null;
+      return;
+    }
+    const color = property === 'fillColor'
+      ? shape.fillColor ?? '#ff4d55'
+      : shape.strokeColor ?? (shapeHasFill(shape) ? '#de3542' : '#ff4d55');
+    const hsv = hexToHsv(color);
+    colorPicker = {
+      property,
+      ...hsv,
+      alpha: property === 'fillColor' ? shape.fillAlpha ?? 1 : shape.strokeAlpha ?? 1
+    };
+  }
+
+  function applyColorPicker() {
+    if (!colorPicker) return;
+    const color = hsvToHex(colorPicker.hue, colorPicker.saturation, colorPicker.value);
+    const alphaProperty = colorPicker.property === 'fillColor' ? 'fillAlpha' : 'strokeAlpha';
+    const prefix = colorPicker.property === 'fillColor' ? 'fill' : 'stroke';
+    updateSelectedShapes({
+      [colorPicker.property]: color,
+      [alphaProperty]: colorPicker.alpha,
+      [`${prefix}Present`]: true,
+      [`${prefix}Enabled`]: true
+    });
+  }
+
+  /** @param {string} value */
+  function setPickerHex(value) {
+    if (!colorPicker) return;
+    const color = normalizedHex(value);
+    if (!color) return;
+    colorPicker = { ...colorPicker, ...hexToHsv(color) };
+    applyColorPicker();
+  }
+
+  /** @param {number} percentage */
+  function setPickerAlpha(percentage) {
+    if (!colorPicker || !Number.isFinite(percentage)) return;
+    colorPicker = { ...colorPicker, alpha: clamp(percentage / 100, 0, 1) };
+    applyColorPicker();
+  }
+
+  /** @param {PointerEvent} event @param {'saturation' | 'hue' | 'alpha'} control */
+  function updateColorControl(event, control) {
+    if (!colorPicker) return;
+    const element = /** @type {HTMLElement} */ (event.currentTarget);
+    const rect = element.getBoundingClientRect();
+    element.setPointerCapture?.(event.pointerId);
+    if (control === 'saturation') {
+      colorPicker = {
+        ...colorPicker,
+        saturation: clamp((event.clientX - rect.left) / rect.width, 0, 1),
+        value: 1 - clamp((event.clientY - rect.top) / rect.height, 0, 1)
+      };
+    } else if (control === 'hue') {
+      colorPicker = { ...colorPicker, hue: clamp((event.clientX - rect.left) / rect.width, 0, 1) * 360 };
+    } else {
+      colorPicker = { ...colorPicker, alpha: clamp((event.clientX - rect.left) / rect.width, 0, 1) };
+    }
+    applyColorPicker();
+  }
+
+  /** @param {AnnotationShape} shape */
+  function roundedTrianglePath(shape) {
+    const points = [
+      { x: shape.x + shape.width / 2, y: shape.y },
+      { x: shape.x + shape.width, y: shape.y + shape.height },
+      { x: shape.x, y: shape.y + shape.height }
+    ];
+    const radius = Math.max(0, Math.min(shape.cornerRadius ?? 0, shape.width * 0.45, shape.height * 0.45));
+    if (radius < 0.01) return `M ${points[0].x} ${points[0].y} L ${points[1].x} ${points[1].y} L ${points[2].x} ${points[2].y} Z`;
+    const toward = /** @param {{ x: number; y: number }} from @param {{ x: number; y: number }} to */ (from, to) => {
+      const length = Math.max(0.001, Math.hypot(to.x - from.x, to.y - from.y));
+      const distance = Math.min(radius, length * 0.42);
+      return { x: from.x + (to.x - from.x) * distance / length, y: from.y + (to.y - from.y) * distance / length };
+    };
+    const incoming = points.map((point, index) => toward(point, points[(index + points.length - 1) % points.length]));
+    const outgoing = points.map((point, index) => toward(point, points[(index + 1) % points.length]));
+    return `M ${outgoing[0].x} ${outgoing[0].y} L ${incoming[1].x} ${incoming[1].y} Q ${points[1].x} ${points[1].y} ${outgoing[1].x} ${outgoing[1].y} L ${incoming[2].x} ${incoming[2].y} Q ${points[2].x} ${points[2].y} ${outgoing[2].x} ${outgoing[2].y} L ${incoming[0].x} ${incoming[0].y} Q ${points[0].x} ${points[0].y} ${outgoing[0].x} ${outgoing[0].y} Z`;
+  }
+
+  /** @param {string} color */
+  function normalizedRgb(color) {
+    const hex = normalizedHex(color) ?? '#000000';
+    return [
+      Number.parseInt(hex.slice(1, 3), 16) / 255,
+      Number.parseInt(hex.slice(3, 5), 16) / 255,
+      Number.parseInt(hex.slice(5, 7), 16) / 255
+    ];
+  }
+
+  /** @param {AnnotationShape} shape */
+  function shapeExportStyle(shape) {
+    const fill = normalizedRgb(shape.fillColor ?? '#ff4d55');
+    const stroke = normalizedRgb(shape.strokeColor ?? (shapeHasFill(shape) ? '#de3542' : '#ff4d55'));
+    return [
+      ...fill,
+      ...stroke,
+      clamp(shape.opacity ?? 1, 0, 1),
+      Math.max(0, shape.strokeWidth ?? (shapeHasFill(shape) ? 1.35 : 1.4)),
+      shapePropertyPresent(shape, 'fill') ? 1 : 0,
+      shapePropertyEnabled(shape, 'fill') ? 1 : 0,
+      shapePropertyPresent(shape, 'stroke') ? 1 : 0,
+      shapePropertyEnabled(shape, 'stroke') ? 1 : 0,
+      shapePropertyPresent(shape, 'shadow') ? 1 : 0,
+      shapePropertyEnabled(shape, 'shadow') ? 1 : 0,
+      clamp(shape.shadowOpacity ?? 0.25, 0, 1),
+      Math.max(0, shape.shadowBlur ?? 6),
+      shape.shadowX ?? 0,
+      shape.shadowY ?? 3,
+      shapePropertyPresent(shape, 'backgroundBlur') ? 1 : 0,
+      shapePropertyEnabled(shape, 'backgroundBlur') ? 1 : 0,
+      Math.max(0, shape.backgroundBlur ?? 8),
+      clamp(shape.fillAlpha ?? 1, 0, 1),
+      clamp(shape.strokeAlpha ?? 1, 0, 1)
+    ];
+  }
+
+  /** @param {Partial<AnnotationShape>} changes */
+  function updateSelectedShapes(changes) {
+    if (!selectedShape) return;
+    const selected = selectedShapesOnPage(selectedShape.pageIndex);
+    replaceShapes(selectedShape.pageIndex, selected.map((shape) => ({ ...shape, ...changes })));
+  }
+
+  /**
+   * Keeps a normal click editable, but turns a horizontal drag on a numeric input into Figma-style scrubbing.
+   * @param {PointerEvent} event
+   * @param {(value: number) => void} apply
+   * @param {{ step?: number; min?: number; max?: number }} [options]
+   */
+  function startNumberScrub(event, apply, options = {}) {
+    if (event.button !== 0 || !(event.currentTarget instanceof HTMLElement)) return;
+    const input = event.currentTarget instanceof HTMLInputElement
+      ? event.currentTarget
+      : event.currentTarget.closest('label, .object-property-row')?.querySelector('input[type="number"]');
+    if (!(input instanceof HTMLInputElement)) return;
+    const startX = event.clientX;
+    const startValue = Number(input.value) || 0;
+    const step = options.step ?? 1;
+    const precision = Math.max(0, String(step).split('.')[1]?.length ?? 0);
+    let dragging = false;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+
+    /** @param {PointerEvent} moveEvent */
+    const move = (moveEvent) => {
+      if (moveEvent.pointerId !== event.pointerId) return;
+      const delta = moveEvent.clientX - startX;
+      if (!dragging && Math.abs(delta) < 4) return;
+      if (!dragging) {
+        dragging = true;
+        input.blur();
+        document.body.style.cursor = 'ew-resize';
+        document.body.style.userSelect = 'none';
+      }
+      moveEvent.preventDefault();
+      let value = startValue + delta * step;
+      const minimum = options.min;
+      const maximum = options.max;
+      if (typeof minimum === 'number' && Number.isFinite(minimum)) value = Math.max(minimum, value);
+      if (typeof maximum === 'number' && Number.isFinite(maximum)) value = Math.min(maximum, value);
+      value = Number(value.toFixed(precision));
+      input.value = String(value);
+      apply(value);
+    };
+
+    /** @param {PointerEvent} upEvent */
+    const finish = (upEvent) => {
+      if (upEvent.pointerId !== event.pointerId) return;
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', finish);
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      if (dragging) {
+        input.addEventListener('click', (clickEvent) => clickEvent.preventDefault(), { once: true, capture: true });
+      }
+    };
+
+    window.addEventListener('pointermove', move, { passive: false });
+    window.addEventListener('pointerup', finish);
+    window.addEventListener('pointercancel', finish);
+  }
+
+  /** @param {'fillColor' | 'strokeColor'} property @param {string} value */
+  function updateSelectedColor(property, value) {
+    const color = normalizedHex(value);
+    if (!color) return;
+    const prefix = property === 'fillColor' ? 'fill' : 'stroke';
+    updateSelectedShapes({ [property]: color, [`${prefix}Present`]: true, [`${prefix}Enabled`]: true });
+    if (colorPicker?.property === property) colorPicker = { ...colorPicker, ...hexToHsv(color) };
+  }
+
+  /** @param {'fill' | 'stroke' | 'shadow' | 'backgroundBlur'} property */
+  function toggleShapeProperty(property) {
+    const shape = inspectorSelection()[0];
+    if (!shape) return;
+    updateSelectedShapes({ [`${property}Present`]: true, [`${property}Enabled`]: !shapePropertyEnabled(shape, property) });
+  }
+
+  /** @param {'x' | 'y' | 'width' | 'height' | 'rotation'} property @param {number} value */
+  function updateSelectionGeometry(property, value) {
+    if (!selectedShape || !Number.isFinite(value)) return;
+    const pageIndex = selectedShape.pageIndex;
+    const selected = selectedShapesOnPage(pageIndex);
+    const frame = selectionBounds(selected);
+    if (!frame || !selected.length) return;
+    if (property === 'x' || property === 'y') {
+      const delta = value - frame[property];
+      replaceShapes(pageIndex, selected.map((shape) => ({ ...shape, [property]: shape[property] + delta })));
+      return;
+    }
+    if (property === 'rotation') {
+      const currentRotation = selected.length === 1 ? selected[0].rotation : (multiSelectionFrame?.rotation ?? 0);
+      const delta = value - currentRotation;
+      const center = { x: frame.x + frame.width / 2, y: frame.y + frame.height / 2 };
+      const radians = delta * Math.PI / 180;
+      replaceShapes(pageIndex, selected.map((shape) => {
+        const source = shapeCenter(shape);
+        const offset = rotateVector(source.x - center.x, source.y - center.y, radians);
+        return { ...shape, x: center.x + offset.x - shape.width / 2, y: center.y + offset.y - shape.height / 2, rotation: shape.rotation + delta };
+      }));
+      return;
+    }
+    const targetSize = Math.max(MIN_SHAPE_SIZE, value);
+    const scaleX = property === 'width' ? targetSize / frame.width : 1;
+    const scaleY = property === 'height' ? targetSize / frame.height : 1;
+    replaceShapes(pageIndex, selected.map((shape) => {
+      const center = shapeCenter(shape);
+      return {
+        ...shape,
+        x: frame.x + (center.x - frame.x) * scaleX - shape.width * scaleX / 2,
+        y: frame.y + (center.y - frame.y) * scaleY - shape.height * scaleY / 2,
+        width: shape.width * scaleX,
+        height: shape.height * scaleY
+      };
+    }));
+  }
+
+  function closeSelectionPanel() {
+    if (selectedShape) setShapeSelection(selectedShape.pageIndex, []);
+    colorPicker = null;
+    shapeGuides = null;
+  }
+
+  /** @param {PointerEvent} event */
+  function updateHoveredShape(event) {
+    if (activeTool !== 'select' || drawingShape || shapeInteraction || pendingFormDrag) {
+      hoveredShape = null;
+      return;
+    }
+    const target = shapeTarget(event);
+    const shape = target ? findShape(target.pageIndex, target.id) : null;
+    if (!target || !shape || shape.type === 'crop' || shape.type === 'measure' || selectedShapeIds.has(shape.id)) {
+      hoveredShape = null;
+      return;
+    }
+    hoveredShape = { pageIndex: target.pageIndex, id: shape.id };
+  }
+
+  function handleViewerPointerLeave() {
+    hideEraserCursor();
+    hoveredShape = null;
+  }
+
   /** @param {number} pageIndex @param {number[]} ids */
   function setShapeSelection(pageIndex, ids) {
+    const previousKey = selectedShape ? `${selectedShape.pageIndex}:${[...selectedShapeIds].join(',')}` : '';
+    const nextKey = ids.length ? `${pageIndex}:${ids.join(',')}` : '';
+    if (previousKey !== nextKey) colorPicker = null;
     selectedShapeIds = new Set(ids);
     selectedShape = ids.length ? { pageIndex, id: ids[ids.length - 1] } : null;
     const bounds = selectionBounds(selectedShapesOnPage(pageIndex));
@@ -3212,6 +3637,7 @@
   /** @param {PointerEvent} event */
   function handleViewerPointerMove(event) {
     updateEraserCursor(event);
+    updateHoveredShape(event);
     if (viewer && pendingFormDrag && event.pointerId === pendingFormDrag.pointerId) {
       const distance = Math.hypot(event.clientX - pendingFormDrag.clientX, event.clientY - pendingFormDrag.clientY);
       if (distance >= 4) {
@@ -3763,8 +4189,9 @@
           width: shape.width / pageSize.width,
           height: shape.height / pageSize.height,
           rotation: shape.rotation,
-          radiusX: 0,
-          radiusY: 0,
+          radiusX: Math.max(0, shape.cornerRadius ?? 0) / pageSize.width,
+          radiusY: Math.max(0, shape.cornerRadius ?? 0) / pageSize.height,
+          color: shapeExportStyle(shape),
           text: shape.text ?? '',
           imageData: shape.imageData ?? '',
           fieldName: shape.fieldName ?? '',
@@ -3941,13 +4368,14 @@
     onpointermove={handleViewerPointerMove}
     onpointerup={endPan}
     onpointercancel={endPan}
-    onpointerleave={hideEraserCursor}
+    onpointerleave={handleViewerPointerLeave}
   >
     <div class="pdf-document" style:--zoom-level={zoomLevel}>
       {#each Array(pageCount) as _, index}
         {@const currentSelectedShapes = selectedShape?.pageIndex === index ? (shapes[index] ?? []).filter((shape) => selectedShapeIds.has(shape.id)) : []}
         {@const singleSelection = currentSelectedShapes.length === 1 ? currentSelectedShapes[0] : null}
         {@const currentSelection = currentSelectedShapes.length > 1 && multiSelectionFrame?.pageIndex === index && selectedShape ? frameAsShape(multiSelectionFrame, selectedShape.id) : singleSelection}
+        {@const hoverSelection = hoveredShape?.pageIndex === index ? findShape(index, hoveredShape.id) : null}
         {@const cropShape = (shapes[index] ?? []).find((shape) => shape.type === 'crop')}
         {@const activeTextEditorShape = editingTextShape?.pageIndex === index ? findShape(index, editingTextShape.id) : null}
         <div class="pdf-page" aria-label={`Page ${index + 1}`}>
@@ -4034,7 +4462,15 @@
           >
             {#each (shapes[index] ?? []) as shape (shape.id)}
               {@const wrappedTextLines = shape.type === 'textfield' ? textFieldLines(shape.text ?? '', shape.width) : []}
-              <g transform={`rotate(${shape.rotation} ${shape.x + shape.width / 2} ${shape.y + shape.height / 2})`}>
+              <g
+                transform={`rotate(${shape.rotation} ${shape.x + shape.width / 2} ${shape.y + shape.height / 2})`}
+                style={shapeEffectStyle(shape)}
+              >
+                {#if shapePropertyPresent(shape, 'backgroundBlur') && shapePropertyEnabled(shape, 'backgroundBlur') && !['textfield', 'checkbox', 'input', 'crop', 'measure', 'line', 'arrow', 'check', 'cross'].includes(shape.type)}
+                  <foreignObject x={shape.x} y={shape.y} width={shape.width} height={shape.height} class="shape-background-blur">
+                    <div style={shapeBackdropStyle(shape)}></div>
+                  </foreignObject>
+                {/if}
                 {#if shape.type === 'textfield'}
                   {#if editingTextShape?.pageIndex !== index || editingTextShape.id !== shape.id}
                     {@const displayedLines = shape.text ? wrappedTextLines : ['Type here']}
@@ -4069,7 +4505,18 @@
                     width={shape.width}
                     height={shape.height}
                     preserveAspectRatio="none"
+                    style={shapeClipStyle(shape)}
                   />
+                  {#if shape.type === 'image' && shapePropertyPresent(shape, 'stroke') && shapePropertyEnabled(shape, 'stroke')}
+                    <rect
+                      class="pdf-imported-image-stroke"
+                      x={shape.x}
+                      y={shape.y}
+                      width={shape.width}
+                      height={shape.height}
+                      rx={Math.max(0, shape.cornerRadius ?? 0)}
+                    />
+                  {/if}
                 {:else if shape.type === 'checkbox' || shape.type === 'input' || shape.type === 'crop'}
                   <g></g>
                 {:else if shape.type === 'rectangle'}
@@ -4081,7 +4528,7 @@
                     y={shape.y}
                     width={shape.width}
                     height={shape.height}
-                    rx="0"
+                    rx={Math.max(0, shape.cornerRadius ?? 0)}
                   />
                 {:else if shape.type === 'circle'}
                   <ellipse
@@ -4211,16 +4658,47 @@
                     points={`${shape.x + shape.width - Math.min(16, Math.max(8, shape.width * 0.16))},${shape.y + shape.height / 2 - Math.min(7, Math.max(4, shape.width * 0.07))} ${shape.x + shape.width},${shape.y + shape.height / 2} ${shape.x + shape.width - Math.min(16, Math.max(8, shape.width * 0.16))},${shape.y + shape.height / 2 + Math.min(7, Math.max(4, shape.width * 0.07))}`}
                   />
                 {:else}
-                  <polygon
+                  <path
                     class="pdf-shape"
                     data-shape-id={shape.id}
                     data-shape-page={index}
-                    points={`${shape.x + shape.width / 2},${shape.y} ${shape.x + shape.width},${shape.y + shape.height} ${shape.x},${shape.y + shape.height}`}
+                    d={roundedTrianglePath(shape)}
+                    style:fill={shapeFill(shape)}
+                    style:stroke={shapeStroke(shape)}
                   />
                 {/if}
               </g>
             {/each}
           </svg>
+          {#if hoverSelection && hoverSelection.type !== 'crop'}
+            <svg
+              class="annotation-layer shape-hover-layer"
+              viewBox={`0 0 ${pageSizes[index]?.width ?? 1} ${pageSizes[index]?.height ?? 1}`}
+              preserveAspectRatio="none"
+              style:--shape-ui-scale={1 / zoomLevel}
+              aria-hidden="true"
+            >
+              <g transform={`rotate(${hoverSelection.rotation} ${hoverSelection.x + hoverSelection.width / 2} ${hoverSelection.y + hoverSelection.height / 2})`}>
+                {#if isLinearShape(hoverSelection)}
+                  <line
+                    class="shape-hover-line"
+                    x1={hoverSelection.x}
+                    y1={hoverSelection.y + hoverSelection.height / 2}
+                    x2={hoverSelection.x + hoverSelection.width}
+                    y2={hoverSelection.y + hoverSelection.height / 2}
+                  />
+                {:else}
+                  <rect
+                    class="shape-hover-box"
+                    x={hoverSelection.x}
+                    y={hoverSelection.y}
+                    width={hoverSelection.width}
+                    height={hoverSelection.height}
+                  />
+                {/if}
+              </g>
+            </svg>
+          {/if}
           <div class="pdf-form-layer" aria-label={`Form fields on page ${index + 1}`}>
             {#each (shapes[index] ?? []).filter((shape) => shape.type === 'checkbox' || shape.type === 'input') as shape (shape.id)}
               <div
@@ -4650,6 +5128,82 @@
         </footer>
       </div>
     </div>
+  {/if}
+  {#if activeTool === 'select' && selectedShape && inspectorSelection().length}
+    {@const inspectedObjects = shapes && inspectorSelection()}
+    {@const inspectedObject = inspectedObjects[0]}
+    {@const inspectedFrame = shapes && inspectorFrame()}
+    <div
+      class="protect-panel selection-properties-panel"
+      role="dialog"
+      aria-label="Selected object properties"
+      transition:fly={{ x: 18, duration: 240, easing: cubicOut }}
+    >
+      <header class="protect-panel-header">
+        <img src="/toolbar/small/select.svg" alt="" />
+        <h2>{inspectedObjects.length > 1 ? `${inspectedObjects.length} Selected` : 'Select'}</h2>
+        <button class="protect-panel-close" type="button" aria-label="Close properties" onclick={closeSelectionPanel}>
+          <span></span><span></span>
+        </button>
+      </header>
+      <div class="selection-properties-scroll">
+        {#if inspectedFrame}
+          <section class="selection-property-section geometry-section" aria-label="Geometry">
+            <label class="inspector-field"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectionGeometry('x', value))}>X</span><input class="scrubbable-number" bind:this={inspectorXInput} type="number" step="1" value={Math.round(inspectedFrame.x)} onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectionGeometry('x', value))} oninput={(event) => updateSelectionGeometry('x', Number(event.currentTarget.value))} /></label>
+            <label class="inspector-field"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectionGeometry('y', value))}>Y</span><input class="scrubbable-number" bind:this={inspectorYInput} type="number" step="1" value={Math.round(inspectedFrame.y)} onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectionGeometry('y', value))} oninput={(event) => updateSelectionGeometry('y', Number(event.currentTarget.value))} /></label>
+            <label class="inspector-field"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectionGeometry('width', value), { min: 1 })}>W</span><input class="scrubbable-number" bind:this={inspectorWidthInput} type="number" min="1" step="1" value={Math.round(inspectedFrame.width)} onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectionGeometry('width', value), { min: 1 })} oninput={(event) => updateSelectionGeometry('width', Number(event.currentTarget.value))} /></label>
+            <label class="inspector-field"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectionGeometry('height', value), { min: 1 })}>H</span><input class="scrubbable-number" bind:this={inspectorHeightInput} type="number" min="1" step="1" value={Math.round(inspectedFrame.height)} onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectionGeometry('height', value), { min: 1 })} oninput={(event) => updateSelectionGeometry('height', Number(event.currentTarget.value))} /></label>
+          </section>
+          <section class="selection-property-section appearance-section" aria-label="Appearance">
+            <label class="inspector-field opacity-field"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectedShapes({ opacity: value / 100 }), { min: 0, max: 100 })}>Opacity</span><input class="scrubbable-number" type="number" min="0" max="100" step="1" value={Math.round((inspectedObject.opacity ?? 1) * 100)} onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectedShapes({ opacity: value / 100 }), { min: 0, max: 100 })} oninput={(event) => updateSelectedShapes({ opacity: clamp(Number(event.currentTarget.value) / 100, 0, 1) })} /><em>%</em></label>
+            <label class="inspector-field corner-field"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectedShapes({ cornerRadius: value * 10 }), { min: 0 })}>Corner</span><input class="scrubbable-number" type="number" min="0" step="1" value={Math.round((inspectedObject.cornerRadius ?? 0) / 10)} onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectedShapes({ cornerRadius: value * 10 }), { min: 0 })} oninput={(event) => updateSelectedShapes({ cornerRadius: Math.max(0, Number(event.currentTarget.value) * 10) })} /></label>
+            <label class="inspector-field inspector-field-wide"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectionGeometry('rotation', value))}>Rotation</span><input class="scrubbable-number" bind:this={inspectorRotationInput} type="number" step="1" value={Math.round(inspectedObjects.length === 1 ? inspectedObject.rotation : (multiSelectionFrame?.rotation ?? 0))} onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectionGeometry('rotation', value))} oninput={(event) => updateSelectionGeometry('rotation', Number(event.currentTarget.value))} /><em>°</em></label>
+          </section>
+        {/if}
+        <section class="selection-property-section object-properties" aria-label="Object properties">
+          {#if shapeHasFill(inspectedObject)}
+            <div class:property-disabled={!shapePropertyEnabled(inspectedObject, 'fill')} class="object-property-row color-property-row">
+              <button class="property-visibility" type="button" aria-label="Toggle fill" aria-pressed={shapePropertyEnabled(inspectedObject, 'fill')} onclick={() => toggleShapeProperty('fill')}><img src={shapePropertyEnabled(inspectedObject, 'fill') ? '/eye.svg' : '/eye-off.svg'} alt="" /></button>
+              <span class="property-name">Fill</span>
+              <input class="property-hex" aria-label="Fill color hex" value={(inspectedObject.fillColor ?? '#FF4D55').replace('#', '').toUpperCase()} oninput={(event) => updateSelectedColor('fillColor', event.currentTarget.value)} />
+              <button class="property-color" type="button" aria-label="Open fill color picker" class:active={colorPicker?.property === 'fillColor'} style:--property-color={shapeFill(inspectedObject)} onclick={() => openColorPicker('fillColor')}></button>
+            </div>
+          {/if}
+          {#if shapeSupportsStroke(inspectedObject)}
+            <div class:property-disabled={!shapePropertyEnabled(inspectedObject, 'stroke')} class="object-property-row stroke-property-row">
+              <button class="property-visibility" type="button" aria-label="Toggle stroke" aria-pressed={shapePropertyEnabled(inspectedObject, 'stroke')} onclick={() => toggleShapeProperty('stroke')}><img src={shapePropertyEnabled(inspectedObject, 'stroke') ? '/eye.svg' : '/eye-off.svg'} alt="" /></button>
+              <span class="property-name scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectedShapes({ strokeWidth: value }), { step: 0.05, min: 0 })}>Stroke</span>
+              <input class="property-number scrubbable-number" type="number" min="0" step="0.25" aria-label="Stroke width" value={inspectedObject.strokeWidth ?? (shapeHasFill(inspectedObject) ? 1.35 : 1.4)} onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectedShapes({ strokeWidth: value }), { step: 0.05, min: 0 })} oninput={(event) => updateSelectedShapes({ strokeWidth: Math.max(0, Number(event.currentTarget.value)) })} />
+              <input class="property-hex" aria-label="Stroke color hex" value={(inspectedObject.strokeColor ?? (shapeHasFill(inspectedObject) ? '#DE3542' : '#FF4D55')).replace('#', '').toUpperCase()} oninput={(event) => updateSelectedColor('strokeColor', event.currentTarget.value)} />
+              <button class="property-color" type="button" aria-label="Open stroke color picker" class:active={colorPicker?.property === 'strokeColor'} style:--property-color={shapeStroke(inspectedObject)} onclick={() => openColorPicker('strokeColor')}></button>
+            </div>
+          {/if}
+        </section>
+      </div>
+    </div>
+    {#if colorPicker}
+      {@const pickerHex = hsvToHex(colorPicker.hue, colorPicker.saturation, colorPicker.value)}
+      <div class="figma-color-picker" role="dialog" aria-label="Color picker" transition:fly={{ x: 8, duration: 190, easing: cubicOut }}>
+        <div
+          class="color-saturation"
+          style:--picker-hue={`hsl(${colorPicker.hue} 100% 50%)`}
+          role="slider"
+          aria-label="Color saturation and brightness"
+          aria-valuenow={Math.round(colorPicker.saturation * 100)}
+          tabindex="0"
+          onpointerdown={(event) => updateColorControl(event, 'saturation')}
+          onpointermove={(event) => { if (event.buttons) updateColorControl(event, 'saturation'); }}
+        >
+          <span style:left={`${colorPicker.saturation * 100}%`} style:top={`${(1 - colorPicker.value) * 100}%`} style:--thumb-color={pickerHex}></span>
+        </div>
+        <div class="picker-slider hue-slider" role="slider" aria-label="Hue" aria-valuenow={Math.round(colorPicker.hue)} tabindex="0" onpointerdown={(event) => updateColorControl(event, 'hue')} onpointermove={(event) => { if (event.buttons) updateColorControl(event, 'hue'); }}>
+          <span style:left={`${colorPicker.hue / 360 * 100}%`} style:--thumb-color={pickerHex}></span>
+        </div>
+        <div class="picker-slider alpha-slider" style:--picker-color={pickerHex} role="slider" aria-label="Color opacity" aria-valuenow={Math.round(colorPicker.alpha * 100)} tabindex="0" onpointerdown={(event) => updateColorControl(event, 'alpha')} onpointermove={(event) => { if (event.buttons) updateColorControl(event, 'alpha'); }}>
+          <span style:left={`${colorPicker.alpha * 100}%`} style:--thumb-color={colorWithAlpha(pickerHex, colorPicker.alpha)}></span>
+        </div>
+      </div>
+    {/if}
   {/if}
   {#if searchPanelOpen}
     <div
@@ -5175,6 +5729,283 @@
     height: 179px;
   }
 
+  .protect-panel.selection-properties-panel {
+    height: auto;
+    max-height: calc(100% - 40px);
+  }
+
+  .selection-properties-scroll {
+    min-height: 0;
+    max-height: calc(100vh - 132px);
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+  }
+
+  .selection-property-section {
+    padding: 16px 18px;
+    border-bottom: 1px solid #d7d7d7;
+  }
+
+  .geometry-section,
+  .appearance-section {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 9px 14px;
+  }
+
+  .appearance-section {
+    grid-template-columns: minmax(0, 1.08fr) minmax(0, 0.92fr);
+  }
+
+  .inspector-field {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    box-sizing: border-box;
+    min-width: 0;
+    height: 39px;
+    padding: 0 10px;
+    border: 1px solid #d7d7d7;
+    border-radius: 8px;
+    background: #f3f3f3;
+    color: #7a7a7a;
+    font-size: 18px;
+    transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+  }
+
+  .inspector-field:focus-within {
+    border-color: #1684f8;
+    background: #fff;
+    box-shadow: 0 0 0 1px rgba(22, 132, 248, 0.13);
+  }
+
+  .inspector-field-wide {
+    grid-column: 1 / -1;
+  }
+
+  .inspector-field input {
+    min-width: 0;
+    width: 100%;
+    padding: 0 0 0 7px;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: #111;
+    font: inherit;
+    appearance: textfield;
+    -moz-appearance: textfield;
+  }
+
+  .scrubbable-number,
+  .scrub-label {
+    cursor: ew-resize;
+  }
+
+  .inspector-field input::-webkit-inner-spin-button,
+  .inspector-field input::-webkit-outer-spin-button,
+  .object-property-row input[type='number']::-webkit-inner-spin-button,
+  .object-property-row input[type='number']::-webkit-outer-spin-button {
+    margin: 0;
+    -webkit-appearance: none;
+  }
+
+  .inspector-field em {
+    color: #7a7a7a;
+    font-style: normal;
+  }
+
+  .object-properties {
+    display: grid;
+    gap: 9px;
+  }
+
+  .object-property-row {
+    display: grid;
+    grid-template-columns: 37px auto minmax(0, 1fr) 38px;
+    align-items: center;
+    box-sizing: border-box;
+    min-height: 39px;
+    overflow: hidden;
+    border: 1px solid #d7d7d7;
+    border-radius: 8px;
+    background: #f3f3f3;
+    color: #111;
+    font-size: 18px;
+    transition: opacity 160ms ease, border-color 160ms ease, background-color 160ms ease;
+  }
+
+  .object-property-row:focus-within {
+    border-color: #bfc8d2;
+    background: #f7f7f7;
+  }
+
+  .object-property-row.property-disabled > :not(.property-visibility):not(.property-remove) {
+    opacity: 0.42;
+  }
+
+  .property-visibility,
+  .property-remove {
+    display: grid;
+    place-items: center;
+    align-self: stretch;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .property-visibility {
+    position: relative;
+    border-right: 1px solid #d7d7d7;
+    opacity: 0.82;
+    transition: opacity 170ms ease, transform 190ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .property-visibility img {
+    width: 24px;
+    height: 24px;
+    transition: transform 190ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .property-visibility:active {
+    transform: scale(0.91);
+  }
+
+  .property-remove {
+    color: #7a7a7a;
+    font-size: 23px;
+    line-height: 1;
+    transition: color 150ms ease;
+  }
+
+  .property-remove:hover {
+    color: #111;
+  }
+
+  .property-name {
+    padding-left: 10px;
+    color: #7a7a7a;
+    white-space: nowrap;
+  }
+
+  .property-hex,
+  .property-number {
+    box-sizing: border-box;
+    min-width: 0;
+    width: 100%;
+    padding: 0 5px 0 8px;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: #111;
+    font: inherit;
+    text-align: right;
+  }
+
+  .property-color {
+    display: block;
+    box-sizing: border-box;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: 1px solid rgba(0, 0, 0, 0.16);
+    border-radius: 8px;
+    background: var(--property-color);
+    cursor: pointer;
+    transition: box-shadow 150ms ease, transform 150ms ease;
+  }
+
+  .property-color:hover,
+  .property-color.active {
+    box-shadow: 0 0 0 2px #fff, 0 0 0 3.5px #1684f8;
+  }
+
+  .stroke-property-row {
+    grid-template-columns: 37px 79px 48px minmax(0, 1fr) 38px;
+  }
+
+  .stroke-property-row .property-number {
+    align-self: stretch;
+    padding: 0 4px;
+    border-left: 1px solid #d7d7d7;
+    border-right: 1px solid #d7d7d7;
+    text-align: center;
+  }
+
+  .figma-color-picker {
+    position: absolute;
+    z-index: 41;
+    top: 250px;
+    right: 348px;
+    display: grid;
+    gap: 11px;
+    box-sizing: border-box;
+    width: 260px;
+    padding: 13px;
+    border: 1.5px solid #c5c5c5;
+    border-radius: 13px;
+    background: #fafafa;
+    box-shadow: 0 9px 24px rgba(0, 0, 0, 0.07);
+  }
+
+  .color-saturation {
+    position: relative;
+    height: 172px;
+    overflow: hidden;
+    border: 1px solid #cacaca;
+    border-radius: 8px;
+    background:
+      linear-gradient(to top, #000, transparent),
+      linear-gradient(to right, #fff, var(--picker-hue));
+    cursor: crosshair;
+    touch-action: none;
+  }
+
+  .color-saturation > span,
+  .picker-slider > span {
+    position: absolute;
+    z-index: 2;
+    display: block;
+    box-sizing: border-box;
+    width: 18px;
+    height: 18px;
+    border: 3px solid #fff;
+    border-radius: 50%;
+    background: var(--thumb-color, transparent);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.55);
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+  }
+
+  .color-saturation > span {
+    top: 0;
+    left: 0;
+  }
+
+  .picker-slider {
+    position: relative;
+    height: 18px;
+    border-radius: 999px;
+    cursor: ew-resize;
+    touch-action: none;
+  }
+
+  .picker-slider > span {
+    top: 50%;
+  }
+
+  .hue-slider {
+    background: linear-gradient(90deg, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00);
+  }
+
+  .alpha-slider {
+    background:
+      linear-gradient(90deg, transparent, var(--picker-color)),
+      conic-gradient(#fff 25%, #cfcfcf 0 50%, #fff 0 75%, #cfcfcf 0) 0 0 / 12px 12px;
+  }
+
   .search-panel-content {
     display: grid;
     align-content: center;
@@ -5274,6 +6105,11 @@
   .protect-panel-header > img {
     width: 24px;
     height: 24px;
+  }
+
+  .selection-properties-panel .protect-panel-header > img {
+    width: 21px;
+    height: 21px;
   }
 
   .protect-panel-header h2 {
@@ -6292,6 +7128,7 @@
     overflow: hidden;
     background: #fff;
     box-shadow: 0 5px 22px rgba(0, 0, 0, 0.13);
+    transform: translateX(-80px);
   }
 
   .annotation-layer {
@@ -6577,17 +7414,17 @@
   }
 
   .pdf-shape {
-    fill: #ff4d55;
-    stroke: #de3542;
-    stroke-width: 1.35px;
+    fill: var(--shape-fill, #ff4d55);
+    stroke: var(--shape-stroke, #de3542);
+    stroke-width: var(--shape-stroke-width, 1.35px);
     stroke-linejoin: round;
     pointer-events: visiblePainted;
   }
 
   .shape-symbol {
     fill: none;
-    stroke: #ff4d55;
-    stroke-width: 1.7px;
+    stroke: var(--shape-stroke, #ff4d55);
+    stroke-width: var(--shape-stroke-width, 1.7px);
     stroke-linecap: round;
     stroke-linejoin: round;
     pointer-events: visibleStroke;
@@ -6595,16 +7432,16 @@
 
   .shape-linear {
     fill: none;
-    stroke: #ff4d55;
-    stroke-width: 1.4px;
+    stroke: var(--shape-stroke, #ff4d55);
+    stroke-width: var(--shape-stroke-width, 1.4px);
     stroke-linecap: round;
     pointer-events: none;
   }
 
   .shape-arrowhead {
     fill: none;
-    stroke: #ff4d55;
-    stroke-width: 1.4px;
+    stroke: var(--shape-stroke, #ff4d55);
+    stroke-width: var(--shape-stroke-width, 1.4px);
     stroke-linecap: round;
     stroke-linejoin: round;
     pointer-events: visibleStroke;
@@ -6616,6 +7453,18 @@
     stroke-width: 16px;
     pointer-events: stroke;
     cursor: move;
+  }
+
+  .pdf-imported-image-stroke {
+    fill: none;
+    stroke: var(--shape-stroke, #de3542);
+    stroke-width: var(--shape-stroke-width, 1.35px);
+    pointer-events: none;
+  }
+
+  .shape-background-blur,
+  .shape-background-blur > div {
+    pointer-events: none;
   }
 
   .measure-halo,
@@ -6699,6 +7548,20 @@
   .shape-selection-layer {
     z-index: 9;
     overflow: visible;
+  }
+
+  .shape-hover-layer {
+    z-index: 8;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+  .shape-hover-box,
+  .shape-hover-line {
+    fill: none;
+    stroke: #0d99ff;
+    stroke-width: calc(1px * var(--shape-ui-scale));
+    opacity: 0.95;
   }
 
   .shape-selection-box,

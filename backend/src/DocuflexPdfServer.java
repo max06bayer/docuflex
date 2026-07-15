@@ -6,6 +6,8 @@ import java.io.File;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.awt.image.BufferedImage;
+import java.awt.image.ConvolveOp;
+import java.awt.image.Kernel;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
@@ -333,7 +335,7 @@ public class DocuflexPdfServer {
           drawTextMarkLayer(document, page, textMarks);
         }
         if (!shapes.isEmpty()) {
-          drawShapeLayer(document, page, shapes);
+          drawShapeLayer(document, pageIndex, page, shapes);
         }
         if (!pens.isEmpty()) {
           drawAnnotationLayer(document, page, pens, false);
@@ -634,8 +636,12 @@ public class DocuflexPdfServer {
 
   private static void drawShapeLayer(
       PDDocument document,
+      int pageIndex,
       PDPage page,
       List<AnnotationStroke> shapes) throws IOException {
+    BufferedImage blurSource = shapes.stream().anyMatch(shape -> styleFlag(shape, 18, false) && styleFlag(shape, 19, false))
+        ? new PDFRenderer(document).renderImageWithDPI(pageIndex, 144, ImageType.RGB)
+        : null;
     try (PDPageContentStream content = new PDPageContentStream(
         document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
       content.setNonStrokingColor(1f, 0.302f, 0.333f);
@@ -645,17 +651,26 @@ public class DocuflexPdfServer {
 
       for (AnnotationStroke shape : shapes) {
         if (shape.width <= 0 || shape.height <= 0) continue;
+        if (blurSource != null && styleFlag(shape, 18, false) && styleFlag(shape, 19, false)) {
+          drawBackgroundBlur(document, content, page, shape, blurSource);
+        }
+        drawObjectShadow(content, page, shape);
+        applyObjectStyle(content, shape);
         if ("watermark".equals(shape.type)) {
           drawWatermark(content, page, shape);
           continue;
         } else if ("signature".equals(shape.type) || "image".equals(shape.type)) {
           drawPlacedImage(document, content, page, shape);
+          if ("image".equals(shape.type) && styleFlag(shape, 10, true) && styleFlag(shape, 11, true)) {
+            appendRoundedRectangle(content, page, shape);
+            content.stroke();
+          }
           continue;
         } else if ("textfield".equals(shape.type)) {
           drawTextField(content, page, shape);
           continue;
         } else if ("check".equals(shape.type)) {
-          content.setLineWidth(1.25f);
+          if (!styleFlag(shape, 10, true) || !styleFlag(shape, 11, true)) continue;
           PdfPoint start = shapePoint(page, shape, 0.08, 0.54);
           PdfPoint middle = shapePoint(page, shape, 0.38, 0.82);
           PdfPoint end = shapePoint(page, shape, 0.92, 0.16);
@@ -665,7 +680,7 @@ public class DocuflexPdfServer {
           content.stroke();
           continue;
         } else if ("cross".equals(shape.type)) {
-          content.setLineWidth(1.25f);
+          if (!styleFlag(shape, 10, true) || !styleFlag(shape, 11, true)) continue;
           PdfPoint firstStart = shapePoint(page, shape, 0.14, 0.14);
           PdfPoint firstEnd = shapePoint(page, shape, 0.86, 0.86);
           PdfPoint secondStart = shapePoint(page, shape, 0.86, 0.14);
@@ -677,7 +692,7 @@ public class DocuflexPdfServer {
           content.stroke();
           continue;
         } else if ("line".equals(shape.type) || "arrow".equals(shape.type)) {
-          content.setLineWidth(1.05f);
+          if (!styleFlag(shape, 10, true) || !styleFlag(shape, 11, true)) continue;
           PdfPoint start = shapePoint(page, shape, 0, 0.5);
           PdfPoint end = shapePoint(page, shape, 1, 0.5);
           content.moveTo(start.x, start.y);
@@ -690,15 +705,11 @@ public class DocuflexPdfServer {
           continue;
         }
 
-        content.setLineWidth(1f);
+        boolean fill = styleFlag(shape, 8, true) && styleFlag(shape, 9, true);
+        boolean stroke = styleFlag(shape, 10, true) && styleFlag(shape, 11, true);
+        if (!fill && !stroke) continue;
         if ("triangle".equals(shape.type)) {
-          PdfPoint top = shapePoint(page, shape, 0.5, 0);
-          PdfPoint bottomRight = shapePoint(page, shape, 1, 1);
-          PdfPoint bottomLeft = shapePoint(page, shape, 0, 1);
-          content.moveTo(top.x, top.y);
-          content.lineTo(bottomRight.x, bottomRight.y);
-          content.lineTo(bottomLeft.x, bottomLeft.y);
-          content.closePath();
+          appendRoundedTriangle(content, page, shape);
         } else if ("circle".equals(shape.type)) {
           appendEllipse(content, page, shape);
         } else if ("rectangle".equals(shape.type)) {
@@ -706,9 +717,161 @@ public class DocuflexPdfServer {
         } else {
           continue;
         }
-        content.fillAndStroke();
+        if (fill && stroke) content.fillAndStroke();
+        else if (fill) content.fill();
+        else content.stroke();
       }
     }
+  }
+
+  private static double styleValue(AnnotationStroke shape, int index, double fallback) {
+    if (shape.color == null || index < 0 || index >= shape.color.size()) return fallback;
+    double value = shape.color.get(index);
+    return Double.isFinite(value) ? value : fallback;
+  }
+
+  private static void drawBackgroundBlur(
+      PDDocument document,
+      PDPageContentStream content,
+      PDPage page,
+      AnnotationStroke shape,
+      BufferedImage source) throws IOException {
+    int left = Math.max(0, Math.min(source.getWidth() - 1, (int) Math.floor(shape.x * source.getWidth())));
+    int top = Math.max(0, Math.min(source.getHeight() - 1, (int) Math.floor(shape.y * source.getHeight())));
+    int right = Math.max(left + 1, Math.min(source.getWidth(), (int) Math.ceil((shape.x + shape.width) * source.getWidth())));
+    int bottom = Math.max(top + 1, Math.min(source.getHeight(), (int) Math.ceil((shape.y + shape.height) * source.getHeight())));
+    BufferedImage crop = new BufferedImage(right - left, bottom - top, BufferedImage.TYPE_INT_RGB);
+    crop.getGraphics().drawImage(source, -left, -top, null);
+    int radius = Math.max(1, Math.min(15, (int) Math.round(styleValue(shape, 20, 8) * 0.75)));
+    int size = radius * 2 + 1;
+    float[] weights = new float[size * size];
+    Arrays.fill(weights, 1f / weights.length);
+    BufferedImage blurred = new ConvolveOp(new Kernel(size, size, weights), ConvolveOp.EDGE_NO_OP, null).filter(crop, null);
+    PDImageXObject image = LosslessFactory.createFromImage(document, blurred);
+    content.saveGraphicsState();
+    float opacity = (float) Math.max(0, Math.min(1, styleValue(shape, 6, 1)));
+    PDExtendedGraphicsState graphicsState = new PDExtendedGraphicsState();
+    graphicsState.setNonStrokingAlphaConstant(opacity);
+    graphicsState.setStrokingAlphaConstant(opacity);
+    content.setGraphicsStateParameters(graphicsState);
+    appendClosedObjectPath(content, page, shape);
+    content.clip();
+    PdfPoint bottomLeft = shapePoint(page, shape, 0, 1);
+    PdfPoint bottomRight = shapePoint(page, shape, 1, 1);
+    PdfPoint topLeft = shapePoint(page, shape, 0, 0);
+    content.drawImage(image, new Matrix(
+        bottomRight.x - bottomLeft.x,
+        bottomRight.y - bottomLeft.y,
+        topLeft.x - bottomLeft.x,
+        topLeft.y - bottomLeft.y,
+        bottomLeft.x,
+        bottomLeft.y));
+    content.restoreGraphicsState();
+  }
+
+  private static void appendClosedObjectPath(
+      PDPageContentStream content,
+      PDPage page,
+      AnnotationStroke shape) throws IOException {
+    if ("circle".equals(shape.type)) {
+      appendEllipse(content, page, shape);
+    } else if ("triangle".equals(shape.type)) {
+      appendRoundedTriangle(content, page, shape);
+    } else {
+      appendRoundedRectangle(content, page, shape);
+    }
+  }
+
+  private static void drawObjectShadow(
+      PDPageContentStream content,
+      PDPage page,
+      AnnotationStroke shape) throws IOException {
+    if (!styleFlag(shape, 12, false) || !styleFlag(shape, 13, false) ||
+        "watermark".equals(shape.type) || "textfield".equals(shape.type)) return;
+    double opacity = Math.max(0, Math.min(1, styleValue(shape, 14, 0.25)));
+    if (opacity <= 0) return;
+    double blur = Math.max(0, styleValue(shape, 15, 6)) / EDITOR_PAGE_SCALE;
+    double baseX = styleValue(shape, 16, 0) / EDITOR_PAGE_SCALE;
+    double baseY = -styleValue(shape, 17, 3) / EDITOR_PAGE_SCALE;
+    int samples = blur > 0.25 ? 9 : 1;
+    for (int sample = 0; sample < samples; sample += 1) {
+      double angle = samples == 1 ? 0 : Math.PI * 2 * sample / (samples - 1);
+      double radius = samples == 1 || sample == samples - 1 ? 0 : blur * 0.55;
+      content.saveGraphicsState();
+      content.transform(Matrix.getTranslateInstance(
+          (float) (baseX + Math.cos(angle) * radius),
+          (float) (baseY + Math.sin(angle) * radius)));
+      content.setNonStrokingColor(0f, 0f, 0f);
+      content.setStrokingColor(0f, 0f, 0f);
+      content.setLineWidth((float) Math.max(0.05, styleValue(shape, 7, 1.35) / EDITOR_PAGE_SCALE));
+      PDExtendedGraphicsState graphicsState = new PDExtendedGraphicsState();
+      float sampleOpacity = (float) (opacity / (samples == 1 ? 1 : 3.2));
+      graphicsState.setNonStrokingAlphaConstant(sampleOpacity);
+      graphicsState.setStrokingAlphaConstant(sampleOpacity);
+      content.setGraphicsStateParameters(graphicsState);
+      if ("line".equals(shape.type) || "arrow".equals(shape.type)) {
+        PdfPoint start = shapePoint(page, shape, 0, 0.5);
+        PdfPoint end = shapePoint(page, shape, 1, 0.5);
+        content.moveTo(start.x, start.y);
+        content.lineTo(end.x, end.y);
+        content.stroke();
+      } else if ("check".equals(shape.type)) {
+        PdfPoint start = shapePoint(page, shape, 0.08, 0.54);
+        PdfPoint middle = shapePoint(page, shape, 0.38, 0.82);
+        PdfPoint end = shapePoint(page, shape, 0.92, 0.16);
+        content.moveTo(start.x, start.y);
+        content.lineTo(middle.x, middle.y);
+        content.lineTo(end.x, end.y);
+        content.stroke();
+      } else if ("cross".equals(shape.type)) {
+        PdfPoint a = shapePoint(page, shape, 0.14, 0.14);
+        PdfPoint b = shapePoint(page, shape, 0.86, 0.86);
+        PdfPoint c = shapePoint(page, shape, 0.86, 0.14);
+        PdfPoint d = shapePoint(page, shape, 0.14, 0.86);
+        content.moveTo(a.x, a.y);
+        content.lineTo(b.x, b.y);
+        content.moveTo(c.x, c.y);
+        content.lineTo(d.x, d.y);
+        content.stroke();
+      } else {
+        appendClosedObjectPath(content, page, shape);
+        content.fill();
+      }
+      content.restoreGraphicsState();
+    }
+  }
+
+  private static boolean styleFlag(AnnotationStroke shape, int index, boolean fallback) {
+    return styleValue(shape, index, fallback ? 1 : 0) >= 0.5;
+  }
+
+  private static float styleChannel(AnnotationStroke shape, int index, float fallback) {
+    return (float) Math.max(0, Math.min(1, styleValue(shape, index, fallback)));
+  }
+
+  private static void applyObjectStyle(PDPageContentStream content, AnnotationStroke shape) throws IOException {
+    boolean hasObjectStyle = shape.color != null && shape.color.size() >= 12;
+    if (!hasObjectStyle) {
+      content.setNonStrokingColor(1f, 0.302f, 0.333f);
+      content.setStrokingColor(0.871f, 0.208f, 0.259f);
+      content.setLineWidth(("check".equals(shape.type) || "cross".equals(shape.type)) ? 1.25f :
+          (("line".equals(shape.type) || "arrow".equals(shape.type)) ? 1.05f : 1f));
+      PDExtendedGraphicsState graphicsState = new PDExtendedGraphicsState();
+      graphicsState.setNonStrokingAlphaConstant(1f);
+      graphicsState.setStrokingAlphaConstant(1f);
+      content.setGraphicsStateParameters(graphicsState);
+      return;
+    }
+    content.setNonStrokingColor(styleChannel(shape, 0, 1f), styleChannel(shape, 1, 0.302f), styleChannel(shape, 2, 0.333f));
+    content.setStrokingColor(styleChannel(shape, 3, 0.871f), styleChannel(shape, 4, 0.208f), styleChannel(shape, 5, 0.259f));
+    content.setLineWidth((float) Math.max(0.05, styleValue(shape, 7, 1.35) / EDITOR_PAGE_SCALE));
+    float opacity = (float) Math.max(0, Math.min(1, styleValue(shape, 6, 1)));
+    float fillOpacity = (float) Math.max(0, Math.min(1, opacity * styleValue(shape, 21, 1)));
+    float strokeOpacity = (float) Math.max(0, Math.min(1, opacity * styleValue(shape, 22, 1)));
+    PDExtendedGraphicsState graphicsState = new PDExtendedGraphicsState();
+    graphicsState.setNonStrokingAlphaConstant(fillOpacity);
+    graphicsState.setStrokingAlphaConstant(strokeOpacity);
+    content.setGraphicsStateParameters(graphicsState);
   }
 
   private static void drawWatermark(
@@ -915,6 +1078,58 @@ public class DocuflexPdfServer {
     shapeCurve(content, page, shape, 0.5 - 0.5 * kappa, 1, 0, 0.5 + 0.5 * kappa, 0, 0.5);
     shapeCurve(content, page, shape, 0, 0.5 - 0.5 * kappa, 0.5 - 0.5 * kappa, 0, 0.5, 0);
     content.closePath();
+  }
+
+  private static void appendRoundedTriangle(
+      PDPageContentStream content,
+      PDPage page,
+      AnnotationStroke shape) throws IOException {
+    NormalizedPoint[] vertices = {
+        new NormalizedPoint(0.5, 0),
+        new NormalizedPoint(1, 1),
+        new NormalizedPoint(0, 1)
+    };
+    double radius = Math.max(0, Math.min(0.42,
+        Math.min(shape.radiusX / Math.max(0.0001, shape.width), shape.radiusY / Math.max(0.0001, shape.height))));
+    if (radius <= 0.0001) {
+      PdfPoint top = shapePoint(page, shape, 0.5, 0);
+      PdfPoint bottomRight = shapePoint(page, shape, 1, 1);
+      PdfPoint bottomLeft = shapePoint(page, shape, 0, 1);
+      content.moveTo(top.x, top.y);
+      content.lineTo(bottomRight.x, bottomRight.y);
+      content.lineTo(bottomLeft.x, bottomLeft.y);
+      content.closePath();
+      return;
+    }
+    NormalizedPoint[] incoming = new NormalizedPoint[3];
+    NormalizedPoint[] outgoing = new NormalizedPoint[3];
+    for (int index = 0; index < vertices.length; index += 1) {
+      incoming[index] = localPointToward(vertices[index], vertices[(index + 2) % 3], radius);
+      outgoing[index] = localPointToward(vertices[index], vertices[(index + 1) % 3], radius);
+    }
+    PdfPoint start = shapePoint(page, shape, outgoing[0].x, outgoing[0].y);
+    content.moveTo(start.x, start.y);
+    for (int index = 1; index <= 3; index += 1) {
+      int vertexIndex = index % 3;
+      PdfPoint before = shapePoint(page, shape, incoming[vertexIndex].x, incoming[vertexIndex].y);
+      PdfPoint vertex = shapePoint(page, shape, vertices[vertexIndex].x, vertices[vertexIndex].y);
+      PdfPoint after = shapePoint(page, shape, outgoing[vertexIndex].x, outgoing[vertexIndex].y);
+      content.lineTo(before.x, before.y);
+      content.curveTo(
+          (float) (before.x + (vertex.x - before.x) * 2 / 3),
+          (float) (before.y + (vertex.y - before.y) * 2 / 3),
+          (float) (after.x + (vertex.x - after.x) * 2 / 3),
+          (float) (after.y + (vertex.y - after.y) * 2 / 3),
+          after.x,
+          after.y);
+    }
+    content.closePath();
+  }
+
+  private static NormalizedPoint localPointToward(NormalizedPoint from, NormalizedPoint to, double distance) {
+    double length = Math.max(0.0001, Math.hypot(to.x - from.x, to.y - from.y));
+    double amount = Math.min(distance, length * 0.42) / length;
+    return new NormalizedPoint(from.x + (to.x - from.x) * amount, from.y + (to.y - from.y) * amount);
   }
 
   private static void appendRoundedRectangle(
