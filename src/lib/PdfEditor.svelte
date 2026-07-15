@@ -62,6 +62,11 @@
   let activeSearchOccurrence = -1;
   /** @type {number | undefined} */
   let searchUpdateFrame;
+  let watermarkPanelOpen = false;
+  let watermarkText = '';
+  let appliedWatermarkText = '';
+  /** @type {HTMLInputElement | undefined} */
+  let watermarkInput;
   /** @type {any[]} */
   let htmlVisualAnnotations = [];
   let zoomLevel = 1;
@@ -175,6 +180,7 @@
     shapes;
     textHighlights;
     pageSizes;
+    appliedWatermarkText;
     htmlVisualAnnotations = exportableAnnotations();
   }
 
@@ -195,6 +201,8 @@
     }
     if (nextTool === 'search') showSearchPanel();
     else if (previousTool === 'search') resetSearchPanel();
+    if (nextTool === 'watermark') showWatermarkPanel();
+    else if (previousTool === 'watermark') watermarkPanelOpen = false;
     if (nextTool === 'protect') protectPanelOpen = true;
     else if (previousTool === 'protect') protectPanelOpen = false;
     if (nextTool === 'sign') {
@@ -283,6 +291,30 @@
   export function openSearchPanel() {
     activeTool = 'search';
     showSearchPanel();
+  }
+
+  function showWatermarkPanel() {
+    watermarkPanelOpen = true;
+    watermarkText = appliedWatermarkText;
+    void tick().then(() => watermarkInput?.focus());
+  }
+
+  function closeWatermarkPanel() {
+    watermarkPanelOpen = false;
+    if (activeTool === 'watermark') activeTool = 'select';
+  }
+
+  function applyWatermark() {
+    const nextWatermark = watermarkText.trim();
+    if (!nextWatermark && !appliedWatermarkText) return;
+    appliedWatermarkText = nextWatermark;
+  }
+
+  /** @param {string} text @param {{ width: number; height: number }} pageSize */
+  function watermarkFontSize(text, pageSize) {
+    const heightSize = pageSize.height * 0.135;
+    const widthSize = pageSize.width * 0.78 / Math.max(1, text.length * 0.58);
+    return Math.max(14, Math.min(heightSize, widthSize));
   }
 
   /** @param {Event} event */
@@ -3492,7 +3524,27 @@
         text: ''
       })));
     });
-    return [...strokes, ...exportedShapes, ...exportedHighlights];
+    const watermarks = appliedWatermarkText
+      ? Array.from({ length: pageCount }, (_, page) => ({
+          id: `watermark-${page}`,
+          page,
+          type: 'watermark',
+          x: 0.08,
+          y: 0.35,
+          width: 0.84,
+          height: 0.3,
+          rotation: -32,
+          radiusX: 0,
+          radiusY: 0,
+          color: [],
+          text: appliedWatermarkText,
+          imageData: '',
+          fieldName: '',
+          fieldValue: '',
+          existingField: false
+        }))
+      : [];
+    return [...strokes, ...exportedShapes, ...exportedHighlights, ...watermarks];
   }
 
   /** @param {{ id: string; page: number; x: number; y: number; width: number; height: number }[]} resolved */
@@ -3576,6 +3628,9 @@
         >
           <span class="page-pill">{index + 1}/{pageCount}</span>
           <canvas></canvas>
+          {#if appliedWatermarkText}
+            <span class="thumbnail-watermark">{appliedWatermarkText}</span>
+          {/if}
         </button>
         {#if index < pageCount - 1}<div class="page-separator"></div>{/if}
       </div>
@@ -3629,6 +3684,21 @@
         {@const activeTextEditorShape = editingTextShape?.pageIndex === index ? findShape(index, editingTextShape.id) : null}
         <div class="pdf-page" aria-label={`Page ${index + 1}`}>
           <canvas></canvas>
+          {#if appliedWatermarkText && pageSizes[index]}
+            <svg
+              class="annotation-layer watermark-layer"
+              viewBox={`0 0 ${pageSizes[index].width} ${pageSizes[index].height}`}
+              preserveAspectRatio="none"
+              aria-hidden="true"
+            >
+              <text
+                x={pageSizes[index].width / 2}
+                y={pageSizes[index].height / 2}
+                font-size={watermarkFontSize(appliedWatermarkText, pageSizes[index])}
+                transform={`rotate(-32 ${pageSizes[index].width / 2} ${pageSizes[index].height / 2})`}
+              >{appliedWatermarkText}</text>
+            </svg>
+          {/if}
           <svg
             class="annotation-layer search-highlight-layer"
             viewBox={`0 0 ${pageSizes[index]?.width ?? 1} ${pageSizes[index]?.height ?? 1}`}
@@ -4354,6 +4424,45 @@
       </div>
     </div>
   {/if}
+  {#if watermarkPanelOpen}
+    <div
+      class="protect-panel watermark-panel"
+      role="dialog"
+      aria-label="Watermark PDF"
+      transition:fly={{ x: 18, duration: 240, easing: cubicOut }}
+    >
+      <header class="protect-panel-header">
+        <img src="/toolbar/small/watermark.svg" alt="" />
+        <h2>Watermark</h2>
+        <button class="protect-panel-close" type="button" aria-label="Close watermark" onclick={closeWatermarkPanel}>
+          <span></span>
+          <span></span>
+        </button>
+      </header>
+      <form class="watermark-panel-content" onsubmit={(event) => { event.preventDefault(); applyWatermark(); }}>
+        <div class="password-field search-field">
+          <input
+            bind:this={watermarkInput}
+            type="text"
+            maxlength="80"
+            placeholder="Watermark text"
+            aria-label="Watermark text"
+            bind:value={watermarkText}
+          />
+        </div>
+        <button
+          class:encrypted={Boolean(appliedWatermarkText)}
+          class="protect-submit"
+          type="submit"
+          disabled={!watermarkText.trim() && !appliedWatermarkText}
+        >
+          {watermarkText.trim()
+            ? (appliedWatermarkText ? 'Update Watermark' : 'Apply Watermark')
+            : 'Remove Watermark'}
+        </button>
+      </form>
+    </div>
+  {/if}
   {#if protectPanelOpen}
     <div
       class:encrypted={encryptionEnabled}
@@ -4695,6 +4804,27 @@
     border-radius: 9px;
   }
 
+  .thumbnail-watermark {
+    position: absolute;
+    z-index: 2;
+    top: 50%;
+    left: 50%;
+    max-width: 82%;
+    overflow: hidden;
+    color: rgba(80, 87, 97, 0.2);
+    font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 20px;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: 0.02em;
+    text-overflow: clip;
+    white-space: nowrap;
+    transform: translate(-50%, -50%) rotate(-32deg);
+    transform-origin: center;
+    pointer-events: none;
+    mix-blend-mode: multiply;
+  }
+
   .page-pill {
     position: absolute;
     z-index: 2;
@@ -4764,12 +4894,31 @@
     height: 126px;
   }
 
+  .protect-panel.watermark-panel {
+    height: 179px;
+  }
+
   .search-panel-content {
     display: grid;
     align-content: center;
     min-height: 0;
     padding: 17px 18px 18px;
     background: #fafafa;
+  }
+
+  .watermark-panel-content {
+    display: grid;
+    grid-template-rows: 40px 44px;
+    align-content: center;
+    gap: 10px;
+    min-height: 0;
+    padding: 17px 18px 18px;
+    background: #fafafa;
+  }
+
+  .watermark-panel-content .protect-submit:disabled {
+    cursor: default;
+    opacity: 0.42;
   }
 
   .search-controls {
@@ -5895,6 +6044,22 @@
   .search-highlight-layer rect {
     fill: #ffe43b;
     opacity: 0.72;
+  }
+
+  .watermark-layer {
+    z-index: 2;
+    overflow: hidden;
+    mix-blend-mode: multiply;
+  }
+
+  .watermark-layer text {
+    fill: #505761;
+    font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    text-anchor: middle;
+    dominant-baseline: central;
+    opacity: 0.17;
   }
 
   .marker-edge {

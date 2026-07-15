@@ -645,7 +645,10 @@ public class DocuflexPdfServer {
 
       for (AnnotationStroke shape : shapes) {
         if (shape.width <= 0 || shape.height <= 0) continue;
-        if ("signature".equals(shape.type)) {
+        if ("watermark".equals(shape.type)) {
+          drawWatermark(content, page, shape);
+          continue;
+        } else if ("signature".equals(shape.type)) {
           drawSignatureImage(document, content, page, shape);
           continue;
         } else if ("textfield".equals(shape.type)) {
@@ -706,6 +709,73 @@ public class DocuflexPdfServer {
         content.fillAndStroke();
       }
     }
+  }
+
+  private static void drawWatermark(
+      PDPageContentStream content,
+      PDPage page,
+      AnnotationStroke shape) throws IOException {
+    PDFont font = new PDType1Font(Standard14Fonts.FontName.HELVETICA_BOLD);
+    String text = standardFontText(font, shape.text == null ? "" : shape.text.trim(), 80);
+    if (text.isBlank()) return;
+
+    PdfPoint leftCenter = shapePoint(page, shape, 0, 0.5);
+    PdfPoint rightCenter = shapePoint(page, shape, 1, 0.5);
+    PdfPoint topCenter = shapePoint(page, shape, 0.5, 0);
+    PdfPoint bottomCenter = shapePoint(page, shape, 0.5, 1);
+    PdfPoint center = shapePoint(page, shape, 0.5, 0.5);
+    double directionX = rightCenter.x - leftCenter.x;
+    double directionY = rightCenter.y - leftCenter.y;
+    double availableWidth = Math.hypot(directionX, directionY);
+    double availableHeight = Math.hypot(bottomCenter.x - topCenter.x, bottomCenter.y - topCenter.y);
+    if (availableWidth < 1 || availableHeight < 1) return;
+
+    double unitX = directionX / availableWidth;
+    double unitY = directionY / availableWidth;
+    double textWidth = font.getStringWidth(text) / 1000.0;
+    float fontSize = (float) Math.max(8, Math.min(availableHeight * 0.45, availableWidth / Math.max(0.001, textWidth)));
+    double renderedWidth = textWidth * fontSize;
+    double normalX = -unitY;
+    double normalY = unitX;
+    float startX = (float) (center.x - unitX * renderedWidth / 2 - normalX * fontSize * 0.35);
+    float startY = (float) (center.y - unitY * renderedWidth / 2 - normalY * fontSize * 0.35);
+
+    PDExtendedGraphicsState graphicsState = new PDExtendedGraphicsState();
+    graphicsState.setNonStrokingAlphaConstant(0.17f);
+    graphicsState.setBlendMode(BlendMode.MULTIPLY);
+    content.saveGraphicsState();
+    content.setGraphicsStateParameters(graphicsState);
+    content.setNonStrokingColor(0.31f, 0.34f, 0.38f);
+    content.beginText();
+    content.setFont(font, fontSize);
+    content.setTextMatrix(new Matrix(
+        (float) unitX,
+        (float) unitY,
+        (float) -unitY,
+        (float) unitX,
+        startX,
+        startY));
+    content.showText(text);
+    content.endText();
+    content.restoreGraphicsState();
+  }
+
+  private static String standardFontText(PDFont font, String value, int maximumCharacters) {
+    StringBuilder result = new StringBuilder();
+    int characters = 0;
+    for (int offset = 0; offset < value.length() && characters < maximumCharacters;) {
+      int codePoint = value.codePointAt(offset);
+      offset += Character.charCount(codePoint);
+      String character = new String(Character.toChars(codePoint));
+      try {
+        font.encode(character);
+        result.append(character);
+      } catch (Exception ignored) {
+        result.append('?');
+      }
+      characters += 1;
+    }
+    return result.toString();
   }
 
   private static void drawSignatureImage(
@@ -3051,7 +3121,7 @@ public class DocuflexPdfServer {
       boolean isStroke = "marker".equals(type) || "pen".equals(type);
       boolean isShape = "triangle".equals(type) || "rectangle".equals(type) || "circle".equals(type) ||
           "check".equals(type) || "cross".equals(type) || "arrow".equals(type) || "line".equals(type) ||
-          "crop".equals(type) ||
+          "crop".equals(type) || "watermark".equals(type) ||
           "textfield".equals(type) || "signature".equals(type) || "checkbox".equals(type) || "input".equals(type) ||
           "highlight".equals(type) || "underline".equals(type) ||
           "crossout".equals(type) || "blackout".equals(type) || "whiteout".equals(type);
@@ -3076,13 +3146,17 @@ public class DocuflexPdfServer {
           throw new IllegalArgumentException("Invalid shape size.");
         }
         String imageData = optionalString(annotation.get("imageData"));
+        String text = optionalString(annotation.get("text"));
+        if ("watermark".equals(type) && text.codePointCount(0, text.length()) > 80) {
+          throw new IllegalArgumentException("Watermark text is too long.");
+        }
         if (imageData.length() > 16 * 1024 * 1024) {
           throw new IllegalArgumentException("Signature image data is too large.");
         }
         annotations.add(new AnnotationStroke(
             asInt(annotation.get("page")), type, List.of(),
             x, y, width, height, rotation, Math.max(0, radiusX), Math.max(0, radiusY),
-            color, optionalString(annotation.get("text")), imageData,
+            color, text, imageData,
             optionalString(annotation.get("fieldName")), optionalString(annotation.get("fieldValue")),
             optionalBoolean(annotation.get("fieldValue")), optionalBoolean(annotation.get("existingField"))));
         continue;

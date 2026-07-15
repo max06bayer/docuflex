@@ -45,7 +45,14 @@
           <path class="pen-ink" d={path} />
         {:else}
           <g transform={`rotate(${Number(annotation.rotation || 0)} ${centerX} ${centerY})`}>
-            {#if annotation.type === 'rectangle'}
+            {#if annotation.type === 'watermark'}
+              <text
+                class="watermark"
+                x={centerX}
+                y={centerY}
+                font-size={Math.max(14, Math.min(height * 0.45, width / Math.max(1, String(annotation.text ?? '').length * 0.58)))}
+              >{annotation.text ?? ''}</text>
+            {:else if annotation.type === 'rectangle'}
               <rect class="filled-shape" {x} {y} {width} {height} />
             {:else if annotation.type === 'circle'}
               <ellipse class="filled-shape" cx={centerX} cy={centerY} rx={width / 2} ry={height / 2} />
@@ -149,5 +156,16 @@
     font: 400 16px/1.2 Helvetica, Arial, sans-serif;
     overflow-wrap: anywhere;
     white-space: pre-wrap;
+  }
+
+  .watermark {
+    fill: #505761;
+    font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    text-anchor: middle;
+    dominant-baseline: central;
+    opacity: 0.17;
+    mix-blend-mode: multiply;
   }
 </style>
