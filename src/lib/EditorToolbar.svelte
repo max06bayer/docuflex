@@ -74,10 +74,9 @@
       ]
     },
     {
-      id: 'translate',
-      primary: 'translate',
+      id: 'document',
+      primary: 'ocr',
       tools: [
-        { id: 'translate', label: 'Translate', shortcut: '2' },
         { id: 'ocr', smallIcon: 'orc', label: 'OCR', shortcut: '3' },
         { id: 'search', label: 'Find', shortcut: '4' },
         { id: 'watermark', label: 'Watermark', shortcut: '5' }
@@ -376,10 +375,6 @@
   .tool-menu-item[data-tool='blackout'] img,
   .tool-menu-item[data-tool='whiteout'] img {
     transform: translateX(-9px);
-  }
-
-  .tool-menu-item[data-tool='translate'] img {
-    transform: translateX(-1px);
   }
 
   .tool-menu-item[data-tool='check'] img,

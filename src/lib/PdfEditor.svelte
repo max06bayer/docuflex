@@ -49,6 +49,7 @@
   let observedTool = 'select';
   let editorTransition = '';
   let editorTransitionGeneration = 0;
+  let ocrTextLayerActive = false;
   /** @type {any[]} */
   let htmlVisualAnnotations = [];
   let zoomLevel = 1;
@@ -176,6 +177,10 @@
   /** @param {string} previousTool @param {string} nextTool */
   async function handleToolTransition(previousTool, nextTool) {
     const generation = ++editorTransitionGeneration;
+    if (nextTool === 'ocr') {
+      await recognizeDocumentText();
+      return;
+    }
     if (nextTool === 'protect') protectPanelOpen = true;
     else if (previousTool === 'protect') protectPanelOpen = false;
     if (nextTool === 'sign') {
@@ -237,6 +242,43 @@
       htmlEditorReady = false;
     } finally {
       if (generation === editorTransitionGeneration) editorTransition = '';
+    }
+  }
+
+  async function recognizeDocumentText() {
+    editorTransition = 'Recognizing Text in Document';
+    try {
+      const sourceBytes = await workingFile.arrayBuffer();
+      const languages = navigator.language.toLowerCase().startsWith('de') ? 'deu+eng' : 'eng';
+      const response = await fetch('/api/pdf/ocr', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/pdf',
+          'X-OCR-Languages': languages
+        },
+        body: sourceBytes
+      });
+      if (!response.ok) {
+        const error = await response.json().catch(() => null);
+        throw new Error(error?.error ?? `OCR failed (${response.status}).`);
+      }
+
+      const searchableBytes = await response.arrayBuffer();
+      workingFile = new File([searchableBytes], workingFile.name, {
+        type: 'application/pdf',
+        lastModified: Date.now()
+      });
+      ocrTextLayerActive = true;
+      htmlEditorStarted = false;
+      htmlEditorReady = false;
+      htmlViewportMode = false;
+      await loadPdf(false);
+    } catch (error) {
+      console.error(error);
+      window.alert(error instanceof Error ? error.message : 'Could not recognize text in this PDF.');
+    } finally {
+      editorTransition = '';
+      if (activeTool === 'ocr') activeTool = 'select';
     }
   }
 
@@ -2938,7 +2980,7 @@
         }).promise,
         textLayerBuilder.render({ viewport, images: /** @type {any} */ (null) })
       ]);
-      mergeAdjacentTextSpans(textLayerBuilder.div);
+      if (!ocrTextLayerActive) mergeAdjacentTextSpans(textLayerBuilder.div);
     }
   }
 

@@ -1,9 +1,9 @@
 [phases.setup]
-nixPkgs = ["...", "jdk21_headless", "curl"]
+nixPkgs = ["...", "jdk21_headless", "curl", "ocrmypdf", "tesseract", "poppler-utils", "qpdf", "ghostscript"]
 nixLibs = ["...", "fontconfig", "freetype", "glib", "libxcb", "xorg.libX11"]
 
 [phases.build]
-cmds = ["bash scripts/install-pdf2htmlex-linux.sh", "npm run build", "npm run backend:compile"]
+cmds = ["bash scripts/install-pdf2htmlex-linux.sh", "bash scripts/install-ocr-languages-linux.sh", "npm run build", "npm run backend:compile"]
 
 [start]
 cmd = "npm run start"

@@ -14,6 +14,7 @@ backend/out/
 tmp/
 *.log
 .pdf2htmlex/
+.ocr/
 
 # Environment files
 .env

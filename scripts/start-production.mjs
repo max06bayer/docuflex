@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { join } from 'node:path';
 
 const javaEnvironment = {
   ...process.env,
@@ -10,7 +11,8 @@ const javaEnvironment = {
 };
 const frontendEnvironment = {
   ...process.env,
-  BODY_SIZE_LIMIT: process.env.BODY_SIZE_LIMIT ?? String(150 * 1024 * 1024)
+  BODY_SIZE_LIMIT: process.env.BODY_SIZE_LIMIT ?? String(150 * 1024 * 1024),
+  TESSDATA_PREFIX: process.env.TESSDATA_PREFIX ?? join(process.cwd(), '.ocr', 'tessdata')
 };
 
 const backend = spawn(
