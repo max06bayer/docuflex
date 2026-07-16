@@ -1,5 +1,7 @@
 <script>
   import { onDestroy, onMount, tick } from 'svelte';
+  import { cubicOut } from 'svelte/easing';
+  import { scale } from 'svelte/transition';
   import PdfEditor from '$lib/PdfEditor.svelte';
   // @ts-ignore Fontsource exposes CSS through package exports without JS type declarations.
   import '@fontsource-variable/geist/wght.css';
@@ -46,12 +48,28 @@
   let nextTabId = 1;
   let closingTabs = new Set();
   let sortExpanded = false;
+  let searchQuery = '';
+  /** @type {'recent' | 'size' | 'name'} */
+  let sortMode = 'recent';
+  let sortModeText = 'Recent';
+  /** @type {{ document: RecentDocument; x: number; y: number } | null} */
+  let recentContextMenu = null;
+  /** @type {RecentDocument[]} */
+  let visibleRecentDocuments = [];
   let activeShortcut = '';
   /** @type {ReturnType<typeof setTimeout> | undefined} */
   let shortcutTimer;
   /** @type {{ id: number; name: string; type: 'pdf'; file: File; protection: { enabled: boolean; password: string } } | undefined} */
   let activeDocument;
   $: activeDocument = tabs.find((tab) => tab.id === activeTab);
+  $: visibleRecentDocuments = recentDocuments
+    .filter((document) => document.name.toLocaleLowerCase().includes(searchQuery.trim().toLocaleLowerCase()))
+    .sort((left, right) => {
+      if (sortMode === 'size') return right.file.size - left.file.size || left.name.localeCompare(right.name);
+      if (sortMode === 'name') return left.name.localeCompare(right.name, undefined, { sensitivity: 'base' });
+      return right.openedAt - left.openedAt;
+    });
+  $: sortModeText = sortMode === 'size' ? 'Size' : sortMode === 'name' ? 'Name' : 'Recent';
   /** @type {HTMLInputElement | undefined} */
   let fileInput;
   /** @type {{ downloadPdf: () => Promise<void>; openSearchPanel: () => void; undo: () => Promise<void>; redo: () => Promise<void> } | undefined} */
@@ -286,6 +304,56 @@
     addFileTab(document.file, document.protection, document.thumbnailUrl);
   }
 
+  /** @param {'recent' | 'size' | 'name'} mode */
+  function selectSortMode(mode) {
+    sortMode = mode;
+    sortExpanded = false;
+  }
+
+  /** @param {MouseEvent} event @param {RecentDocument} document */
+  function openRecentContextMenu(event, document) {
+    event.preventDefault();
+    event.stopPropagation();
+    sortExpanded = false;
+    const menuWidth = 204;
+    const menuHeight = 92;
+    recentContextMenu = {
+      document,
+      x: Math.max(10, Math.min(event.clientX, window.innerWidth - menuWidth - 10)),
+      y: Math.max(10, Math.min(event.clientY, window.innerHeight - menuHeight - 10))
+    };
+  }
+
+  /** @param {RecentDocument} document */
+  async function downloadRecentDocument(document) {
+    recentContextMenu = null;
+    try {
+      const bytes = await document.file.arrayBuffer();
+      const url = URL.createObjectURL(new Blob([bytes], { type: document.file.type || 'application/pdf' }));
+      const link = globalThis.document.createElement('a');
+      link.href = url;
+      link.download = document.name;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      console.error(`Could not download ${document.name}:`, error);
+    }
+  }
+
+  /** @param {RecentDocument} document */
+  async function deleteRecentDocument(document) {
+    recentContextMenu = null;
+    recentDocuments = recentDocuments.filter((recent) => recent.name !== document.name);
+    try {
+      const database = await openRecentDatabase();
+      const transaction = database.transaction(RECENT_DOCUMENT_STORE, 'readwrite');
+      transaction.objectStore(RECENT_DOCUMENT_STORE).delete(document.name);
+      await transactionComplete(transaction);
+    } catch (error) {
+      console.warn(`Could not delete ${document.name} from recent documents:`, error);
+    }
+  }
+
   /** @param {number} id @param {{ enabled: boolean; password: string }} protection */
   function updateDocumentProtection(id, protection) {
     const document = tabs.find((tab) => tab.id === id);
@@ -300,6 +368,11 @@
 
   /** @param {KeyboardEvent} event */
   function handleQuickToolShortcut(event) {
+    if (event.key === 'Escape') {
+      sortExpanded = false;
+      recentContextMenu = null;
+      return;
+    }
     const target = event.target;
     if (event.metaKey || event.ctrlKey || event.altKey || event.repeat) return;
     if (target instanceof HTMLElement && (target.matches('input, textarea, select') || target.isContentEditable)) return;
@@ -316,8 +389,18 @@
 
   onMount(() => {
     void restoreRecentDocuments();
+    /** @param {PointerEvent} event */
+    const closeHomepageMenus = (event) => {
+      const target = event.target;
+      if (!(target instanceof Element) || !target.closest('.sort-button')) sortExpanded = false;
+      if (!(target instanceof Element) || !target.closest('.recent-context-menu')) recentContextMenu = null;
+    };
+    window.addEventListener('pointerdown', closeHomepageMenus);
     window.addEventListener('keydown', handleQuickToolShortcut);
-    return () => window.removeEventListener('keydown', handleQuickToolShortcut);
+    return () => {
+      window.removeEventListener('pointerdown', closeHomepageMenus);
+      window.removeEventListener('keydown', handleQuickToolShortcut);
+    };
   });
 
   onDestroy(() => {
@@ -441,15 +524,35 @@
 
       <label class="document-search">
         <img src="/search.svg" alt="" />
-        <input type="search" placeholder="Search" aria-label="Search recent documents" />
+        <input bind:value={searchQuery} type="search" placeholder="Search" aria-label="Search recent documents" />
       </label>
 
       <div class="browser-actions">
         <div class="sort-button">
-          <span>Sort By: <strong>Recent</strong></span>
-          <button class="sort-arrow" class:expanded={sortExpanded} aria-label="Toggle sort options" aria-expanded={sortExpanded} onclick={() => (sortExpanded = !sortExpanded)}>
+          <span>Sort By: <strong>{sortModeText}</strong></span>
+          <button class="sort-arrow" class:expanded={sortExpanded} aria-label="Toggle sort options" aria-expanded={sortExpanded} onclick={(event) => { event.stopPropagation(); sortExpanded = !sortExpanded; }}>
             <img src="/arrowright.svg" alt="" />
           </button>
+          {#if sortExpanded}
+            <div class="sort-menu" transition:scale={{ duration: 125, easing: cubicOut, start: 0.94, opacity: 0 }}>
+              {#each [
+                { id: 'recent', label: 'Recent' },
+                { id: 'size', label: 'Size' },
+                { id: 'name', label: 'Name' }
+              ] as option (option.id)}
+                <button
+                  class:active={sortMode === option.id}
+                  class="sort-menu-item"
+                  aria-pressed={sortMode === option.id}
+                  onclick={() => selectSortMode(/** @type {'recent' | 'size' | 'name'} */ (option.id))}
+                >
+                  <span aria-hidden="true"></span>
+                  <span>{option.label}</span>
+                  <span class="sort-check" aria-hidden="true">✓</span>
+                </button>
+              {/each}
+            </div>
+          {/if}
         </div>
         <button class="filter-button">
           <span>Filter: <strong>0</strong></span>
@@ -459,8 +562,13 @@
     </div>
 
     <div class="recent-grid">
-      {#each recentDocuments as document}
-        <button class="recent-document" aria-label={`Open ${document.name}`} onclick={() => openRecentDocument(document)}>
+      {#each visibleRecentDocuments as document (document.name)}
+        <button
+          class="recent-document"
+          aria-label={`Open ${document.name}`}
+          onclick={() => openRecentDocument(document)}
+          oncontextmenu={(event) => openRecentContextMenu(event, document)}
+        >
           <span class="document-preview" aria-hidden="true">
             {#if document.thumbnailUrl}
               <img class="recent-thumbnail" src={document.thumbnailUrl} alt="" />
@@ -480,6 +588,31 @@
         <span class="document-name"><span>Open Document</span></span>
       </button>
     </div>
+
+    {#if recentContextMenu}
+      {@const contextDocument = recentContextMenu.document}
+      <div
+        class="recent-context-menu"
+        role="menu"
+        tabindex="-1"
+        aria-label={`Actions for ${recentContextMenu.document.name}`}
+        style:left={`${recentContextMenu.x}px`}
+        style:top={`${recentContextMenu.y}px`}
+        in:scale={{ duration: 190, easing: cubicOut, start: 0.92, opacity: 0 }}
+        out:scale={{ duration: 145, easing: cubicOut, start: 0.96, opacity: 0 }}
+      >
+        <button class="recent-menu-item export-document" role="menuitem" onclick={() => downloadRecentDocument(contextDocument)}>
+          <img src="/download.svg" alt="" />
+          <span>Download</span>
+          <kbd>E</kbd>
+        </button>
+        <button class="recent-menu-item delete-document" role="menuitem" onclick={() => deleteRecentDocument(contextDocument)}>
+          <img src="/pages/trash.svg" alt="" />
+          <span>Delete</span>
+          <kbd>D</kbd>
+        </button>
+      </div>
+    {/if}
   </section>
   {:else}
     {#key activeDocument.id}
@@ -1205,6 +1338,7 @@
   }
 
   .sort-button {
+    position: relative;
     width: 175px;
     padding-right: 3px;
     cursor: default;
@@ -1240,6 +1374,57 @@
 
   .sort-arrow.expanded img {
     transform: rotate(270deg) translateY(-2px);
+  }
+
+  .sort-menu {
+    position: absolute;
+    z-index: 70;
+    top: calc(100% + 13px);
+    right: 0;
+    width: 204px;
+    padding: 5px;
+    border: 1px solid rgba(0, 0, 0, 0.18);
+    border-radius: 15px;
+    background: rgba(255, 255, 255, 0.78);
+    box-shadow: 0 7px 18px rgba(0, 0, 0, 0.11), 0 2px 5px rgba(0, 0, 0, 0.05);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    transform-origin: top right;
+  }
+
+  .sort-menu-item {
+    display: grid;
+    grid-template-columns: 28px 1fr 28px;
+    align-items: center;
+    width: 100%;
+    height: 40px;
+    padding: 0 7px;
+    border: 1px solid transparent;
+    border-radius: 9px;
+    background: transparent;
+    color: #3f3f3f;
+    font-size: 18px;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .sort-menu-item.active {
+    border-color: rgba(0, 0, 0, 0.08);
+    background: rgba(234, 234, 234, 0.574);
+  }
+
+  .sort-menu-item:hover {
+    color: #000;
+  }
+
+  .sort-check {
+    opacity: 0;
+    color: #1684f8;
+    text-align: center;
+  }
+
+  .sort-menu-item.active .sort-check {
+    opacity: 1;
   }
 
   .filter-button img {
@@ -1405,6 +1590,96 @@
 
   .recent-document:active {
     transform: translateY(0) scale(0.99);
+  }
+
+  .recent-context-menu {
+    position: fixed;
+    z-index: 70;
+    box-sizing: border-box;
+    width: 204px;
+    padding: 5px;
+    border: 1px solid rgba(0, 0, 0, 0.18);
+    border-radius: 15px;
+    background: rgba(255, 255, 255, 0.78);
+    box-shadow: 0 7px 18px rgba(0, 0, 0, 0.11), 0 2px 5px rgba(0, 0, 0, 0.05);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    transform-origin: top left;
+  }
+
+  .recent-menu-item {
+    display: grid;
+    grid-template-columns: 28px 1fr 28px;
+    align-items: center;
+    width: 100%;
+    height: 40px;
+    padding: 0 7px;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    background: transparent;
+    color: #3f3f3f;
+    font-family: Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 18px;
+    text-align: left;
+    cursor: pointer;
+    transition:
+      color 180ms cubic-bezier(0.2, 0.7, 0.2, 1),
+      background-color 180ms cubic-bezier(0.2, 0.7, 0.2, 1),
+      border-color 180ms cubic-bezier(0.2, 0.7, 0.2, 1),
+      transform 180ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  }
+
+  .recent-menu-item:hover,
+  .recent-menu-item:focus-visible {
+    border-color: rgba(0, 0, 0, 0.07);
+    background: rgba(234, 234, 234, 0.62);
+    color: #111;
+    outline: none;
+    transform: translateX(1px);
+  }
+
+  .recent-menu-item img {
+    display: block;
+    width: 20px;
+    height: 20px;
+    object-fit: contain;
+    transform: translateX(-2px);
+    transition: filter 180ms cubic-bezier(0.2, 0.7, 0.2, 1), opacity 180ms ease;
+  }
+
+  .recent-menu-item.export-document img {
+    width: 24px;
+    height: 24px;
+  }
+
+  .recent-menu-item:hover:not(.delete-document) img,
+  .recent-menu-item:focus-visible:not(.delete-document) img {
+    filter: brightness(0);
+  }
+
+  .recent-menu-item kbd {
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    border: 1px solid rgba(0, 0, 0, 0.04);
+    border-radius: 7px;
+    background: rgba(0, 0, 0, 0.045);
+    color: rgba(0, 0, 0, 0.22);
+    font-family: inherit;
+    font-size: 17px;
+    transition: color 180ms ease, background-color 180ms ease, border-color 180ms ease;
+  }
+
+  .recent-menu-item:hover kbd,
+  .recent-menu-item:focus-visible kbd {
+    border-color: rgba(0, 0, 0, 0.06);
+    background: rgba(0, 0, 0, 0.065);
+    color: rgba(0, 0, 0, 0.34);
+  }
+
+  .recent-menu-item.delete-document {
+    color: #ff2f38;
   }
 
   .file-input {
