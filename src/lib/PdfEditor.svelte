@@ -2231,7 +2231,9 @@
             y: ((rect.top - pageRect.top) / pageRect.height) * pageHeight,
             width: (rect.width / pageRect.width) * pageWidth,
             height: (rect.height / pageRect.height) * pageHeight,
-            ...(['underline', 'crossout'].includes(markType) ? { color: selectedTextColor(rect, shell) } : {})
+            ...(markType === 'highlight' ? { color: textMarkHexColor(selectionHighlightColor) } : {}),
+            ...(markType === 'underline' ? { color: textMarkHexColor(selectionUnderlineColor), thickness: selectionUnderlineThickness } : {}),
+            ...(markType === 'crossout' ? { color: textMarkHexColor(selectionCrossoutColor), thickness: selectionCrossoutThickness } : {})
           }))
           .sort((left, right) => left.y - right.y || left.x - right.x);
         const merged = mergeTextHighlightRects(rects);
@@ -5984,6 +5986,38 @@
       </div>
     {/if}
   {/if}
+  {#if ['highlight', 'underline', 'crossout'].includes(activeTool)}
+    {@const textMarkPanelType = /** @type {'highlight' | 'underline' | 'crossout'} */ (activeTool)}
+    {@const textMarkPanelLabel = textMarkPanelType === 'crossout' ? 'Strikethrough' : textMarkPanelType[0].toUpperCase() + textMarkPanelType.slice(1)}
+    {@const textMarkPanelColor = textMarkPanelType === 'highlight' ? selectionHighlightColor : textMarkPanelType === 'underline' ? selectionUnderlineColor : selectionCrossoutColor}
+    {@const textMarkPanelProperty = textMarkPanelType === 'highlight' ? 'selectionHighlightColor' : textMarkPanelType === 'underline' ? 'selectionUnderlineColor' : 'selectionCrossoutColor'}
+    <div class="protect-panel selection-properties-panel text-tool-properties-panel" role="dialog" aria-label={`${textMarkPanelLabel} properties`} transition:fly={{ x: 18, duration: 240, easing: cubicOut }}>
+      <header class="protect-panel-header">
+        <img src={`/toolbar/small/${activeTool}.svg`} alt="" />
+        <h2>{textMarkPanelLabel}</h2>
+        <button class="protect-panel-close" type="button" aria-label={`Close ${textMarkPanelLabel} properties`} onclick={() => { colorPicker = null; activeTool = 'select'; }}><span></span><span></span></button>
+      </header>
+      <div class="selection-properties-scroll">
+        <section class="selection-property-section drawing-property-section" aria-label="Appearance">
+          <div class="drawing-color-row">
+            <span>Color</span>
+            <input aria-label={`${textMarkPanelLabel} color hex`} value={textMarkPanelColor.replace('#', '').toUpperCase()} oninput={(event) => updateSelectedPdfTextColor(textMarkPanelType, event.currentTarget.value)} />
+            <button class="property-color" type="button" aria-label={`Open ${textMarkPanelLabel} color picker`} class:active={colorPicker?.property === textMarkPanelProperty} style:--property-color={textMarkPanelColor} onclick={() => openSelectionColorPicker(textMarkPanelProperty)}></button>
+          </div>
+          {#if textMarkPanelType !== 'highlight'}
+            <label class="inspector-field inspector-field-wide"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectedPdfTextThickness(textMarkPanelType, value), { step: 0.05, min: 0.5, max: 8 })}>Width</span><input class="scrubbable-number" type="number" min="0.5" max="8" step="0.25" value={textMarkPanelType === 'underline' ? selectionUnderlineThickness : selectionCrossoutThickness} onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectedPdfTextThickness(textMarkPanelType, value), { step: 0.05, min: 0.5, max: 8 })} oninput={(event) => updateSelectedPdfTextThickness(textMarkPanelType, Number(event.currentTarget.value))} /></label>
+          {/if}
+        </section>
+      </div>
+    </div>
+    {#if colorPicker?.property === textMarkPanelProperty}
+      {@const pickerHex = hsvToHex(colorPicker.hue, colorPicker.saturation, colorPicker.value)}
+      <div class="figma-color-picker text-tool-color-picker" role="dialog" aria-label="Color picker" transition:fly={{ x: 8, duration: 190, easing: cubicOut }}>
+        <div class="color-saturation" style:--picker-hue={`hsl(${colorPicker.hue} 100% 50%)`} role="slider" aria-label="Color saturation and brightness" aria-valuenow={Math.round(colorPicker.saturation * 100)} tabindex="0" onpointerdown={(event) => updateColorControl(event, 'saturation')} onpointermove={(event) => { if (event.buttons) updateColorControl(event, 'saturation'); }}><span style:left={`${colorPicker.saturation * 100}%`} style:top={`${(1 - colorPicker.value) * 100}%`} style:--thumb-color={pickerHex}></span></div>
+        <div class="picker-slider hue-slider" role="slider" aria-label="Hue" aria-valuenow={Math.round(colorPicker.hue)} tabindex="0" onpointerdown={(event) => updateColorControl(event, 'hue')} onpointermove={(event) => { if (event.buttons) updateColorControl(event, 'hue'); }}><span style:left={`${colorPicker.hue / 360 * 100}%`} style:--thumb-color={pickerHex}></span></div>
+      </div>
+    {/if}
+  {/if}
   {#if activeTool === 'select' && pdfTextSelection}
     <div class="protect-panel selection-properties-panel text-selection-panel" role="dialog" aria-label="Selected text properties" transition:fly={{ x: 18, duration: 240, easing: cubicOut }}>
       <header class="protect-panel-header">
@@ -6767,6 +6801,7 @@
   .drawing-toggle.active { border-color: #111; background: #111; color: #fff; }
   .drawing-toggle.active em { color: #fff; }
   .figma-color-picker.drawing-color-picker { top: 118px; }
+  .figma-color-picker.text-tool-color-picker { top: 118px; }
 
   .text-mark-row {
     display: grid;
