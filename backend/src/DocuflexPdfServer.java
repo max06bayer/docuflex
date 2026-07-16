@@ -390,6 +390,10 @@ public class DocuflexPdfServer {
       for (AnnotationStroke textMark : textMarks) {
         if (textMark.width <= 0 || textMark.height <= 0) continue;
         if ("highlight".equals(textMark.type)) {
+          content.setNonStrokingColor(
+              annotationColorComponent(textMark.color, 0),
+              annotationColorComponent(textMark.color, 1),
+              annotationColorComponent(textMark.color, 2));
           PdfPoint topLeft = shapePoint(page, textMark, 0, 0);
           PdfPoint topRight = shapePoint(page, textMark, 1, 0);
           PdfPoint bottomRight = shapePoint(page, textMark, 1, 1);
@@ -411,7 +415,10 @@ public class DocuflexPdfServer {
         PDRectangle box = page.getCropBox();
         int rotation = ((page.getRotation() % 360) + 360) % 360;
         double displayHeight = rotation == 90 || rotation == 270 ? box.getWidth() : box.getHeight();
-        content.setLineWidth((float) Math.max(0.75, Math.min(1.8, textMark.height * displayHeight * 0.09)));
+        float requestedThickness = textMark.color.size() > 3 ? (float) textMark.color.get(3).doubleValue() / EDITOR_PAGE_SCALE : 0;
+        content.setLineWidth(requestedThickness > 0
+            ? Math.max(0.35f, requestedThickness)
+            : (float) Math.max(0.75, Math.min(1.8, textMark.height * displayHeight * 0.09)));
         PdfPoint start = shapePoint(page, textMark, 0, lineY);
         PdfPoint end = shapePoint(page, textMark, 1, lineY);
         content.moveTo(start.x, start.y);

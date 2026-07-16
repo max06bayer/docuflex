@@ -9,7 +9,7 @@
   /** @typedef {{ id: number; type: 'marker' | 'pen'; points: StrokePoint[] }} AnnotationStroke */
   /** @typedef {{ start: number; end: number; color?: string; fontFamily?: string; fontSize?: number; fontWeight?: number; letterSpacing?: number; textAlign?: 'left' | 'center' | 'right'; italic?: boolean; underline?: boolean; strikethrough?: boolean }} TextStyleRange */
   /** @typedef {{ id: number; type: 'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'measure' | 'crop' | 'textfield' | 'signature' | 'image' | 'checkbox' | 'input'; x: number; y: number; width: number; height: number; rotation: number; text?: string; textColor?: string; fontFamily?: string; fontSize?: number; fontWeight?: number; letterSpacing?: number; lineHeight?: number; textAlign?: 'left' | 'center' | 'right'; verticalAlign?: 'top' | 'middle' | 'bottom'; italic?: boolean; underline?: boolean; strikethrough?: boolean; textStyleRanges?: TextStyleRange[]; imageData?: string; fieldName?: string; fieldValue?: string | boolean; existingField?: boolean; readOnly?: boolean; opacity?: number; cornerRadius?: number; fillPresent?: boolean; fillEnabled?: boolean; fillColor?: string; fillAlpha?: number; strokePresent?: boolean; strokeEnabled?: boolean; strokeColor?: string; strokeAlpha?: number; strokeWidth?: number; shadowPresent?: boolean; shadowEnabled?: boolean; shadowOpacity?: number; shadowBlur?: number; shadowX?: number; shadowY?: number; backgroundBlurPresent?: boolean; backgroundBlurEnabled?: boolean; backgroundBlur?: number }} AnnotationShape */
-  /** @typedef {{ id: number; type: 'highlight' | 'underline' | 'crossout' | 'blackout' | 'whiteout'; rects: { x: number; y: number; width: number; height: number; color?: [number, number, number] }[] }} TextHighlight */
+  /** @typedef {{ id: number; type: 'highlight' | 'underline' | 'crossout' | 'blackout' | 'whiteout'; rects: { x: number; y: number; width: number; height: number; color?: [number, number, number]; thickness?: number }[] }} TextHighlight */
 
   /** @type {File} */
   export let file;
@@ -169,10 +169,17 @@
   let applyingHistoryState = false;
   /** @type {{ pageIndex: number; id: number } | null} */
   let hoveredShape = null;
-  /** @type {{ property: 'fillColor' | 'strokeColor' | 'textColor'; hue: number; saturation: number; value: number; alpha: number } | null} */
+  /** @type {{ property: 'fillColor' | 'strokeColor' | 'textColor' | 'selectionHighlightColor' | 'selectionUnderlineColor' | 'selectionCrossoutColor'; hue: number; saturation: number; value: number; alpha: number } | null} */
   let colorPicker = null;
   /** @type {{ pageIndex: number; id: number; start: number; end: number } | null} */
   let textFormatSelection = null;
+  /** @type {{ pages: Record<number, { x: number; y: number; width: number; height: number }[]>; text: string; active: Record<string, boolean>; markIds: Record<string, { pageIndex: number; id: number }[]> } | null} */
+  let pdfTextSelection = null;
+  let selectionHighlightColor = '#FFE43B';
+  let selectionUnderlineColor = '#171717';
+  let selectionCrossoutColor = '#171717';
+  let selectionUnderlineThickness = 1.5;
+  let selectionCrossoutThickness = 1.5;
   /** @type {HTMLInputElement | null} */
   let inspectorXInput = null;
   /** @type {HTMLInputElement | null} */
@@ -1458,10 +1465,47 @@
     let productionDragDirection = 0;
     /** @type {ReturnType<typeof lineBoundsForCaret>} */
     let productionLineBounds = null;
+    let textSelectionStartedOnPage = false;
+
+    /** @param {MouseEvent} event */
+    function rememberTextSelectionOrigin(event) {
+      const target = event.target;
+      textSelectionStartedOnPage = Boolean(
+        event.button === 0 &&
+        isTextSelectionTool() &&
+        target instanceof Element &&
+        target.closest('.textLayer span')
+      );
+    }
+
+    /** @param {Event} event */
+    function blockExternalPdfSelection(event) {
+      const target = event.target;
+      if (
+        !textSelectionStartedOnPage &&
+        target instanceof Element &&
+        (target.closest('.textLayer, .figma-color-picker, .scrubbable-number, .scrub-label'))
+      ) event.preventDefault();
+    }
+
+    /** @param {MouseEvent} event */
+    function blockExternalPdfSelectionDrag(event) {
+      if (textSelectionStartedOnPage || (event.buttons & 1) === 0) return;
+      const hit = document.elementFromPoint(event.clientX, event.clientY);
+      if (!(hit instanceof Element) || !hit.closest('.textLayer')) return;
+      event.preventDefault();
+      const selection = window.getSelection();
+      const anchor = selection?.anchorNode instanceof Element ? selection.anchorNode : selection?.anchorNode?.parentElement;
+      if (anchor?.closest('.textLayer')) selection?.removeAllRanges();
+    }
+
+    function clearTextSelectionOrigin() {
+      textSelectionStartedOnPage = false;
+    }
 
     /** @param {MouseEvent} event */
     function beginProductionCharacterDrag(event) {
-      if (!import.meta.env.PROD || !isTextSelectionTool() || event.button !== 0 || event.detail !== 1) return;
+      if (!isTextSelectionTool() || event.button !== 0 || event.detail !== 1) return;
       const target = event.target;
       if (!(target instanceof Element) || !target.closest('.textLayer span')) {
         // A drag beginning on the canvas has no legitimate text anchor.
@@ -1574,7 +1618,7 @@
 
     /** @param {MouseEvent} event */
     function extendProductionCharacterDrag(event) {
-      if (!import.meta.env.PROD || !productionCharacterDrag || wordDrag || (event.buttons & 1) === 0) return;
+      if (!productionCharacterDrag || wordDrag || (event.buttons & 1) === 0) return;
       const hit = document.elementFromPoint(event.clientX, event.clientY);
       const hitSpan = hit instanceof Element ? hit.closest('.textLayer span:not(.markedContent)') : null;
       const hitRect = hitSpan?.getBoundingClientRect();
@@ -1608,16 +1652,14 @@
     }
 
     function finishProductionCharacterDrag() {
-      if (import.meta.env.PROD) {
-        productionCharacterDrag = null;
-        productionDragDirection = 0;
-        productionLineBounds = null;
-      }
+      productionCharacterDrag = null;
+      productionDragDirection = 0;
+      productionLineBounds = null;
     }
 
     /** @param {MouseEvent} event */
     function suppressProductionBlankDrag(event) {
-      if (!import.meta.env.PROD || !isTextSelectionTool() || event.button !== 0) return;
+      if (!isTextSelectionTool() || event.button !== 0) return;
       const target = event.target;
       if (target instanceof Element && target.closest('.pdf-page') && !target.closest('.textLayer span')) {
         event.preventDefault();
@@ -1794,6 +1836,9 @@
       commitActiveTextField();
     }
 
+    document.addEventListener('mousedown', rememberTextSelectionOrigin, true);
+    document.addEventListener('selectstart', blockExternalPdfSelection, true);
+    document.addEventListener('mousemove', blockExternalPdfSelectionDrag, true);
     document.addEventListener('mousedown', beginTextSelectionCursor, true);
     document.addEventListener('mousedown', beginProductionCharacterDrag, true);
     document.addEventListener('mousedown', beginWordDrag, true);
@@ -1804,6 +1849,8 @@
     document.addEventListener('mouseup', finishProductionCharacterDrag, true);
     document.addEventListener('mouseup', endWordDrag);
     document.addEventListener('mouseup', commitTextHighlight);
+    document.addEventListener('mouseup', capturePdfTextSelection);
+    document.addEventListener('mouseup', clearTextSelectionOrigin);
     document.addEventListener('dragstart', suppressProductionBlankDrag);
     document.addEventListener('click', clearPageSelection);
     document.addEventListener('pointerdown', commitTextFieldOnOutsidePointer, true);
@@ -1814,6 +1861,9 @@
     window.addEventListener('blur', resetZoomCursor);
     window.addEventListener('blur', endTextSelectionCursor);
     return () => {
+      document.removeEventListener('mousedown', rememberTextSelectionOrigin, true);
+      document.removeEventListener('selectstart', blockExternalPdfSelection, true);
+      document.removeEventListener('mousemove', blockExternalPdfSelectionDrag, true);
       document.removeEventListener('mousedown', beginTextSelectionCursor, true);
       document.removeEventListener('mousedown', beginProductionCharacterDrag, true);
       document.removeEventListener('mousedown', beginWordDrag, true);
@@ -1824,6 +1874,8 @@
       document.removeEventListener('mouseup', finishProductionCharacterDrag, true);
       document.removeEventListener('mouseup', endWordDrag);
       document.removeEventListener('mouseup', commitTextHighlight);
+      document.removeEventListener('mouseup', capturePdfTextSelection);
+      document.removeEventListener('mouseup', clearTextSelectionOrigin);
       document.removeEventListener('dragstart', suppressProductionBlankDrag);
       document.removeEventListener('click', clearPageSelection);
       document.removeEventListener('pointerdown', commitTextFieldOnOutsidePointer, true);
@@ -1977,6 +2029,171 @@
   function textMarkCssColor(color) {
     const [red, green, blue] = color ?? [0, 0, 0];
     return `rgb(${Math.round(red * 255)} ${Math.round(green * 255)} ${Math.round(blue * 255)})`;
+  }
+
+  /** @param {string} value */
+  function textMarkHexColor(value) {
+    const normalized = value.trim().replace(/^#/, '');
+    if (!/^[0-9a-f]{6}$/i.test(normalized)) return /** @type {[number, number, number]} */ ([0, 0, 0]);
+    return /** @type {[number, number, number]} */ ([0, 2, 4].map((offset) => Number.parseInt(normalized.slice(offset, offset + 2), 16) / 255));
+  }
+
+  /** @param {[number, number, number] | undefined} color */
+  function textMarkColorHex(color) {
+    const values = color ?? [0, 0, 0];
+    return `#${values.map((channel) => Math.round(clamp(channel, 0, 1) * 255).toString(16).padStart(2, '0')).join('').toUpperCase()}`;
+  }
+
+  /** @param {{ x: number; y: number; width: number; height: number }} left @param {{ x: number; y: number; width: number; height: number }} right */
+  function textMarkRectsMatch(left, right) {
+    const overlapWidth = Math.max(0, Math.min(left.x + left.width, right.x + right.width) - Math.max(left.x, right.x));
+    const overlapHeight = Math.max(0, Math.min(left.y + left.height, right.y + right.height) - Math.max(left.y, right.y));
+    const smallerArea = Math.max(0.01, Math.min(left.width * left.height, right.width * right.height));
+    return overlapWidth * overlapHeight / smallerArea >= 0.62;
+  }
+
+  /** @param {Record<number, { x: number; y: number; width: number; height: number }[]>} pages */
+  function existingTextMarkState(pages) {
+    /** @type {Record<string, boolean>} */
+    const active = {};
+    /** @type {Record<string, { pageIndex: number; id: number }[]>} */
+    const markIds = {};
+    for (const type of ['underline', 'crossout', 'highlight', 'blackout', 'whiteout']) {
+      /** @type {{ pageIndex: number; id: number }[]} */
+      const matches = [];
+      let fullyCovered = true;
+      for (const [page, selectedRects] of Object.entries(pages)) {
+        const pageIndex = Number(page);
+        const marks = (textHighlights[pageIndex] ?? []).filter((mark) => (mark.type ?? 'highlight') === type);
+        for (const selectedRect of selectedRects) {
+          const match = marks.find((mark) => mark.rects.some((rect) => textMarkRectsMatch(selectedRect, rect)));
+          if (!match) {
+            fullyCovered = false;
+            continue;
+          }
+          if (!matches.some((entry) => entry.pageIndex === pageIndex && entry.id === match.id)) matches.push({ pageIndex, id: match.id });
+        }
+      }
+      active[type] = fullyCovered && matches.length > 0;
+      markIds[type] = active[type] ? matches : [];
+      if (active[type] && ['underline', 'crossout', 'highlight'].includes(type)) {
+        const first = matches[0];
+        const mark = (textHighlights[first.pageIndex] ?? []).find((candidate) => candidate.id === first.id);
+        const rect = mark?.rects[0];
+        if (rect?.color) {
+          if (type === 'underline') selectionUnderlineColor = textMarkColorHex(rect.color);
+          else if (type === 'crossout') selectionCrossoutColor = textMarkColorHex(rect.color);
+          else selectionHighlightColor = textMarkColorHex(rect.color);
+        }
+        if (rect?.thickness !== undefined) {
+          if (type === 'underline') selectionUnderlineThickness = rect.thickness;
+          else if (type === 'crossout') selectionCrossoutThickness = rect.thickness;
+        }
+      }
+    }
+    return { active, markIds };
+  }
+
+  /** @param {MouseEvent} event */
+  function capturePdfTextSelection(event) {
+    if (activeTool !== 'select' || !viewer) return;
+    queueMicrotask(() => {
+      const target = event.target;
+      if (target instanceof Element && target.closest('.text-selection-panel, .figma-color-picker')) return;
+      const currentViewer = viewer;
+      if (!currentViewer) return;
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || !selection.rangeCount) {
+        pdfTextSelection = null;
+        colorPicker = null;
+        return;
+      }
+      const range = selection.getRangeAt(0);
+      const ancestor = range.commonAncestorContainer instanceof Element
+        ? range.commonAncestorContainer
+        : range.commonAncestorContainer.parentElement;
+      if (!ancestor?.closest('.textLayer')) return;
+      const clientRects = [...range.getClientRects()].filter((rect) => rect.width > 0.5 && rect.height > 0.5);
+      /** @type {Record<number, { x: number; y: number; width: number; height: number }[]>} */
+      const pagesByIndex = {};
+      [...currentViewer.querySelectorAll('.pdf-page')].forEach((shell, pageIndex) => {
+        if (!(shell instanceof HTMLElement)) return;
+        const pageRect = shell.getBoundingClientRect();
+        const pageWidth = Number.parseFloat(shell.style.width) || shell.offsetWidth;
+        const pageHeight = Number.parseFloat(shell.style.height) || shell.offsetHeight;
+        const rects = clientRects.filter((rect) => {
+          const centerX = rect.left + rect.width / 2;
+          const centerY = rect.top + rect.height / 2;
+          return centerX >= pageRect.left && centerX <= pageRect.right && centerY >= pageRect.top && centerY <= pageRect.bottom;
+        }).map((rect) => ({
+          x: ((rect.left - pageRect.left) / pageRect.width) * pageWidth,
+          y: ((rect.top - pageRect.top) / pageRect.height) * pageHeight,
+          width: (rect.width / pageRect.width) * pageWidth,
+          height: (rect.height / pageRect.height) * pageHeight
+        }));
+        if (rects.length) pagesByIndex[pageIndex] = mergeTextHighlightRects(rects);
+      });
+      if (Object.keys(pagesByIndex).length) {
+        setShapeSelection(0, []);
+        const existing = existingTextMarkState(pagesByIndex);
+        pdfTextSelection = { pages: pagesByIndex, text: selection.toString(), ...existing };
+        selection.removeAllRanges();
+      }
+    });
+  }
+
+  /** @param {'highlight' | 'underline' | 'crossout' | 'blackout' | 'whiteout'} type */
+  function syncSelectedPdfTextMark(type) {
+    if (!pdfTextSelection) return;
+    const previousIds = pdfTextSelection.markIds[type] ?? [];
+    for (const { pageIndex, id } of previousIds) {
+      textHighlights = { ...textHighlights, [pageIndex]: (textHighlights[pageIndex] ?? []).filter((mark) => mark.id !== id) };
+    }
+    /** @type {{ pageIndex: number; id: number }[]} */
+    const nextIds = [];
+    if (!pdfTextSelection.active[type]) {
+      pdfTextSelection = { ...pdfTextSelection, markIds: { ...pdfTextSelection.markIds, [type]: nextIds } };
+      return;
+    }
+    const color = type === 'highlight' ? textMarkHexColor(selectionHighlightColor)
+      : type === 'underline' ? textMarkHexColor(selectionUnderlineColor)
+        : type === 'crossout' ? textMarkHexColor(selectionCrossoutColor) : undefined;
+    const thickness = type === 'underline' ? selectionUnderlineThickness : type === 'crossout' ? selectionCrossoutThickness : undefined;
+    for (const [page, sourceRects] of Object.entries(pdfTextSelection.pages)) {
+      const pageIndex = Number(page);
+      const rects = sourceRects.map((rect) => ({ ...rect, ...(color ? { color } : {}), ...(thickness !== undefined ? { thickness } : {}) }));
+      const existing = textHighlights[pageIndex] ?? [];
+      textHighlights = {
+        ...textHighlights,
+        [pageIndex]: [...existing, { id: nextAnnotationId, type, rects }]
+      };
+      nextIds.push({ pageIndex, id: nextAnnotationId++ });
+    }
+    pdfTextSelection = { ...pdfTextSelection, markIds: { ...pdfTextSelection.markIds, [type]: nextIds } };
+  }
+
+  /** @param {'highlight' | 'underline' | 'crossout' | 'blackout' | 'whiteout'} type */
+  function toggleSelectedPdfTextMark(type) {
+    if (!pdfTextSelection) return;
+    pdfTextSelection = { ...pdfTextSelection, active: { ...pdfTextSelection.active, [type]: !pdfTextSelection.active[type] } };
+    syncSelectedPdfTextMark(type);
+  }
+
+  /** @param {'underline' | 'crossout'} type @param {number} value */
+  function updateSelectedPdfTextThickness(type, value) {
+    const next = clamp(value, 0.5, 8);
+    if (type === 'underline') selectionUnderlineThickness = next;
+    else selectionCrossoutThickness = next;
+    if (pdfTextSelection?.active[type]) syncSelectedPdfTextMark(type);
+  }
+
+  /** @param {'highlight' | 'underline' | 'crossout'} type @param {string} value */
+  function updateSelectedPdfTextColor(type, value) {
+    const color = normalizedHex(value) ?? `#${value.replace(/^#/, '')}`;
+    if (type === 'highlight') selectionHighlightColor = color;
+    else if (type === 'underline') selectionUnderlineColor = color;
+    else selectionCrossoutColor = color;
+    if (pdfTextSelection?.active[type]) syncSelectedPdfTextMark(type);
   }
 
   function commitTextHighlight() {
@@ -2884,9 +3101,26 @@
     };
   }
 
+  /** @param {'selectionHighlightColor' | 'selectionUnderlineColor' | 'selectionCrossoutColor'} property */
+  function openSelectionColorPicker(property) {
+    if (colorPicker?.property === property) {
+      colorPicker = null;
+      return;
+    }
+    const color = property === 'selectionHighlightColor' ? selectionHighlightColor
+      : property === 'selectionUnderlineColor' ? selectionUnderlineColor : selectionCrossoutColor;
+    colorPicker = { property, ...hexToHsv(color), alpha: 1 };
+  }
+
   function applyColorPicker() {
     if (!colorPicker) return;
     const color = hsvToHex(colorPicker.hue, colorPicker.saturation, colorPicker.value);
+    if (colorPicker.property.startsWith('selection')) {
+      const type = colorPicker.property === 'selectionHighlightColor' ? 'highlight'
+        : colorPicker.property === 'selectionUnderlineColor' ? 'underline' : 'crossout';
+      updateSelectedPdfTextColor(type, color);
+      return;
+    }
     if (colorPicker.property === 'textColor') {
       updateTextFormatting({ textColor: color });
       return;
@@ -3151,6 +3385,7 @@
 
   /** @param {number} pageIndex @param {number[]} ids */
   function setShapeSelection(pageIndex, ids) {
+    if (ids.length) pdfTextSelection = null;
     const previousKey = selectedShape ? `${selectedShape.pageIndex}:${[...selectedShapeIds].join(',')}` : '';
     const nextKey = ids.length ? `${pageIndex}:${ids.join(',')}` : '';
     if (previousKey !== nextKey) {
@@ -4632,7 +4867,7 @@
         rotation: 0,
         radiusX: 0,
         radiusY: 0,
-        color: rect.color ?? [],
+        color: [...(rect.color ?? []), rect.thickness ?? 0],
         text: ''
       })));
     });
@@ -4858,6 +5093,7 @@
                     width={rect.width}
                     height={rect.height}
                     rx={Math.min(2, rect.height * 0.12)}
+                    style:fill={textMarkCssColor(rect.color ?? [1, 0.894, 0.231])}
                   />
                 {:else if ['underline', 'crossout'].includes(highlight.type ?? 'highlight')}
                   <line
@@ -4867,7 +5103,7 @@
                     x2={rect.x + rect.width}
                     y2={rect.y + rect.height * ((highlight.type ?? 'highlight') === 'underline' ? 0.9 : 0.52)}
                     stroke={textMarkCssColor(rect.color)}
-                    style:--decoration-width={`${Math.max(1.25, Math.min(2.2, rect.height * 0.09))}px`}
+                    style:--decoration-width={`${rect.thickness ?? Math.max(1.25, Math.min(2.2, rect.height * 0.09))}px`}
                   />
                 {/if}
               {/each}
@@ -5516,6 +5752,18 @@
               {/each}
             {/each}
           </svg>
+          {#if pdfTextSelection?.pages[index]?.length}
+            <svg
+              class="annotation-layer native-selection-layer"
+              viewBox={`0 0 ${pageSizes[index]?.width ?? 1} ${pageSizes[index]?.height ?? 1}`}
+              preserveAspectRatio="none"
+              aria-hidden="true"
+            >
+              {#each pdfTextSelection.pages[index] as rect}
+                <rect x={rect.x} y={rect.y} width={rect.width} height={rect.height} />
+              {/each}
+            </svg>
+          {/if}
         </div>
       {/each}
     </div>
@@ -5597,6 +5845,51 @@
         </footer>
       </div>
     </div>
+  {/if}
+  {#if activeTool === 'select' && pdfTextSelection}
+    <div class="protect-panel selection-properties-panel text-selection-panel" role="dialog" aria-label="Selected text properties" transition:fly={{ x: 18, duration: 240, easing: cubicOut }}>
+      <header class="protect-panel-header">
+        <img src="/toolbar/small/select.svg" alt="" />
+        <h2>Select</h2>
+        <button class="protect-panel-close" type="button" aria-label="Close text properties" onclick={() => { pdfTextSelection = null; window.getSelection()?.removeAllRanges(); }}><span></span><span></span></button>
+      </header>
+      <div class="selection-properties-scroll">
+        <section class="selection-property-section text-mark-properties" aria-label="Text annotations">
+          <div class="text-mark-row decorated-mark-row">
+            <button class:active={pdfTextSelection.active.underline} type="button" onmousedown={(event) => event.preventDefault()} onclick={() => toggleSelectedPdfTextMark('underline')}>Underline</button>
+            <input class="text-mark-thickness scrubbable-number" aria-label="Underline thickness" type="number" min="0.5" max="8" step="0.25" value={selectionUnderlineThickness} onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectedPdfTextThickness('underline', value), { step: 0.05, min: 0.5, max: 8 })} oninput={(event) => updateSelectedPdfTextThickness('underline', Number(event.currentTarget.value))} />
+            <input class="text-mark-hex" aria-label="Underline color" value={selectionUnderlineColor.replace('#', '')} oninput={(event) => updateSelectedPdfTextColor('underline', event.currentTarget.value)} />
+            <button class="property-color text-mark-color" type="button" aria-label="Choose underline color" class:active={colorPicker?.property === 'selectionUnderlineColor'} style:--property-color={selectionUnderlineColor} onmousedown={(event) => event.preventDefault()} onclick={() => openSelectionColorPicker('selectionUnderlineColor')}></button>
+          </div>
+          <div class="text-mark-row decorated-mark-row">
+            <button class:active={pdfTextSelection.active.crossout} type="button" onmousedown={(event) => event.preventDefault()} onclick={() => toggleSelectedPdfTextMark('crossout')}>Strikethrough</button>
+            <input class="text-mark-thickness scrubbable-number" aria-label="Strikethrough thickness" type="number" min="0.5" max="8" step="0.25" value={selectionCrossoutThickness} onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectedPdfTextThickness('crossout', value), { step: 0.05, min: 0.5, max: 8 })} oninput={(event) => updateSelectedPdfTextThickness('crossout', Number(event.currentTarget.value))} />
+            <input class="text-mark-hex" aria-label="Strikethrough color" value={selectionCrossoutColor.replace('#', '')} oninput={(event) => updateSelectedPdfTextColor('crossout', event.currentTarget.value)} />
+            <button class="property-color text-mark-color" type="button" aria-label="Choose strikethrough color" class:active={colorPicker?.property === 'selectionCrossoutColor'} style:--property-color={selectionCrossoutColor} onmousedown={(event) => event.preventDefault()} onclick={() => openSelectionColorPicker('selectionCrossoutColor')}></button>
+          </div>
+          <div class="text-mark-row highlight-mark-row">
+            <button class:active={pdfTextSelection.active.highlight} type="button" onmousedown={(event) => event.preventDefault()} onclick={() => toggleSelectedPdfTextMark('highlight')}>Highlight</button>
+            <input class="text-mark-hex" aria-label="Highlight color" value={selectionHighlightColor.replace('#', '')} oninput={(event) => updateSelectedPdfTextColor('highlight', event.currentTarget.value)} />
+            <button class="property-color text-mark-color" type="button" aria-label="Choose highlight color" class:active={colorPicker?.property === 'selectionHighlightColor'} style:--property-color={selectionHighlightColor} onmousedown={(event) => event.preventDefault()} onclick={() => openSelectionColorPicker('selectionHighlightColor')}></button>
+          </div>
+          <div class="text-redaction-grid">
+            <button class:active={pdfTextSelection.active.blackout} type="button" onmousedown={(event) => event.preventDefault()} onclick={() => toggleSelectedPdfTextMark('blackout')}>Blackout</button>
+            <button class:active={pdfTextSelection.active.whiteout} type="button" onmousedown={(event) => event.preventDefault()} onclick={() => toggleSelectedPdfTextMark('whiteout')}>Whiteout</button>
+          </div>
+        </section>
+      </div>
+    </div>
+    {#if colorPicker?.property.startsWith('selection')}
+      {@const pickerHex = hsvToHex(colorPicker.hue, colorPicker.saturation, colorPicker.value)}
+      <div class="figma-color-picker text-selection-color-picker" role="dialog" aria-label="Color picker" transition:fly={{ x: 8, duration: 190, easing: cubicOut }}>
+        <div class="color-saturation" style:--picker-hue={`hsl(${colorPicker.hue} 100% 50%)`} role="slider" aria-label="Color saturation and brightness" aria-valuenow={Math.round(colorPicker.saturation * 100)} tabindex="0" onpointerdown={(event) => updateColorControl(event, 'saturation')} onpointermove={(event) => { if (event.buttons) updateColorControl(event, 'saturation'); }}>
+          <span style:left={`${colorPicker.saturation * 100}%`} style:top={`${(1 - colorPicker.value) * 100}%`} style:--thumb-color={pickerHex}></span>
+        </div>
+        <div class="picker-slider hue-slider" role="slider" aria-label="Hue" aria-valuenow={Math.round(colorPicker.hue)} tabindex="0" onpointerdown={(event) => updateColorControl(event, 'hue')} onpointermove={(event) => { if (event.buttons) updateColorControl(event, 'hue'); }}>
+          <span style:left={`${colorPicker.hue / 360 * 100}%`} style:--thumb-color={pickerHex}></span>
+        </div>
+      </div>
+    {/if}
   {/if}
   {#if activeTool === 'select' && selectedShape && inspectorSelection().length}
     {@const inspectedObjects = shapes && inspectorSelection()}
@@ -6267,6 +6560,107 @@
     height: auto;
     max-height: calc(100% - 40px);
   }
+
+  .protect-panel.text-selection-panel {
+    max-height: none;
+  }
+
+  .text-mark-properties {
+    display: grid;
+    gap: 9px;
+    border-bottom: 0;
+  }
+
+  .text-mark-row {
+    display: grid;
+    align-items: center;
+    box-sizing: border-box;
+    height: 39px;
+    overflow: hidden;
+    border: 1px solid #d7d7d7;
+    border-radius: 8px;
+    background: #f3f3f3;
+  }
+
+  .decorated-mark-row {
+    grid-template-columns: minmax(0, 1fr) 48px 68px 38px;
+  }
+
+  .highlight-mark-row {
+    grid-template-columns: minmax(0, 1fr) 82px 38px;
+  }
+
+  .text-mark-row button {
+    align-self: stretch;
+    padding: 0 10px;
+    border: 0;
+    border-right: 1px solid #d7d7d7;
+    background: transparent;
+    color: #111;
+    font: inherit;
+    font-size: 16px;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .text-mark-row > button:first-child:hover { background: #eaeaea; }
+
+  .text-mark-row > button:first-child.active,
+  .text-redaction-grid button.active {
+    border-color: #111;
+    background: #111;
+    color: #fff;
+  }
+
+  .text-mark-row input {
+    box-sizing: border-box;
+    min-width: 0;
+    width: 100%;
+    height: 100%;
+    padding: 0 6px;
+    border: 0;
+    border-right: 1px solid #d7d7d7;
+    outline: 0;
+    background: transparent;
+    color: #111;
+    font: inherit;
+    font-size: 15px;
+    text-align: center;
+  }
+
+  .text-mark-color {
+    justify-self: center;
+    width: 24px !important;
+    height: 24px !important;
+    padding: 0 !important;
+    border-right: 0 !important;
+    cursor: pointer;
+    background: var(--property-color) !important;
+    transform: translateY(7px);
+  }
+
+  .figma-color-picker.text-selection-color-picker { top: 88px; }
+
+  .text-mark-thickness::-webkit-inner-spin-button,
+  .text-mark-thickness::-webkit-outer-spin-button { margin: 0; appearance: none; }
+  .text-mark-thickness { appearance: textfield; cursor: ew-resize; }
+
+  .text-redaction-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 9px;
+  }
+
+  .text-redaction-grid button {
+    height: 39px;
+    border: 1px solid #d7d7d7;
+    border-radius: 8px;
+    font: inherit;
+    font-size: 16px;
+    cursor: pointer;
+  }
+
+  .text-redaction-grid button { background: #f3f3f3; color: #111; transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease; }
 
   .selection-properties-scroll {
     min-height: 0;
@@ -7904,6 +8298,20 @@
 
   .redaction-layer rect.whiteout {
     fill: #fff;
+  }
+
+  .native-selection-layer {
+    z-index: 10;
+    overflow: visible;
+  }
+
+  .native-selection-layer rect {
+    fill: #1684f8;
+    fill-opacity: 0.42;
+    stroke: rgba(255, 255, 255, 0.92);
+    stroke-width: 0.65px;
+    paint-order: stroke fill;
+    vector-effect: non-scaling-stroke;
   }
 
   .shape-layer {
