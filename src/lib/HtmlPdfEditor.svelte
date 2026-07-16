@@ -1509,7 +1509,8 @@
     }
     const promotedBox = docuflexPromoteLineToTextBox(node);
     if (promotedBox) {
-      return docuflexOpenTextBoxEditor(promotedBox, 'preserve');
+      docuflexSelectTextBox(promotedBox);
+      return null;
     }
     docuflexPrepareForEditing(node);
     node.contentEditable = 'true';
@@ -2062,12 +2063,15 @@
     range.selectNodeContents(node);
     const contentRect = range.getBoundingClientRect();
     const text = docuflexVisibleText(node);
-    if (!pageRect.width || !pageRect.height || !rect.width || !rect.height || text.length <= 1) return null;
+    const visualWidth = Math.max(rect.width || 0, contentRect.width || 0);
+    const visualHeight = Math.max(rect.height || 0, contentRect.height || 0);
+    if (!pageRect.width || !pageRect.height || !visualWidth || !visualHeight || !text.length) return null;
     const style = getComputedStyle(node);
-    const left = Math.min(rect.left, contentRect.left || rect.left) - pageRect.left;
-    const top = Math.min(rect.top, contentRect.top || rect.top) - pageRect.top;
-    const right = Math.max(rect.right, contentRect.right || rect.right) - pageRect.left;
-    const bottom = Math.max(rect.bottom, contentRect.bottom || rect.bottom) - pageRect.top;
+    const bounds = [rect, contentRect].filter((candidate) => candidate.width > 0 && candidate.height > 0);
+    const left = Math.min(...bounds.map((candidate) => candidate.left)) - pageRect.left;
+    const top = Math.min(...bounds.map((candidate) => candidate.top)) - pageRect.top;
+    const right = Math.max(...bounds.map((candidate) => candidate.right)) - pageRect.left;
+    const bottom = Math.max(...bounds.map((candidate) => candidate.bottom)) - pageRect.top;
     return {
       node,
       page,
@@ -2078,9 +2082,9 @@
       top,
       right,
       bottom,
-      width: Math.max(rect.width, contentRect.width || 0),
-      height: Math.max(rect.height, contentRect.height || 0),
-      fontSize: rect.height,
+      width: visualWidth,
+      height: visualHeight,
+      fontSize: visualHeight,
       className: docuflexDominantFontClass(node),
       family: style.fontFamily || '',
       weight: style.fontWeight || '',
@@ -2160,17 +2164,34 @@
       .filter(Boolean)
       .sort((left, right) => left.top - right.top || left.left - right.left);
     const index = lines.findIndex((line) => line.node === node);
-    if (index < 0) return null;
-    let start = index;
-    let end = index;
-    while (start > 0 && docuflexLooseTextFlow(lines[start - 1], lines[start])) start -= 1;
-    while (end < lines.length - 1 && docuflexLooseTextFlow(lines[end], lines[end + 1])) end += 1;
-    const group = lines.slice(start, end + 1);
-    const candidates = group.length >= 2 ? group : [lines[index]];
-    if (!candidates.length) return null;
+    if (index < 0) {
+      const pageRect = page.getBoundingClientRect();
+      const fallbackElement = node.closest('.c') instanceof HTMLElement ? node.closest('.c') : node;
+      const fallbackRect = fallbackElement.getBoundingClientRect();
+      const text = docuflexVisibleText(node);
+      if (!pageRect.width || !pageRect.height || !fallbackRect.width || !fallbackRect.height || !text) return null;
+      const style = getComputedStyle(node);
+      return docuflexCreateTextBox([{
+        node,
+        page,
+        text,
+        htmlText: node.dataset.docuflexOriginalHtmlText || node.textContent || text,
+        id: node.dataset.docuflexEditId || '',
+        left: fallbackRect.left - pageRect.left,
+        top: fallbackRect.top - pageRect.top,
+        right: fallbackRect.right - pageRect.left,
+        bottom: fallbackRect.bottom - pageRect.top,
+        width: fallbackRect.width,
+        height: fallbackRect.height,
+        fontSize: fallbackRect.height,
+        className: docuflexDominantFontClass(node),
+        family: style.fontFamily || '',
+        weight: style.fontWeight || '',
+        color: style.color || ''
+      }], document.querySelectorAll('.docuflex-textbox').length);
+    }
     const boxIndex = document.querySelectorAll('.docuflex-textbox').length;
-    docuflexCreateTextBox(candidates, boxIndex);
-    return docuflexTextBoxForLine(node);
+    return docuflexCreateTextBox([lines[index]], boxIndex);
   };
   const docuflexBuildFlowGroups = (lines) => {
     const unused = new Set(lines);
@@ -2235,13 +2256,13 @@
   };
   const docuflexCreateTextBox = (lines, index) => {
     const page = lines[0]?.page;
-    if (!(page instanceof HTMLElement) || lines.length < 1) return;
+    if (!(page instanceof HTMLElement) || lines.length < 1) return null;
     const pageHeight = page.getBoundingClientRect().height || 0;
     if (pageHeight > 0) {
       const first = lines[0];
       const last = lines[lines.length - 1];
       const headerToBody = first.top < pageHeight * 0.16 && last.top > pageHeight * 0.22;
-      if (headerToBody) return;
+      if (headerToBody) return null;
     }
     const left = Math.min(...lines.map((line) => line.left));
     const top = Math.min(...lines.map((line) => line.top));
@@ -2463,6 +2484,7 @@
       docuflexGrowTextBoxToEditor(box);
       docuflexScheduleDirty(lines[0].node);
     });
+    return box;
   };
   const docuflexBuildTextBoxes = (targetPage = null) => {
     let boxIndex = document.querySelectorAll('.docuflex-textbox').length;
@@ -2474,8 +2496,11 @@
         .filter(Boolean)
         .sort((left, right) => left.top - right.top || left.left - right.left);
       const groups = docuflexBuildFlowGroups(lines);
-      const groupedLines = new Set(groups.flat());
-      groups.forEach((group) => docuflexCreateTextBox(group, boxIndex++));
+      const groupedLines = new Set();
+      groups.forEach((group) => {
+        const box = docuflexCreateTextBox(group, boxIndex++);
+        if (box) group.forEach((line) => groupedLines.add(line));
+      });
       lines
         .filter((line) => !groupedLines.has(line))
         .forEach((line) => docuflexCreateTextBox([line], boxIndex++));
@@ -2838,9 +2863,6 @@
       const node = docuflexActivate(event.target);
       if (node) node.focus({ preventScroll: true });
     }, true);
-    document.addEventListener('click', (event) => docuflexActivate(event.target), true);
-    document.addEventListener('focusin', (event) => docuflexActivate(event.target), true);
-    document.addEventListener('keyup', (event) => docuflexActivate(event.target), true);
     document.addEventListener('input', (event) => {
       const node = docuflexActivate(event.target);
       if (!node) return;
@@ -3007,7 +3029,8 @@
     box-sizing: border-box;
     min-height: inherit;
     white-space: pre-wrap;
-    overflow-wrap: break-word;
+    overflow-wrap: normal;
+    word-break: normal;
     outline: none;
     caret-color: #0d5aa7;
     pointer-events: auto !important;
@@ -3018,7 +3041,9 @@
     margin: 0;
     padding: 0;
     min-height: 1em;
-    white-space: pre-wrap;
+    white-space: pre;
+    overflow-wrap: normal;
+    word-break: normal;
   }
   .docuflex-textbox-rich-line * {
     line-height: inherit;
@@ -4006,7 +4031,13 @@ ${setupScript}`;
         const snapshot = snapshots[index];
         if (!snapshot || typeof snapshot !== 'object') return;
         Object.entries(snapshot).forEach(([property, value]) => {
-          if (typeof value === 'string') row.style.setProperty(property, value);
+          if (typeof value !== 'string') return;
+          row.style.setProperty(property, value);
+          if (property === 'font-family') {
+            row.querySelectorAll('*').forEach((child) => {
+              if (isIframeHtmlElement(child)) child.style.setProperty('font-family', value, 'important');
+            });
+          }
         });
       });
     } catch {
@@ -4052,6 +4083,11 @@ ${setupScript}`;
       if (isIframeHtmlElement(editor)) editor.style.setProperty(cssProperty, value);
       rows.forEach((row) => {
         row.style.setProperty(cssProperty, value);
+        if (property === 'fontFamily') {
+          row.querySelectorAll('*').forEach((child) => {
+            if (isIframeHtmlElement(child)) child.style.setProperty('font-family', value, 'important');
+          });
+        }
       });
       notifyHtmlTextboxRowsChanged(rows);
       return;
@@ -4530,7 +4566,6 @@ ${setupScript}`;
               {/if}
               <option value="Open Sans">Open Sans</option>
               <option value="Helvetica">Helvetica</option>
-              <option value="Arial">Arial</option>
               <option value="Times New Roman">Times New Roman</option>
               <option value="Georgia">Georgia</option>
               <option value="Courier New">Courier New</option>

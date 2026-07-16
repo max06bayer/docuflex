@@ -104,7 +104,7 @@
 </script>
 
 <div class="overlay-root" aria-hidden="true">
-  {#each pageFrames as frame (frame.page)}
+  {#each pageFrames as frame, frameIndex (`page-${Number.isFinite(Number(frame.page)) ? Number(frame.page) : frameIndex}`)}
     <svg
       class="page-overlay"
       style:left={`${frame.left}px`}
