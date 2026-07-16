@@ -44,6 +44,8 @@
   /** @type {number[]} */
   let pageDragPreviewOrder = [];
   let pageDragInsertionIndex = 0;
+  /** @type {number | null} */
+  let externalPdfDropIndex = null;
   /** @type {{ pointerId: number; pageIndex: number; startX: number; startY: number; clientX: number; clientY: number; offsetX: number; offsetY: number; width: number; height: number; uiScale: number; imageUrl: string; active: boolean } | null} */
   let pagePointerDrag = null;
   /** @type {(() => void) | null} */
@@ -5310,6 +5312,98 @@
     }
   }
 
+  /** @param {DataTransfer | null} transfer */
+  function transferMayContainPdf(transfer) {
+    if (!transfer) return false;
+    const fileItems = [...transfer.items].filter((item) => item.kind === 'file');
+    if (fileItems.some((item) => item.type === 'application/pdf')) return true;
+    return fileItems.some((item) => !item.type) || [...transfer.types].includes('Files');
+  }
+
+  /** @param {DragEvent} event @param {number} insertAt */
+  function showExternalPdfDropTarget(event, insertAt) {
+    if (pageOperationBusy || !transferMayContainPdf(event.dataTransfer)) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+    externalPdfDropIndex = insertAt;
+  }
+
+  /** @param {DragEvent} event @param {number} insertAt */
+  function hideExternalPdfDropTarget(event, insertAt) {
+    const nextTarget = event.relatedTarget;
+    if (nextTarget instanceof Node && event.currentTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
+    if (externalPdfDropIndex === insertAt) externalPdfDropIndex = null;
+  }
+
+  /** @param {DragEvent} event */
+  function handleExternalPdfSidebarDrag(event) {
+    if (pageOperationBusy || !transferMayContainPdf(event.dataTransfer)) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+    const sidebar = event.currentTarget;
+    if (!(sidebar instanceof HTMLElement)) return;
+    const rect = sidebar.getBoundingClientRect();
+    const scrollZone = Math.min(150, rect.height * 0.2);
+    const topDistance = event.clientY - rect.top;
+    const bottomDistance = rect.bottom - event.clientY;
+    if (topDistance < scrollZone) sidebar.scrollTop -= Math.max(5, 24 * (1 - Math.max(0, topDistance) / scrollZone));
+    else if (bottomDistance < scrollZone) sidebar.scrollTop += Math.max(5, 24 * (1 - Math.max(0, bottomDistance) / scrollZone));
+  }
+
+  /** @param {File} droppedFile @param {number} insertAt */
+  async function insertDroppedPdf(droppedFile, insertAt) {
+    if (pageOperationBusy) return;
+    const scrollState = capturePageScrollState();
+    pageOperationBusy = true;
+    editorTransition = 'Adding PDF Pages';
+    try {
+      const droppedBytes = await droppedFile.arrayBuffer();
+      const pdfjs = await import('pdfjs-dist');
+      const inspectionTask = pdfjs.getDocument({ data: droppedBytes.slice(0) });
+      const droppedDocument = await inspectionTask.promise;
+      const insertedCount = droppedDocument.numPages;
+      await droppedDocument.destroy();
+      if (!insertedCount) throw new Error('The dropped PDF does not contain any pages.');
+
+      const result = await requestPageOperation('insert', {
+        insertAt,
+        insertPdfBase64: arrayBufferToBase64(droppedBytes)
+      });
+      const emptyInsertedRecords = Array.from({ length: insertedCount }, () => []);
+      annotations = insertPageRecords(annotations, insertAt, emptyInsertedRecords);
+      shapes = insertPageRecords(shapes, insertAt, emptyInsertedRecords);
+      textHighlights = insertPageRecords(textHighlights, insertAt, emptyInsertedRecords);
+      const nextPageCount = pageCount + insertedCount;
+      workingFile = new File([result], workingFile.name, { type: 'application/pdf', lastModified: Date.now() });
+      htmlEditorStarted = false;
+      htmlEditorReady = false;
+      htmlViewportMode = false;
+      await loadPdf(false, true, nextPageCount);
+      await restorePageScrollState(scrollState);
+      selectedPages = new Set(Array.from({ length: insertedCount }, (_, offset) => insertAt + offset));
+      selectionAnchor = insertAt;
+    } catch (error) {
+      console.error(error);
+      window.alert(error instanceof Error ? error.message : 'Could not add the dropped PDF.');
+    } finally {
+      externalPdfDropIndex = null;
+      pageOperationBusy = false;
+      editorTransition = '';
+    }
+  }
+
+  /** @param {DragEvent} event @param {number} insertAt */
+  function dropExternalPdf(event, insertAt) {
+    if (pageOperationBusy) return;
+    event.preventDefault();
+    event.stopPropagation();
+    externalPdfDropIndex = null;
+    const droppedFile = [...(event.dataTransfer?.files ?? [])].find((candidate) =>
+      candidate.type === 'application/pdf' || candidate.name.toLowerCase().endsWith('.pdf')
+    );
+    if (droppedFile) void insertDroppedPdf(droppedFile, insertAt);
+  }
+
   async function deleteSelectedPages() {
     const removed = new Set(selectedPageIndexes());
     if (!removed.size || removed.size >= pageCount || pageOperationBusy) return;
@@ -5625,7 +5719,15 @@
   });
 </script>
 
-<aside class="editor-sidebar" aria-label="PDF pages">
+<aside
+  class="editor-sidebar"
+  aria-label="PDF pages"
+  ondragover={handleExternalPdfSidebarDrag}
+  ondragleave={(event) => {
+    const nextTarget = event.relatedTarget;
+    if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) externalPdfDropIndex = null;
+  }}
+>
   <div class="thumbnail-list">
     {#each (pageDragPreviewOrder.length ? pageDragPreviewOrder : Array.from({ length: pageCount }, (_, index) => index)) as index (index)}
       <div
@@ -5651,7 +5753,17 @@
             <span class="thumbnail-watermark">{appliedWatermarkText}</span>
           {/if}
         </button>
-        {#if index < pageCount - 1}<div class="page-separator"></div>{/if}
+        {#if index < pageCount - 1}
+          <div
+            class:pdf-drop-target={externalPdfDropIndex === index + 1}
+            class="page-separator"
+            role="presentation"
+            ondragenter={(event) => showExternalPdfDropTarget(event, index + 1)}
+            ondragover={(event) => showExternalPdfDropTarget(event, index + 1)}
+            ondragleave={(event) => hideExternalPdfDropTarget(event, index + 1)}
+            ondrop={(event) => dropExternalPdf(event, index + 1)}
+          ></div>
+        {/if}
       </div>
     {/each}
   </div>
@@ -7361,10 +7473,51 @@
   }
 
   .page-separator {
+    position: relative;
     width: 100%;
+    height: 46.2px;
+    margin: 0;
+  }
+
+  .page-separator::before {
+    position: absolute;
+    top: 20px;
+    right: 0;
+    left: 0;
     height: 1.2px;
-    margin: 20px 0 25px;
     background: #d5d5d5;
+    content: '';
+    transition: height 140ms ease, background-color 140ms ease, box-shadow 140ms ease;
+  }
+
+  .page-separator::after {
+    position: absolute;
+    top: 20.6px;
+    left: 50%;
+    box-sizing: border-box;
+    width: 24px;
+    height: 24px;
+    border-radius: 999px;
+    background:
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M5 11h14M12 4v14' fill='none' stroke='white' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E") center / 24px 24px no-repeat,
+      #1684f8;
+    box-shadow: 0 2px 7px rgba(22, 132, 248, 0.28);
+    content: '';
+    opacity: 0;
+    pointer-events: none;
+    transform: translate(-50%, -50%) scale(0.72);
+    transition: opacity 140ms ease, transform 170ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+
+  .page-separator.pdf-drop-target::before {
+    height: 2px;
+    background: #1684f8;
+    box-shadow: 0 0 0 0.5px rgba(22, 132, 248, 0.12);
+  }
+
+  .page-separator.pdf-drop-target::after {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
   }
 
   .page-context-menu {
