@@ -1,7 +1,8 @@
 <script>
   import { onDestroy, onMount, tick } from 'svelte';
   import { cubicOut } from 'svelte/easing';
-  import { fade, fly } from 'svelte/transition';
+  import { flip } from 'svelte/animate';
+  import { fade, fly, scale } from 'svelte/transition';
   import EditorToolbar from '$lib/EditorToolbar.svelte';
   import HtmlPdfEditor from '$lib/HtmlPdfEditor.svelte';
 
@@ -34,6 +35,21 @@
   let selectedPages = new Set();
   /** @type {number | null} */
   let selectionAnchor = null;
+  /** @type {{ x: number; y: number; pageIndex: number } | null} */
+  let pageContextMenu = null;
+  /** @type {{ pdfBase64: string; annotations: AnnotationStroke[][]; shapes: AnnotationShape[][]; textHighlights: TextHighlight[][] } | null} */
+  let pageClipboard = null;
+  /** @type {number[]} */
+  let draggedPages = [];
+  /** @type {number[]} */
+  let pageDragPreviewOrder = [];
+  let pageDragInsertionIndex = 0;
+  /** @type {{ pointerId: number; pageIndex: number; startX: number; startY: number; clientX: number; clientY: number; offsetX: number; offsetY: number; width: number; height: number; uiScale: number; imageUrl: string; active: boolean } | null} */
+  let pagePointerDrag = null;
+  /** @type {(() => void) | null} */
+  let pageDragCleanup = null;
+  let ignoreNextPageClick = false;
+  let pageOperationBusy = false;
   let status = 'Rendering PDF…';
   let loadGeneration = 0;
   /** @type {import('pdfjs-dist/web/pdf_viewer.mjs').TextLayerBuilder[]} */
@@ -1512,6 +1528,13 @@
       textSelectionStartedOnPage = false;
     }
 
+    /** @param {Element} target */
+    function usesRotatedTextGeometry(target) {
+      const page = target.closest('.pdf-page');
+      const rotation = Number(page instanceof HTMLElement ? page.dataset.pageRotation : 0);
+      return Number.isFinite(rotation) && ((rotation % 360) + 360) % 360 !== 0;
+    }
+
     /** @param {MouseEvent} event */
     function beginProductionCharacterDrag(event) {
       if (!isTextSelectionTool() || event.button !== 0 || event.detail !== 1) return;
@@ -1525,6 +1548,9 @@
         productionLineBounds = null;
         return;
       }
+      // PDF.js already maps selection correctly for rotated text. The custom
+      // horizontal drag correction below is only valid for unrotated pages.
+      if (usesRotatedTextGeometry(target)) return;
 
       const caret = caretFromPoint(event.clientX, event.clientY);
       if (!caret) return;
@@ -1686,6 +1712,7 @@
       if (!isTextSelectionTool()) return;
       const target = event.target;
       if (event.detail !== 2 || !(target instanceof Element) || !target.closest('.textLayer span')) return;
+      if (usesRotatedTextGeometry(target)) return;
 
       const caret = caretFromPoint(event.clientX, event.clientY);
       const node = caret?.node;
@@ -1806,6 +1833,7 @@
     /** @param {MouseEvent} event */
     function clearPageSelection(event) {
       const target = event.target;
+      if (target instanceof Element && target.closest('.page-context-menu')) return;
       if (!(target instanceof Element) || !target.closest('.thumbnail-page')) {
         selectedPages = new Set();
         selectionAnchor = null;
@@ -1822,6 +1850,14 @@
         !target.closest('.textLayer span')
       ) {
         window.getSelection()?.removeAllRanges();
+      }
+    }
+
+    /** @param {PointerEvent} event */
+    function closePageContextMenu(event) {
+      const target = event.target;
+      if (pageContextMenu && (!(target instanceof Element) || !target.closest('.page-context-menu'))) {
+        pageContextMenu = null;
       }
     }
 
@@ -1862,7 +1898,9 @@
     document.addEventListener('mouseup', clearTextSelectionOrigin);
     document.addEventListener('dragstart', suppressProductionBlankDrag);
     document.addEventListener('click', clearPageSelection);
+    document.addEventListener('pointerdown', closePageContextMenu);
     document.addEventListener('pointerdown', commitTextFieldOnOutsidePointer, true);
+    window.addEventListener('keydown', handlePageMenuShortcut, true);
     window.addEventListener('keydown', updateZoomCursor);
     window.addEventListener('keydown', handleShapeKeyboard);
     window.addEventListener('keydown', handleHistoryShortcut);
@@ -1887,7 +1925,9 @@
       document.removeEventListener('mouseup', clearTextSelectionOrigin);
       document.removeEventListener('dragstart', suppressProductionBlankDrag);
       document.removeEventListener('click', clearPageSelection);
+      document.removeEventListener('pointerdown', closePageContextMenu);
       document.removeEventListener('pointerdown', commitTextFieldOnOutsidePointer, true);
+      window.removeEventListener('keydown', handlePageMenuShortcut, true);
       window.removeEventListener('keydown', updateZoomCursor);
       window.removeEventListener('keydown', handleShapeKeyboard);
       window.removeEventListener('keydown', handleHistoryShortcut);
@@ -4608,8 +4648,8 @@
     }
   }
 
-  /** @param {boolean} [resetAnnotations] */
-  async function loadPdf(resetAnnotations = true) {
+  /** @param {boolean} [resetAnnotations] @param {boolean} [preservePageLayout] @param {number | null} [expectedPageCount] */
+  async function loadPdf(resetAnnotations = true, preservePageLayout = false, expectedPageCount = null) {
     const generation = ++loadGeneration;
     status = 'Rendering PDF…';
     pdfReady = false;
@@ -4627,7 +4667,8 @@
     shapeInteraction = null;
     shapeGuides = null;
     pageSizes = {};
-    pageCount = 0;
+    if (preservePageLayout && typeof expectedPageCount === 'number' && Number.isInteger(expectedPageCount) && expectedPageCount >= 0) pageCount = expectedPageCount;
+    else if (!preservePageLayout) pageCount = 0;
     selectedPages = new Set();
     selectionAnchor = null;
     textLayerBuilders.forEach((builder) => builder.cancel());
@@ -4705,6 +4746,7 @@
 
       shell.style.width = `${viewport.width}px`;
       shell.style.height = `${viewport.height}px`;
+      shell.dataset.pageRotation = `${((viewport.rotation % 360) + 360) % 360}`;
       pageSizes = { ...pageSizes, [index]: { width: viewport.width, height: viewport.height } };
       if (loadFormWidgets) {
         const pageAnnotations = await page.getAnnotations({ intent: 'display' });
@@ -4761,7 +4803,9 @@
         }).promise,
         textLayerBuilder.render({ viewport, images: /** @type {any} */ (null) })
       ]);
-      if (!ocrTextLayerActive) mergeAdjacentTextSpans(textLayerBuilder.div);
+      if (!ocrTextLayerActive && ((viewport.rotation % 360) + 360) % 360 === 0) {
+        mergeAdjacentTextSpans(textLayerBuilder.div);
+      }
     }
   }
 
@@ -4878,7 +4922,522 @@
     }
 
     if (htmlViewportActive()) htmlEditor?.scrollToPage?.(pageIndex);
-    else viewer?.querySelectorAll('.pdf-page')[pageIndex]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    else scrollViewerToPage(pageIndex);
+  }
+
+  /** @param {number} pageIndex */
+  function scrollViewerToPage(pageIndex) {
+    const page = viewer?.querySelectorAll('.pdf-page')[pageIndex];
+    if (!viewer || !(page instanceof HTMLElement)) return;
+    const viewerRect = viewer.getBoundingClientRect();
+    const pageRect = page.getBoundingClientRect();
+    viewer.scrollTo({
+      top: Math.max(0, viewer.scrollTop + pageRect.top - viewerRect.top - 24),
+      left: viewer.scrollLeft,
+      behavior: 'smooth'
+    });
+  }
+
+  function capturePageScrollState() {
+    const sidebar = document.querySelector('.editor-sidebar');
+    return {
+      sidebarTop: sidebar instanceof HTMLElement ? sidebar.scrollTop : 0,
+      viewerTop: viewer?.scrollTop ?? 0,
+      viewerLeft: viewer?.scrollLeft ?? 0
+    };
+  }
+
+  /** @param {{ sidebarTop: number; viewerTop: number; viewerLeft: number }} state */
+  async function restorePageScrollState(state) {
+    await tick();
+    const sidebar = document.querySelector('.editor-sidebar');
+    if (sidebar instanceof HTMLElement) sidebar.scrollTop = state.sidebarTop;
+    if (viewer) {
+      viewer.scrollTop = state.viewerTop;
+      viewer.scrollLeft = state.viewerLeft;
+    }
+  }
+
+  /** @param {MouseEvent} event @param {number} pageIndex */
+  function openPageContextMenu(event, pageIndex) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!selectedPages.has(pageIndex)) {
+      selectedPages = new Set([pageIndex]);
+      selectionAnchor = pageIndex;
+    }
+    const menuWidth = 204;
+    const menuHeight = 252;
+    pageContextMenu = {
+      pageIndex,
+      x: Math.max(10, Math.min(event.clientX, window.innerWidth - menuWidth - 10)),
+      y: Math.max(10, Math.min(event.clientY, window.innerHeight - menuHeight - 10))
+    };
+  }
+
+  function selectedPageIndexes() {
+    return [...selectedPages].sort((left, right) => left - right);
+  }
+
+  /** @param {number} pageIndex @param {MouseEvent} event */
+  function handlePageClick(pageIndex, event) {
+    if (ignoreNextPageClick) {
+      ignoreNextPageClick = false;
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    selectPage(pageIndex, event);
+  }
+
+  /** @param {number} insertionIndex */
+  function updatePageDragPreview(insertionIndex) {
+    const remaining = Array.from({ length: pageCount }, (_, pageIndex) => pageIndex).filter((pageIndex) => !draggedPages.includes(pageIndex));
+    const boundedIndex = Math.max(0, Math.min(insertionIndex, remaining.length));
+    pageDragInsertionIndex = boundedIndex;
+    const nextOrder = [...remaining.slice(0, boundedIndex), ...draggedPages, ...remaining.slice(boundedIndex)];
+    if (!nextOrder.every((pageIndex, orderIndex) => pageDragPreviewOrder[orderIndex] === pageIndex)) {
+      pageDragPreviewOrder = nextOrder;
+    }
+  }
+
+  /** @param {PointerEvent} event @param {number} pageIndex */
+  function beginPagePointerDrag(event, pageIndex) {
+    if (event.button !== 0 || pageOperationBusy) return;
+    pageDragCleanup?.();
+    draggedPages = selectedPages.has(pageIndex) ? selectedPageIndexes() : [pageIndex];
+    pageContextMenu = null;
+    const button = event.currentTarget;
+    if (!(button instanceof HTMLElement)) return;
+    const rect = button.getBoundingClientRect();
+    const uiScale = rect.width / Math.max(1, button.offsetWidth);
+    const canvas = button.querySelector('canvas');
+    let imageUrl = '';
+    try {
+      if (canvas instanceof HTMLCanvasElement) imageUrl = canvas.toDataURL('image/png');
+    } catch (error) {
+      console.warn('Could not create the page drag preview:', error);
+    }
+    pagePointerDrag = {
+      pointerId: event.pointerId,
+      pageIndex,
+      startX: event.clientX,
+      startY: event.clientY,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+      width: button.offsetWidth,
+      height: button.offsetHeight,
+      uiScale: Number.isFinite(uiScale) && uiScale > 0 ? uiScale : 1,
+      imageUrl,
+      active: false
+    };
+    /** @type {number | undefined} */
+    let pageAutoScrollFrame;
+    let pageAutoScrollSpeed = 0;
+
+    /** @param {number} clientY */
+    function updatePageInsertionAt(clientY) {
+      if (!pagePointerDrag?.active) return;
+      const remaining = Array.from({ length: pageCount }, (_, pageIndex) => pageIndex).filter((candidate) => !draggedPages.includes(candidate));
+
+      /** @param {number} page */
+      function stablePageCenter(page) {
+        const entry = document.querySelector(`.thumbnail-entry[data-page-index="${page}"]`);
+        if (!(entry instanceof HTMLElement)) return null;
+        const rect = entry.getBoundingClientRect();
+        const transform = getComputedStyle(entry).transform;
+        let translateY = 0;
+        try {
+          if (transform && transform !== 'none') translateY = new DOMMatrixReadOnly(transform).m42;
+        } catch {
+          translateY = 0;
+        }
+        return rect.top - translateY + rect.height / 2;
+      }
+
+      let insertionIndex = pageDragInsertionIndex;
+      const hysteresis = 18;
+      while (insertionIndex < remaining.length) {
+        const nextCenter = stablePageCenter(remaining[insertionIndex]);
+        if (nextCenter === null || clientY <= nextCenter + hysteresis) break;
+        insertionIndex += 1;
+      }
+      while (insertionIndex > 0) {
+        const previousCenter = stablePageCenter(remaining[insertionIndex - 1]);
+        if (previousCenter === null || clientY >= previousCenter - hysteresis) break;
+        insertionIndex -= 1;
+      }
+      if (insertionIndex !== pageDragInsertionIndex) updatePageDragPreview(insertionIndex);
+    }
+
+    function runPageAutoScroll() {
+      if (!pagePointerDrag?.active) return;
+      const sidebar = document.querySelector('.editor-sidebar');
+      if (sidebar instanceof HTMLElement && pageAutoScrollSpeed !== 0) {
+        sidebar.scrollTop += pageAutoScrollSpeed;
+        updatePageInsertionAt(pagePointerDrag.clientY);
+      }
+      pageAutoScrollFrame = requestAnimationFrame(runPageAutoScroll);
+    }
+
+    /** @param {PointerEvent} moveEvent */
+    function movePagePointerDrag(moveEvent) {
+      if (!pagePointerDrag || moveEvent.pointerId !== pagePointerDrag.pointerId) return;
+      const distance = Math.hypot(moveEvent.clientX - pagePointerDrag.startX, moveEvent.clientY - pagePointerDrag.startY);
+      if (!pagePointerDrag.active && distance < 6) return;
+      if (!pagePointerDrag.active) {
+        if (!selectedPages.has(pageIndex)) {
+          selectedPages = new Set([pageIndex]);
+          selectionAnchor = pageIndex;
+        }
+        const remainingBeforePage = Array.from({ length: pageCount }, (_, candidate) => candidate)
+          .filter((candidate) => !draggedPages.includes(candidate) && candidate < draggedPages[0]).length;
+        pageDragInsertionIndex = remainingBeforePage;
+        updatePageDragPreview(remainingBeforePage);
+        document.documentElement.classList.add('page-dragging');
+        pageAutoScrollFrame = requestAnimationFrame(runPageAutoScroll);
+      }
+      moveEvent.preventDefault();
+      pagePointerDrag = { ...pagePointerDrag, clientX: moveEvent.clientX, clientY: moveEvent.clientY, active: true };
+
+      const sidebar = document.querySelector('.editor-sidebar');
+      if (sidebar instanceof HTMLElement) {
+        const sidebarRect = sidebar.getBoundingClientRect();
+        const scrollZone = Math.min(190, sidebarRect.height * 0.24);
+        const topDistance = moveEvent.clientY - sidebarRect.top;
+        const bottomDistance = sidebarRect.bottom - moveEvent.clientY;
+        if (topDistance < scrollZone) {
+          pageAutoScrollSpeed = -Math.max(2, 34 * (1 - Math.max(0, topDistance) / scrollZone));
+        } else if (bottomDistance < scrollZone) {
+          pageAutoScrollSpeed = Math.max(2, 34 * (1 - Math.max(0, bottomDistance) / scrollZone));
+        } else {
+          pageAutoScrollSpeed = 0;
+        }
+      }
+      updatePageInsertionAt(moveEvent.clientY);
+    }
+
+    /** @param {PointerEvent} endEvent */
+    function finishPagePointerDrag(endEvent) {
+      if (!pagePointerDrag || endEvent.pointerId !== pagePointerDrag.pointerId) return;
+      const wasActive = pagePointerDrag.active;
+      const dragged = [...draggedPages].sort((left, right) => left - right);
+      const order = pageDragPreviewOrder.length ? [...pageDragPreviewOrder] : [];
+      pageDragCleanup?.();
+      if (!wasActive || !order.length) return;
+      ignoreNextPageClick = true;
+      window.setTimeout(() => { ignoreNextPageClick = false; }, 0);
+      const nextSelection = new Set(dragged.map((page) => order.indexOf(page)));
+      if (!order.every((page, index) => page === index)) {
+        pageDragPreviewOrder = order;
+        void reorderPages(order, nextSelection);
+      }
+    }
+
+    pageDragCleanup = () => {
+      window.removeEventListener('pointermove', movePagePointerDrag);
+      window.removeEventListener('pointerup', finishPagePointerDrag);
+      window.removeEventListener('pointercancel', finishPagePointerDrag);
+      if (pageAutoScrollFrame !== undefined) cancelAnimationFrame(pageAutoScrollFrame);
+      document.documentElement.classList.remove('page-dragging');
+      pagePointerDrag = null;
+      draggedPages = [];
+      pageDragPreviewOrder = [];
+      pageDragInsertionIndex = 0;
+      pageDragCleanup = null;
+    };
+    window.addEventListener('pointermove', movePagePointerDrag, { passive: false });
+    window.addEventListener('pointerup', finishPagePointerDrag);
+    window.addEventListener('pointercancel', finishPagePointerDrag);
+  }
+
+  /** @param {string} operation @param {Record<string, unknown>} details @param {ArrayBuffer | null} [source] */
+  async function requestPageOperation(operation, details, source = null) {
+    const bytes = source ?? await workingFile.arrayBuffer();
+    const response = await fetch('/api/pdf/pages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pdfBase64: arrayBufferToBase64(bytes), operation, ...details })
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => null);
+      throw new Error(error?.error ?? `Page operation failed (${response.status}).`);
+    }
+    return response.arrayBuffer();
+  }
+
+  /** @template T @param {Record<number, T[]>} records @param {number[]} order */
+  function reorderPageRecords(records, order) {
+    return Object.fromEntries(order.flatMap((oldIndex, newIndex) =>
+      records[oldIndex]?.length ? [[newIndex, records[oldIndex]]] : []
+    ));
+  }
+
+  /** @template T @param {Record<number, T[]>} records @param {number} insertAt @param {T[][]} inserted @returns {Record<number, T[]>} */
+  function insertPageRecords(records, insertAt, inserted) {
+    /** @type {Record<number, T[]>} */
+    const result = {};
+    for (let oldIndex = 0; oldIndex < pageCount; oldIndex += 1) {
+      const newIndex = oldIndex < insertAt ? oldIndex : oldIndex + inserted.length;
+      if (records[oldIndex]?.length) result[newIndex] = records[oldIndex];
+    }
+    inserted.forEach((pageRecords, offset) => {
+      if (pageRecords?.length) result[insertAt + offset] = structuredClone(pageRecords);
+    });
+    return result;
+  }
+
+  /** @param {number[]} order @param {Set<number>} nextSelection */
+  async function reorderPages(order, nextSelection) {
+    const sidebar = document.querySelector('.editor-sidebar');
+    const sidebarScrollTop = sidebar instanceof HTMLElement ? sidebar.scrollTop : 0;
+    const viewerScrollTop = viewer?.scrollTop ?? 0;
+    const viewerScrollLeft = viewer?.scrollLeft ?? 0;
+    pageOperationBusy = true;
+    editorTransition = 'Reordering Pages';
+    try {
+      const result = await requestPageOperation('reorder', { order });
+      annotations = reorderPageRecords(annotations, order);
+      shapes = reorderPageRecords(shapes, order);
+      textHighlights = reorderPageRecords(textHighlights, order);
+      workingFile = new File([result], workingFile.name, { type: 'application/pdf', lastModified: Date.now() });
+      htmlEditorStarted = false;
+      htmlEditorReady = false;
+      htmlViewportMode = false;
+      await loadPdf(false, true, order.length);
+      /** @type {{ canvas: HTMLCanvasElement; cssWidth: string; cssHeight: string; shellHeight: string }[]} */
+      const thumbnailFrames = [...document.querySelectorAll('.thumbnail-page')].flatMap((shell) => {
+        const canvas = shell.querySelector('canvas');
+        if (!(shell instanceof HTMLElement) || !(canvas instanceof HTMLCanvasElement)) return [];
+        const copy = document.createElement('canvas');
+        copy.width = canvas.width;
+        copy.height = canvas.height;
+        copy.getContext('2d')?.drawImage(canvas, 0, 0);
+        return [{
+          canvas: copy,
+          cssWidth: canvas.style.width,
+          cssHeight: canvas.style.height,
+          shellHeight: shell.style.height
+        }];
+      });
+      pageDragPreviewOrder = [];
+      await tick();
+      const normalizedShells = [...document.querySelectorAll('.thumbnail-page')];
+      thumbnailFrames.forEach((frame, index) => {
+        const shell = normalizedShells[index];
+        const canvas = shell?.querySelector('canvas');
+        if (!(shell instanceof HTMLElement) || !(canvas instanceof HTMLCanvasElement)) return;
+        shell.style.height = frame.shellHeight;
+        canvas.width = frame.canvas.width;
+        canvas.height = frame.canvas.height;
+        canvas.style.width = frame.cssWidth;
+        canvas.style.height = frame.cssHeight;
+        canvas.getContext('2d')?.drawImage(frame.canvas, 0, 0);
+      });
+      const restoredSidebar = document.querySelector('.editor-sidebar');
+      if (restoredSidebar instanceof HTMLElement) restoredSidebar.scrollTop = sidebarScrollTop;
+      if (viewer) {
+        viewer.scrollTop = viewerScrollTop;
+        viewer.scrollLeft = viewerScrollLeft;
+      }
+      selectedPages = nextSelection;
+      selectionAnchor = [...nextSelection][0] ?? null;
+    } catch (error) {
+      console.error(error);
+      pageDragPreviewOrder = [];
+      window.alert(error instanceof Error ? error.message : 'Could not reorder the pages.');
+    } finally {
+      pageOperationBusy = false;
+      editorTransition = '';
+    }
+  }
+
+  async function copySelectedPages() {
+    const pages = selectedPageIndexes();
+    if (!pages.length || pageOperationBusy) return;
+    pageOperationBusy = true;
+    try {
+      const result = await requestPageOperation('extract', { pages });
+      pageClipboard = {
+        pdfBase64: arrayBufferToBase64(result),
+        annotations: pages.map((page) => structuredClone(annotations[page] ?? [])),
+        shapes: pages.map((page) => structuredClone(shapes[page] ?? [])),
+        textHighlights: pages.map((page) => structuredClone(textHighlights[page] ?? []))
+      };
+      pageContextMenu = null;
+    } catch (error) {
+      console.error(error);
+      window.alert(error instanceof Error ? error.message : 'Could not copy the pages.');
+    } finally {
+      pageOperationBusy = false;
+    }
+  }
+
+  async function pastePages() {
+    if (!pageClipboard || pageOperationBusy) return;
+    const scrollState = capturePageScrollState();
+    const selected = selectedPageIndexes();
+    const insertAt = selected.length ? selected[selected.length - 1] + 1 : pageCount;
+    pageContextMenu = null;
+    pageOperationBusy = true;
+    editorTransition = 'Pasting Pages';
+    try {
+      const result = await requestPageOperation('insert', {
+        insertAt,
+        insertPdfBase64: pageClipboard.pdfBase64
+      });
+      annotations = insertPageRecords(annotations, insertAt, pageClipboard.annotations);
+      shapes = insertPageRecords(shapes, insertAt, pageClipboard.shapes);
+      textHighlights = insertPageRecords(textHighlights, insertAt, pageClipboard.textHighlights);
+      const insertedCount = pageClipboard.annotations.length;
+      const nextPageCount = pageCount + insertedCount;
+      workingFile = new File([result], workingFile.name, { type: 'application/pdf', lastModified: Date.now() });
+      htmlEditorStarted = false;
+      htmlEditorReady = false;
+      htmlViewportMode = false;
+      await loadPdf(false, true, nextPageCount);
+      await restorePageScrollState(scrollState);
+      selectedPages = new Set(Array.from({ length: insertedCount }, (_, offset) => insertAt + offset));
+      selectionAnchor = insertAt;
+    } catch (error) {
+      console.error(error);
+      window.alert(error instanceof Error ? error.message : 'Could not paste the pages.');
+    } finally {
+      pageOperationBusy = false;
+      editorTransition = '';
+    }
+  }
+
+  async function deleteSelectedPages() {
+    const removed = new Set(selectedPageIndexes());
+    if (!removed.size || removed.size >= pageCount || pageOperationBusy) return;
+    pageContextMenu = null;
+    const order = Array.from({ length: pageCount }, (_, index) => index).filter((index) => !removed.has(index));
+    const nearest = Math.min(order.length - 1, Math.min(...removed));
+    await reorderPages(order, new Set([nearest]));
+  }
+
+  /** @param {number} degrees */
+  async function rotateSelectedPages(degrees) {
+    const pages = selectedPageIndexes();
+    if (!pages.length || pageOperationBusy) return;
+    const scrollState = capturePageScrollState();
+    pageContextMenu = null;
+    pageOperationBusy = true;
+    editorTransition = degrees > 0 ? 'Rotating Pages Right' : 'Rotating Pages Left';
+    try {
+      const result = await requestPageOperation('rotate', { pages, rotation: degrees });
+      const selected = new Set(pages);
+      /** @param {{ x: number; y: number }} point @param {{ width: number; height: number }} pageSize */
+      const rotatePoint = (point, pageSize) => degrees > 0
+        ? { ...point, x: pageSize.height - point.y, y: point.x }
+        : { ...point, x: point.y, y: pageSize.width - point.x };
+      annotations = Object.fromEntries(Object.entries(annotations).map(([page, strokes]) => {
+        const pageIndex = Number(page);
+        const size = pageSizes[pageIndex];
+        if (!selected.has(pageIndex) || !size) return [page, strokes];
+        return [page, strokes.map((stroke) => ({
+          ...stroke,
+          points: stroke.points.map((point) => rotatePoint(point, size)),
+          rawPoints: stroke.rawPoints?.map((point) => rotatePoint(point, size))
+        }))];
+      }));
+      shapes = Object.fromEntries(Object.entries(shapes).map(([page, pageShapes]) => {
+        const pageIndex = Number(page);
+        const size = pageSizes[pageIndex];
+        if (!selected.has(pageIndex) || !size) return [page, pageShapes];
+        return [page, pageShapes.map((shape) => {
+          const center = rotatePoint({ x: shape.x + shape.width / 2, y: shape.y + shape.height / 2 }, size);
+          return {
+            ...shape,
+            x: center.x - shape.height / 2,
+            y: center.y - shape.width / 2,
+            width: shape.height,
+            height: shape.width,
+            rotation: (shape.rotation + degrees + 360) % 360
+          };
+        })];
+      }));
+      textHighlights = Object.fromEntries(Object.entries(textHighlights).map(([page, highlights]) => {
+        const pageIndex = Number(page);
+        const size = pageSizes[pageIndex];
+        if (!selected.has(pageIndex) || !size) return [page, highlights];
+        return [page, highlights.map((highlight) => ({
+          ...highlight,
+          rects: highlight.rects.map((rect) => {
+            const center = rotatePoint({ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }, size);
+            return { ...rect, x: center.x - rect.height / 2, y: center.y - rect.width / 2, width: rect.height, height: rect.width };
+          })
+        }))];
+      }));
+      workingFile = new File([result], workingFile.name, { type: 'application/pdf', lastModified: Date.now() });
+      htmlEditorStarted = false;
+      htmlEditorReady = false;
+      htmlViewportMode = false;
+      await loadPdf(false, true, pageCount);
+      await restorePageScrollState(scrollState);
+      selectedPages = new Set(pages);
+      selectionAnchor = pages[0] ?? null;
+    } catch (error) {
+      console.error(error);
+      window.alert(error instanceof Error ? error.message : 'Could not rotate the pages.');
+    } finally {
+      pageOperationBusy = false;
+      editorTransition = '';
+    }
+  }
+
+  async function exportSelectedPages() {
+    const pages = selectedPageIndexes();
+    if (!pages.length || pageOperationBusy) return;
+    pageContextMenu = null;
+    pageOperationBusy = true;
+    editorTransition = 'Exporting Pages';
+    try {
+      let sourcePdf = await workingFile.arrayBuffer();
+      if (htmlEditorStarted && htmlEditor?.applyTextEdits) sourcePdf = await htmlEditor.applyTextEdits(sourcePdf);
+      const annotatedResponse = await fetch('/api/pdf/export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pdfBase64: arrayBufferToBase64(sourcePdf), annotations: exportableAnnotations(), encryptionPassword: '' })
+      });
+      if (!annotatedResponse.ok) throw new Error('Could not prepare the selected pages for export.');
+      const result = await requestPageOperation('extract', { pages }, await annotatedResponse.arrayBuffer());
+      const blob = new Blob([result], { type: 'application/pdf' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `${workingFile.name.replace(/\.pdf$/i, '') || 'document'}-pages-${pages.map((page) => page + 1).join('-')}.pdf`;
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      console.error(error);
+      window.alert(error instanceof Error ? error.message : 'Could not export the pages.');
+    } finally {
+      pageOperationBusy = false;
+      editorTransition = '';
+    }
+  }
+
+  /** @param {KeyboardEvent} event */
+  function handlePageMenuShortcut(event) {
+    if (!pageContextMenu || event.metaKey || event.ctrlKey || event.altKey) return;
+    const target = event.target;
+    if (target instanceof HTMLElement && (target.matches('input, textarea, select') || target.isContentEditable)) return;
+    const key = event.key.toLowerCase();
+    const action = key === 'r' ? () => rotateSelectedPages(90)
+      : key === 'l' ? () => rotateSelectedPages(-90)
+      : key === 'e' ? exportSelectedPages
+      : key === 'c' ? copySelectedPages
+      : key === 'v' ? pastePages
+      : key === 'd' || event.key === 'Delete' || event.key === 'Backspace' ? deleteSelectedPages
+      : null;
+    if (!action) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    void action();
   }
 
   /** @param {ArrayBuffer} buffer */
@@ -5054,6 +5613,7 @@
 
   onDestroy(() => {
     loadGeneration += 1;
+    pageDragCleanup?.();
     if (historyCommitTimer) clearTimeout(historyCommitTimer);
     if (searchUpdateFrame !== undefined) cancelAnimationFrame(searchUpdateFrame);
     stopSignatureCamera();
@@ -5067,14 +5627,23 @@
 
 <aside class="editor-sidebar" aria-label="PDF pages">
   <div class="thumbnail-list">
-    {#each Array(pageCount) as _, index}
-      <div class="thumbnail-entry">
+    {#each (pageDragPreviewOrder.length ? pageDragPreviewOrder : Array.from({ length: pageCount }, (_, index) => index)) as index (index)}
+      <div
+        role="listitem"
+        data-page-index={index}
+        class:dragging={Boolean(pagePointerDrag?.active && draggedPages.includes(index))}
+        class="thumbnail-entry"
+        animate:flip={{ duration: pageOperationBusy ? 0 : 220, easing: cubicOut }}
+      >
         <button
           class:page-selected={selectedPages.has(index)}
           class="thumbnail-page"
           aria-label={`Go to page ${index + 1}`}
           aria-pressed={selectedPages.has(index)}
-          onclick={(event) => selectPage(index, event)}
+          aria-grabbed={Boolean(pagePointerDrag?.active && draggedPages.includes(index))}
+          onclick={(event) => handlePageClick(index, event)}
+          oncontextmenu={(event) => openPageContextMenu(event, index)}
+          onpointerdown={(event) => beginPagePointerDrag(event, index)}
         >
           <span class="page-pill">{index + 1}/{pageCount}</span>
           <canvas></canvas>
@@ -5087,6 +5656,73 @@
     {/each}
   </div>
 </aside>
+
+{#if pagePointerDrag?.active}
+  <div
+    class="page-drag-ghost"
+    aria-hidden="true"
+    style:left="0px"
+    style:top="0px"
+    style:width={`${pagePointerDrag.width}px`}
+    style:height={`${pagePointerDrag.height}px`}
+    style:transform-origin={`${pagePointerDrag.offsetX / pagePointerDrag.uiScale}px ${pagePointerDrag.offsetY / pagePointerDrag.uiScale}px`}
+    style:transform={`translate3d(${(pagePointerDrag.clientX - pagePointerDrag.offsetX) / pagePointerDrag.uiScale}px, ${(pagePointerDrag.clientY - pagePointerDrag.offsetY) / pagePointerDrag.uiScale}px, 0) scale(1.035)`}
+  >
+    {#if pagePointerDrag.imageUrl}<img src={pagePointerDrag.imageUrl} alt="" />{/if}
+    <span class="page-pill">{pagePointerDrag.pageIndex + 1}/{pageCount}</span>
+    {#if appliedWatermarkText}<span class="thumbnail-watermark">{appliedWatermarkText}</span>{/if}
+    {#if draggedPages.length > 1}<span class="page-drag-count">{draggedPages.length} pages</span>{/if}
+  </div>
+{/if}
+
+{#if pageContextMenu}
+  <div
+    class="page-context-menu"
+    role="menu"
+    tabindex="-1"
+    aria-label="Page actions"
+    style:left={`${pageContextMenu.x}px`}
+    style:top={`${pageContextMenu.y}px`}
+    in:scale={{ duration: 190, easing: cubicOut, start: 0.92, opacity: 0 }}
+    out:scale={{ duration: 145, easing: cubicOut, start: 0.96, opacity: 0 }}
+  >
+    <button class="page-menu-item rotate-right" role="menuitem" disabled={pageOperationBusy} onclick={() => rotateSelectedPages(90)}>
+      <img src="/pages/rotate-ccw.svg" alt="" />
+      <span>Rotate Right</span>
+      <kbd>R</kbd>
+    </button>
+    <button class="page-menu-item" role="menuitem" disabled={pageOperationBusy} onclick={() => rotateSelectedPages(-90)}>
+      <img src="/pages/rotate-ccw.svg" alt="" />
+      <span>Rotate Left</span>
+      <kbd>L</kbd>
+    </button>
+    <button class="page-menu-item export-page" role="menuitem" disabled={pageOperationBusy} onclick={exportSelectedPages}>
+      <img src="/pages/reply.svg" alt="" />
+      <span>Export</span>
+      <kbd>E</kbd>
+    </button>
+    <button class="page-menu-item" role="menuitem" disabled={pageOperationBusy} onclick={copySelectedPages}>
+      <img src="/pages/copy.svg" alt="" />
+      <span>Copy</span>
+      <kbd>C</kbd>
+    </button>
+    <button class="page-menu-item" role="menuitem" disabled={!pageClipboard || pageOperationBusy} onclick={pastePages}>
+      <img src="/pages/clipboard-plus.svg" alt="" />
+      <span>Paste</span>
+      <kbd>V</kbd>
+    </button>
+    <button
+      class="page-menu-item delete-page"
+      role="menuitem"
+      disabled={selectedPages.size >= pageCount || pageOperationBusy}
+      onclick={deleteSelectedPages}
+    >
+      <img src="/pages/trash.svg" alt="" />
+      <span>Delete</span>
+      <kbd>D</kbd>
+    </button>
+  </div>
+{/if}
 
 <section class="pdf-workspace" aria-label={`PDF editor for ${workingFile.name}`} bind:this={workspace}>
   {#if htmlEditorStarted}
@@ -5988,7 +6624,7 @@
   {/if}
   {#if ['highlight', 'underline', 'crossout'].includes(activeTool)}
     {@const textMarkPanelType = /** @type {'highlight' | 'underline' | 'crossout'} */ (activeTool)}
-    {@const textMarkPanelLabel = textMarkPanelType === 'crossout' ? 'Strikethrough' : textMarkPanelType[0].toUpperCase() + textMarkPanelType.slice(1)}
+    {@const textMarkPanelLabel = textMarkPanelType === 'crossout' ? 'Crossout' : textMarkPanelType[0].toUpperCase() + textMarkPanelType.slice(1)}
     {@const textMarkPanelColor = textMarkPanelType === 'highlight' ? selectionHighlightColor : textMarkPanelType === 'underline' ? selectionUnderlineColor : selectionCrossoutColor}
     {@const textMarkPanelProperty = textMarkPanelType === 'highlight' ? 'selectionHighlightColor' : textMarkPanelType === 'underline' ? 'selectionUnderlineColor' : 'selectionCrossoutColor'}
     <div class="protect-panel selection-properties-panel text-tool-properties-panel" role="dialog" aria-label={`${textMarkPanelLabel} properties`} transition:fly={{ x: 18, duration: 240, easing: cubicOut }}>
@@ -6034,10 +6670,10 @@
             <button class="property-color text-mark-color" type="button" aria-label="Choose underline color" class:active={colorPicker?.property === 'selectionUnderlineColor'} style:--property-color={selectionUnderlineColor} onmousedown={(event) => event.preventDefault()} onclick={() => openSelectionColorPicker('selectionUnderlineColor')}></button>
           </div>
           <div class="text-mark-row decorated-mark-row">
-            <button class:active={pdfTextSelection.active.crossout} type="button" onmousedown={(event) => event.preventDefault()} onclick={() => toggleSelectedPdfTextMark('crossout')}>Strikethrough</button>
-            <input class="text-mark-thickness scrubbable-number" aria-label="Strikethrough thickness" type="number" min="0.5" max="8" step="0.25" value={selectionCrossoutThickness} onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectedPdfTextThickness('crossout', value), { step: 0.05, min: 0.5, max: 8 })} oninput={(event) => updateSelectedPdfTextThickness('crossout', Number(event.currentTarget.value))} />
-            <input class="text-mark-hex" aria-label="Strikethrough color" value={selectionCrossoutColor.replace('#', '')} oninput={(event) => updateSelectedPdfTextColor('crossout', event.currentTarget.value)} />
-            <button class="property-color text-mark-color" type="button" aria-label="Choose strikethrough color" class:active={colorPicker?.property === 'selectionCrossoutColor'} style:--property-color={selectionCrossoutColor} onmousedown={(event) => event.preventDefault()} onclick={() => openSelectionColorPicker('selectionCrossoutColor')}></button>
+            <button class:active={pdfTextSelection.active.crossout} type="button" onmousedown={(event) => event.preventDefault()} onclick={() => toggleSelectedPdfTextMark('crossout')}>Crossout</button>
+            <input class="text-mark-thickness scrubbable-number" aria-label="Crossout thickness" type="number" min="0.5" max="8" step="0.25" value={selectionCrossoutThickness} onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectedPdfTextThickness('crossout', value), { step: 0.05, min: 0.5, max: 8 })} oninput={(event) => updateSelectedPdfTextThickness('crossout', Number(event.currentTarget.value))} />
+            <input class="text-mark-hex" aria-label="Crossout color" value={selectionCrossoutColor.replace('#', '')} oninput={(event) => updateSelectedPdfTextColor('crossout', event.currentTarget.value)} />
+            <button class="property-color text-mark-color" type="button" aria-label="Choose crossout color" class:active={colorPicker?.property === 'selectionCrossoutColor'} style:--property-color={selectionCrossoutColor} onmousedown={(event) => event.preventDefault()} onclick={() => openSelectionColorPicker('selectionCrossoutColor')}></button>
           </div>
           <div class="text-mark-row highlight-mark-row">
             <button class:active={pdfTextSelection.active.highlight} type="button" onmousedown={(event) => event.preventDefault()} onclick={() => toggleSelectedPdfTextMark('highlight')}>Highlight</button>
@@ -6593,7 +7229,54 @@
   }
 
   .thumbnail-entry {
+    position: relative;
     width: 244px;
+    transition: opacity 120ms ease, visibility 120ms ease;
+  }
+
+  .thumbnail-entry.dragging {
+    visibility: hidden;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  :global(html.page-dragging),
+  :global(html.page-dragging *) {
+    cursor: grabbing !important;
+    user-select: none !important;
+  }
+
+  .page-drag-ghost {
+    position: fixed;
+    z-index: 80;
+    box-sizing: border-box;
+    overflow: visible;
+    border-radius: 10px;
+    background: #fff;
+    box-shadow: 0 0 0 2px #529dff, 0 24px 48px rgba(0, 0, 0, 0.25), 0 7px 16px rgba(0, 0, 0, 0.14);
+    opacity: 1;
+    will-change: transform;
+    pointer-events: none;
+  }
+
+  .page-drag-ghost > img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    border-radius: 8px;
+  }
+
+  .page-drag-count {
+    position: absolute;
+    right: 9px;
+    bottom: 9px;
+    padding: 5px 8px;
+    border-radius: 999px;
+    background: rgba(23, 23, 23, 0.86);
+    color: #fff;
+    font-family: Geist, Inter, sans-serif;
+    font-size: 12px;
+    line-height: 1;
   }
 
   .thumbnail-page {
@@ -6684,6 +7367,109 @@
     background: #d5d5d5;
   }
 
+  .page-context-menu {
+    position: fixed;
+    z-index: 70;
+    box-sizing: border-box;
+    width: 204px;
+    padding: 5px;
+    border: 1px solid rgba(0, 0, 0, 0.18);
+    border-radius: 15px;
+    background: rgba(255, 255, 255, 0.78);
+    box-shadow: 0 7px 18px rgba(0, 0, 0, 0.11), 0 2px 5px rgba(0, 0, 0, 0.05);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    transform-origin: top left;
+  }
+
+  .page-menu-item {
+    display: grid;
+    grid-template-columns: 28px 1fr 28px;
+    align-items: center;
+    width: 100%;
+    height: 40px;
+    padding: 0 7px;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    background: transparent;
+    color: #3f3f3f;
+    font-family: Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 18px;
+    text-align: left;
+    cursor: pointer;
+    transition:
+      color 180ms cubic-bezier(0.2, 0.7, 0.2, 1),
+      background-color 180ms cubic-bezier(0.2, 0.7, 0.2, 1),
+      border-color 180ms cubic-bezier(0.2, 0.7, 0.2, 1),
+      transform 180ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  }
+
+  .page-menu-item:hover:not(:disabled),
+  .page-menu-item:focus-visible {
+    border-color: rgba(0, 0, 0, 0.07);
+    background: rgba(234, 234, 234, 0.62);
+    color: #111;
+    outline: none;
+    transform: translateX(1px);
+  }
+
+  .page-menu-item img {
+    display: block;
+    width: 20px;
+    height: 20px;
+    object-fit: contain;
+    transform: translateX(-2px);
+    transition: filter 180ms cubic-bezier(0.2, 0.7, 0.2, 1), opacity 180ms ease;
+  }
+
+  .page-menu-item.rotate-right img {
+    transform: translateX(-2px) scaleX(-1);
+  }
+
+  .page-menu-item.export-page img {
+    width: 24px;
+    height: 24px;
+  }
+
+  .page-menu-item:hover:not(:disabled):not(.delete-page) img,
+  .page-menu-item:focus-visible:not(:disabled):not(.delete-page) img {
+    filter: brightness(0);
+  }
+
+  .page-menu-item kbd {
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    border: 1px solid rgba(0, 0, 0, 0.04);
+    border-radius: 7px;
+    background: rgba(0, 0, 0, 0.045);
+    color: rgba(0, 0, 0, 0.22);
+    font-family: inherit;
+    font-size: 17px;
+    transition: color 180ms ease, background-color 180ms ease, border-color 180ms ease;
+  }
+
+  .page-menu-item:hover:not(:disabled) kbd,
+  .page-menu-item:focus-visible:not(:disabled) kbd {
+    border-color: rgba(0, 0, 0, 0.06);
+    background: rgba(0, 0, 0, 0.065);
+    color: rgba(0, 0, 0, 0.34);
+  }
+
+  .page-menu-item:disabled {
+    color: rgba(63, 63, 63, 0.34);
+    cursor: default;
+  }
+
+  .page-menu-item:disabled img {
+    opacity: 0.32;
+  }
+
+  .page-menu-item.delete-page:not(:disabled) {
+    color: #ff2f38;
+  }
+
   .pdf-workspace {
     position: relative;
     grid-column: 2;
@@ -6711,7 +7497,8 @@
     background: #fafafa;
     box-shadow: 0 9px 24px rgba(0, 0, 0, 0.07);
     color: #000;
-    font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-family: "Inter Variable", Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 16px;
     transition: height 300ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 200ms ease;
     -webkit-font-smoothing: antialiased;
   }
@@ -6735,6 +7522,20 @@
 
   .protect-panel.text-selection-panel {
     max-height: none;
+    font-family: "Inter Variable", Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 18px;
+    font-style: normal;
+    font-weight: 400;
+    font-variation-settings: "wght" 400;
+  }
+
+  .text-selection-panel button,
+  .text-selection-panel input {
+    font-family: inherit;
+    font-style: normal;
+    font-weight: 400;
+    font-variation-settings: "wght" 400;
+    font-size: 18px;
   }
 
   .text-mark-properties {
@@ -6830,7 +7631,7 @@
     background: transparent;
     color: #111;
     font: inherit;
-    font-size: 16px;
+    font-size: 18px;
     text-align: left;
     cursor: pointer;
   }
@@ -6856,7 +7657,7 @@
     background: transparent;
     color: #111;
     font: inherit;
-    font-size: 15px;
+    font-size: 18px;
     text-align: center;
   }
 
@@ -6888,7 +7689,7 @@
     border: 1px solid #d7d7d7;
     border-radius: 8px;
     font: inherit;
-    font-size: 16px;
+    font-size: 18px;
     cursor: pointer;
   }
 

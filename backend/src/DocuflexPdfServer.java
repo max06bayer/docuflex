@@ -82,6 +82,7 @@ public class DocuflexPdfServer {
     server.createContext("/fonts", DocuflexPdfServer::handleFonts);
     server.createContext("/decrypt", DocuflexPdfServer::handleDecrypt);
     server.createContext("/uncrop", DocuflexPdfServer::handleUncrop);
+    server.createContext("/pages", DocuflexPdfServer::handlePages);
     server.createContext("/export", DocuflexPdfServer::handleExport);
     server.start();
     System.out.println("Docuflex PDFBox server listening on http://" + HOST + ":" + PORT);
@@ -272,6 +273,92 @@ public class DocuflexPdfServer {
     } catch (Exception error) {
       error.printStackTrace();
       sendJson(exchange, 400, "{\"error\":\"" + escapeJson(error.getMessage()) + "\"}");
+    }
+  }
+
+  private static void handlePages(HttpExchange exchange) throws IOException {
+    addCors(exchange);
+    if ("OPTIONS".equals(exchange.getRequestMethod())) {
+      sendNoContent(exchange);
+      return;
+    }
+    if (!"POST".equals(exchange.getRequestMethod())) {
+      sendJson(exchange, 405, "{\"error\":\"POST required\"}");
+      return;
+    }
+
+    try {
+      String body = readRequestBody(exchange);
+      Map<String, Object> payload = asObject(new JsonParser(body).parse());
+      byte[] pdfBytes = Base64.getDecoder().decode(asString(payload.get("pdfBase64")));
+      String operation = asString(payload.get("operation"));
+      byte[] result;
+
+      if ("rotate".equals(operation)) {
+        List<Integer> pages = integerList(asArray(payload.get("pages")));
+        int rotation = ((int) asDouble(payload.get("rotation")) % 360 + 360) % 360;
+        try (PDDocument document = Loader.loadPDF(pdfBytes)) {
+          validatePageIndexes(pages, document.getNumberOfPages());
+          for (int pageIndex : pages) {
+            PDPage page = document.getPage(pageIndex);
+            page.setRotation(((page.getRotation() + rotation) % 360 + 360) % 360);
+          }
+          ByteArrayOutputStream output = new ByteArrayOutputStream();
+          document.save(output);
+          result = output.toByteArray();
+        }
+      } else if ("insert".equals(operation)) {
+        byte[] insertedBytes = Base64.getDecoder().decode(asString(payload.get("insertPdfBase64")));
+        int insertAt = (int) asDouble(payload.get("insertAt"));
+        try (PDDocument source = Loader.loadPDF(pdfBytes);
+             PDDocument inserted = Loader.loadPDF(insertedBytes);
+             PDDocument outputDocument = new PDDocument()) {
+          if (insertAt < 0 || insertAt > source.getNumberOfPages()) {
+            throw new IllegalArgumentException("Invalid page insertion position.");
+          }
+          for (int index = 0; index <= source.getNumberOfPages(); index += 1) {
+            if (index == insertAt) {
+              for (PDPage page : inserted.getPages()) outputDocument.importPage(page);
+            }
+            if (index < source.getNumberOfPages()) outputDocument.importPage(source.getPage(index));
+          }
+          ByteArrayOutputStream output = new ByteArrayOutputStream();
+          outputDocument.save(output);
+          result = output.toByteArray();
+        }
+      } else if ("reorder".equals(operation) || "extract".equals(operation)) {
+        List<Integer> order = "reorder".equals(operation)
+            ? integerList(asArray(payload.get("order")))
+            : integerList(asArray(payload.get("pages")));
+        try (PDDocument source = Loader.loadPDF(pdfBytes);
+             PDDocument outputDocument = new PDDocument()) {
+          validatePageIndexes(order, source.getNumberOfPages());
+          if (order.isEmpty()) throw new IllegalArgumentException("At least one page is required.");
+          for (int pageIndex : order) outputDocument.importPage(source.getPage(pageIndex));
+          ByteArrayOutputStream output = new ByteArrayOutputStream();
+          outputDocument.save(output);
+          result = output.toByteArray();
+        }
+      } else {
+        throw new IllegalArgumentException("Unsupported page operation.");
+      }
+
+      sendPdf(exchange, result);
+    } catch (Exception error) {
+      error.printStackTrace();
+      sendJson(exchange, 400, "{\"error\":\"" + escapeJson(error.getMessage()) + "\"}");
+    }
+  }
+
+  private static List<Integer> integerList(List<Object> values) {
+    List<Integer> result = new ArrayList<>();
+    for (Object value : values) result.add((int) asDouble(value));
+    return result;
+  }
+
+  private static void validatePageIndexes(List<Integer> indexes, int pageCount) {
+    for (int index : indexes) {
+      if (index < 0 || index >= pageCount) throw new IllegalArgumentException("Invalid page index.");
     }
   }
 
