@@ -17,6 +17,14 @@
   import expandIcon from '../../public/expand.svg?raw';
   import bigPlusIcon from '../../public/bigplus.svg?raw';
 
+  /** @typedef {{ name: string; file: File; protection: { enabled: boolean; password: string }; thumbnailUrl?: string; openedAt: number }} RecentDocument */
+
+  const RECENT_DOCUMENT_DATABASE = 'docuflex-recent-documents';
+  const RECENT_DOCUMENT_STORE = 'documents';
+  const MAX_RECENT_DOCUMENTS = 20;
+  /** @type {Promise<IDBDatabase> | null} */
+  let recentDatabasePromise = null;
+
   const quickTools = [
     { name: 'Merge', shortcut: 'M', icon: mergeIcon },
     { name: 'Split', shortcut: 'L', icon: splitIcon },
@@ -31,7 +39,7 @@
 
   /** @type {{ id: number; name: string; type: 'pdf'; file: File; protection: { enabled: boolean; password: string } }[]} */
   let tabs = [];
-  /** @type {{ name: string; file: File; protection: { enabled: boolean; password: string } }[]} */
+  /** @type {RecentDocument[]} */
   let recentDocuments = [];
   /** @type {number | null} */
   let activeTab = null;
@@ -49,6 +57,97 @@
   /** @type {{ downloadPdf: () => Promise<void>; openSearchPanel: () => void; undo: () => Promise<void>; redo: () => Promise<void> } | undefined} */
   let pdfEditor;
   let isDownloading = false;
+
+  function openRecentDatabase() {
+    if (recentDatabasePromise) return recentDatabasePromise;
+    recentDatabasePromise = new Promise((resolve, reject) => {
+      const request = indexedDB.open(RECENT_DOCUMENT_DATABASE, 1);
+      request.onupgradeneeded = () => {
+        const database = request.result;
+        if (!database.objectStoreNames.contains(RECENT_DOCUMENT_STORE)) {
+          database.createObjectStore(RECENT_DOCUMENT_STORE, { keyPath: 'name' });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error ?? new Error('Could not open recent document storage.'));
+      request.onblocked = () => reject(new Error('Recent document storage is blocked by another app window.'));
+    });
+    return recentDatabasePromise;
+  }
+
+  /** @param {IDBTransaction} transaction */
+  function transactionComplete(transaction) {
+    return new Promise((resolve, reject) => {
+      transaction.oncomplete = () => resolve(undefined);
+      transaction.onerror = () => reject(transaction.error ?? new Error('Could not update recent document storage.'));
+      transaction.onabort = () => reject(transaction.error ?? new Error('The recent document storage update was cancelled.'));
+    });
+  }
+
+  /** @param {RecentDocument} recent */
+  async function persistRecentDocument(recent) {
+    try {
+      const database = await openRecentDatabase();
+      const transaction = database.transaction(RECENT_DOCUMENT_STORE, 'readwrite');
+      const store = transaction.objectStore(RECENT_DOCUMENT_STORE);
+      store.put({
+        name: recent.name,
+        blob: recent.file,
+        type: recent.file.type || 'application/pdf',
+        lastModified: recent.file.lastModified,
+        protection: recent.protection,
+        thumbnailUrl: recent.thumbnailUrl,
+        openedAt: recent.openedAt
+      });
+      const allDocuments = store.getAll();
+      allDocuments.onsuccess = () => {
+        const staleDocuments = allDocuments.result
+          .sort((left, right) => Number(right.openedAt ?? 0) - Number(left.openedAt ?? 0))
+          .slice(MAX_RECENT_DOCUMENTS);
+        staleDocuments.forEach((stored) => store.delete(stored.name));
+      };
+      await transactionComplete(transaction);
+    } catch (error) {
+      console.warn(`Could not remember ${recent.name}:`, error);
+    }
+  }
+
+  async function restoreRecentDocuments() {
+    try {
+      const database = await openRecentDatabase();
+      const transaction = database.transaction(RECENT_DOCUMENT_STORE, 'readonly');
+      const completion = transactionComplete(transaction);
+      const request = transaction.objectStore(RECENT_DOCUMENT_STORE).getAll();
+      const storedDocuments = await new Promise((resolve, reject) => {
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error ?? new Error('Could not read recent documents.'));
+      });
+      await completion;
+      const restored = /** @type {any[]} */ (storedDocuments)
+        .filter((stored) => stored.blob instanceof Blob && stored.name)
+        .sort((left, right) => Number(right.openedAt ?? 0) - Number(left.openedAt ?? 0))
+        .slice(0, MAX_RECENT_DOCUMENTS)
+        .map((stored) => ({
+          name: String(stored.name),
+          file: new File([stored.blob], String(stored.name), {
+            type: stored.type || stored.blob.type || 'application/pdf',
+            lastModified: Number(stored.lastModified ?? Date.now())
+          }),
+          protection: stored.protection ?? { enabled: false, password: '' },
+          thumbnailUrl: typeof stored.thumbnailUrl === 'string' ? stored.thumbnailUrl : undefined,
+          openedAt: Number(stored.openedAt ?? 0)
+        }));
+      const currentNames = new Set(recentDocuments.map((recent) => recent.name));
+      recentDocuments = [...recentDocuments, ...restored.filter((recent) => !currentNames.has(recent.name))]
+        .sort((left, right) => right.openedAt - left.openedAt)
+        .slice(0, MAX_RECENT_DOCUMENTS);
+      recentDocuments.filter((recent) => !recent.thumbnailUrl).forEach((recent) => {
+        void renderRecentThumbnail(recent.file, recent.protection.password);
+      });
+    } catch (error) {
+      console.warn('Could not restore recent documents:', error);
+    }
+  }
 
   /** @param {MouseEvent | KeyboardEvent} event @param {number} id */
   function closeTab(event, id) {
@@ -120,22 +219,71 @@
     addFileTab(file);
   }
 
-  /** @param {File} file @param {{ enabled: boolean; password: string }} [protection] */
-  function addFileTab(file, protection = { enabled: false, password: '' }) {
+  /** @param {File} file @param {string} [password] */
+  async function renderRecentThumbnail(file, password = '') {
+    /** @type {import('pdfjs-dist').PDFDocumentLoadingTask | undefined} */
+    let loadingTask;
+    /** @type {import('pdfjs-dist').PDFDocumentProxy | undefined} */
+    let document;
+    try {
+      const [pdfjs, worker] = await Promise.all([
+        import('pdfjs-dist'),
+        import('pdfjs-dist/build/pdf.worker.mjs?url')
+      ]);
+      pdfjs.GlobalWorkerOptions.workerSrc = worker.default;
+      loadingTask = pdfjs.getDocument({
+        data: await file.arrayBuffer(),
+        ...(password ? { password } : {})
+      });
+      document = await loadingTask.promise;
+      const page = await document.getPage(1);
+      const baseViewport = page.getViewport({ scale: 1 });
+      const scale = 528 / Math.max(1, baseViewport.width);
+      const viewport = page.getViewport({ scale });
+      const canvas = globalThis.document.createElement('canvas');
+      canvas.width = Math.max(1, Math.ceil(viewport.width));
+      canvas.height = Math.max(1, Math.ceil(viewport.height));
+      const context = canvas.getContext('2d', { alpha: false });
+      if (!context) throw new Error('Could not create the PDF thumbnail canvas.');
+      context.fillStyle = '#fff';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      await page.render({ canvas, canvasContext: context, viewport }).promise;
+      const thumbnailUrl = canvas.toDataURL('image/webp', 0.86);
+      /** @type {RecentDocument | undefined} */
+      let updatedRecent;
+      recentDocuments = recentDocuments.map((recent) => {
+        if (recent.file !== file) return recent;
+        updatedRecent = { ...recent, thumbnailUrl };
+        return updatedRecent;
+      });
+      if (updatedRecent) void persistRecentDocument(updatedRecent);
+    } catch (error) {
+      console.warn(`Could not render a thumbnail for ${file.name}:`, error);
+    } finally {
+      await document?.destroy().catch(() => {});
+      if (!document) await loadingTask?.destroy().catch(() => {});
+    }
+  }
+
+  /** @param {File} file @param {{ enabled: boolean; password: string }} [protection] @param {string} [thumbnailUrl] */
+  function addFileTab(file, protection = { enabled: false, password: '' }, thumbnailUrl) {
     const id = nextTabId++;
     tabs = [...tabs, { id, name: file.name, type: 'pdf', file, protection }];
-    recentDocuments = [{ name: file.name, file, protection }, ...recentDocuments.filter((document) => document.name !== file.name)];
+    const recent = { name: file.name, file, protection, thumbnailUrl, openedAt: Date.now() };
+    recentDocuments = [recent, ...recentDocuments.filter((document) => document.name !== file.name)].slice(0, MAX_RECENT_DOCUMENTS);
+    void persistRecentDocument(recent);
+    if (!thumbnailUrl) void renderRecentThumbnail(file, protection.password);
     activeTab = id;
   }
 
-  /** @param {{ name: string; file: File; protection: { enabled: boolean; password: string } }} document */
+  /** @param {RecentDocument} document */
   function openRecentDocument(document) {
     const existing = tabs.find((tab) => tab.name === document.name);
     if (existing) {
       activeTab = existing.id;
       return;
     }
-    addFileTab(document.file, document.protection);
+    addFileTab(document.file, document.protection, document.thumbnailUrl);
   }
 
   /** @param {number} id @param {{ enabled: boolean; password: string }} protection */
@@ -146,6 +294,8 @@
     recentDocuments = recentDocuments.map((recent) =>
       recent.name === document.name ? { ...recent, protection } : recent
     );
+    const updatedRecent = recentDocuments.find((recent) => recent.name === document.name);
+    if (updatedRecent) void persistRecentDocument(updatedRecent);
   }
 
   /** @param {KeyboardEvent} event */
@@ -165,6 +315,7 @@
   }
 
   onMount(() => {
+    void restoreRecentDocuments();
     window.addEventListener('keydown', handleQuickToolShortcut);
     return () => window.removeEventListener('keydown', handleQuickToolShortcut);
   });
@@ -310,7 +461,11 @@
     <div class="recent-grid">
       {#each recentDocuments as document}
         <button class="recent-document" aria-label={`Open ${document.name}`} onclick={() => openRecentDocument(document)}>
-          <span class="document-preview" aria-hidden="true"></span>
+          <span class="document-preview" aria-hidden="true">
+            {#if document.thumbnailUrl}
+              <img class="recent-thumbnail" src={document.thumbnailUrl} alt="" />
+            {/if}
+          </span>
           <span class="document-name">
             {#if document.protection.enabled}<img class="recent-lock-icon" src="/lock.svg" alt="Encrypted" />{/if}
             <span>{document.name}</span>
@@ -1153,6 +1308,20 @@
     background: #fff;
     box-shadow: 3px 8px 16px rgba(0, 0, 0, 0.05);
     transition: border-color 180ms ease, box-shadow 180ms ease, background-color 180ms ease;
+  }
+
+  .recent-thumbnail {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    background: #fff;
+    animation: recent-thumbnail-in 180ms ease both;
+  }
+
+  @keyframes recent-thumbnail-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
   }
 
   .document-name {
