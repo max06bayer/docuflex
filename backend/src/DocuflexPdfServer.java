@@ -8,13 +8,17 @@ import java.io.OutputStream;
 import java.awt.image.BufferedImage;
 import java.awt.image.ConvolveOp;
 import java.awt.image.Kernel;
+import java.awt.geom.AffineTransform;
+import java.awt.geom.NoninvertibleTransformException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -112,9 +116,11 @@ public class DocuflexPdfServer {
       String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
       Map<String, Object> payload = asObject(new JsonParser(body).parse());
       String pdfBase64 = asString(payload.get("pdfBase64"));
-      List<TextEdit> edits = parseEdits(asArray(payload.get("edits")));
+      List<Object> rawEdits = asArray(payload.get("edits"));
+      List<TextEdit> edits = parseEdits(rawEdits);
+      List<ImageEdit> imageEdits = parseImageEdits(rawEdits);
 
-      EditResult result = applyEdits(Base64.getDecoder().decode(pdfBase64), edits);
+      EditResult result = applyEdits(Base64.getDecoder().decode(pdfBase64), edits, imageEdits);
       String response = "{"
           + "\"pdfBase64\":\"" + escapeJson(Base64.getEncoder().encodeToString(result.pdfBytes)) + "\","
           + "\"applied\":" + result.applied + ","
@@ -1683,7 +1689,10 @@ public class DocuflexPdfServer {
     return subset >= 0 && subset + 1 < value.length() ? value.substring(subset + 1) : value;
   }
 
-  private static EditResult applyEdits(byte[] pdfBytes, List<TextEdit> edits) throws IOException {
+  private static EditResult applyEdits(
+      byte[] pdfBytes,
+      List<TextEdit> edits,
+      List<ImageEdit> imageEdits) throws IOException {
     EditResult result = new EditResult();
     try (PDDocument document = Loader.loadPDF(pdfBytes)) {
       document.setAllSecurityToBeRemoved(true);
@@ -1719,6 +1728,17 @@ public class DocuflexPdfServer {
           result.applied += 1;
         } else {
           result.misses.add("Could not find editable text on page " + (edit.page + 1) + ": " + edit.oldText);
+        }
+      }
+      for (ImageEdit edit : imageEdits) {
+        if (edit.page < 0 || edit.page >= document.getNumberOfPages()) {
+          result.misses.add("Image page " + (edit.page + 1) + " is outside the document.");
+          continue;
+        }
+        if (rewritePageImage(document, document.getPage(edit.page), edit)) {
+          result.applied += 1;
+        } else {
+          result.misses.add("Could not match the moved image on page " + (edit.page + 1) + ".");
         }
       }
 
@@ -1760,6 +1780,247 @@ public class DocuflexPdfServer {
         edit.underline,
         edit.strikethrough,
         edit.letterSpacing);
+  }
+
+  private static boolean rewritePageImage(
+      PDDocument document,
+      PDPage page,
+      ImageEdit edit) throws IOException {
+    if (edit.rect.size() < 4 || edit.originalRect.size() < 4 || page.getResources() == null) {
+      return false;
+    }
+    PDFStreamParser parser = new PDFStreamParser(page);
+    List<Object> tokens = parser.parse();
+    List<ImageMatrixCandidate> candidates = new ArrayList<>();
+    PDResources resources = page.getResources();
+    float pageWidth = page.getMediaBox().getWidth();
+    float pageHeight = page.getMediaBox().getHeight();
+    Set<COSBase> visitedForms = Collections.newSetFromMap(new IdentityHashMap<>());
+    collectImageMatrixCandidates(
+        resources,
+        tokens,
+        new Matrix(),
+        null,
+        candidates,
+        visitedForms);
+    if (candidates.isEmpty()) return false;
+
+    double originalLeft = coordinate(edit.originalRect.get(0), pageWidth);
+    double originalBottom = coordinate(edit.originalRect.get(1), pageHeight);
+    double originalRight = coordinate(edit.originalRect.get(2), pageWidth);
+    double originalTop = coordinate(edit.originalRect.get(3), pageHeight);
+    double targetLeft = coordinate(edit.rect.get(0), pageWidth);
+    double targetBottom = coordinate(edit.rect.get(1), pageHeight);
+    double targetRight = coordinate(edit.rect.get(2), pageWidth);
+    double targetTop = coordinate(edit.rect.get(3), pageHeight);
+    double originalWidth = Math.max(0.01, originalRight - originalLeft);
+    double originalHeight = Math.max(0.01, originalTop - originalBottom);
+    double scaleX = Math.max(0.01, targetRight - targetLeft) / originalWidth;
+    double scaleY = Math.max(0.01, targetTop - targetBottom) / originalHeight;
+
+    if (edit.group) {
+      Set<PDFormXObject> changedForms = Collections.newSetFromMap(new IdentityHashMap<>());
+      boolean pageChanged = false;
+      for (ImageMatrixCandidate candidate : candidates) {
+        double[] global = candidate.globalMatrix.clone();
+        global[0] *= scaleX;
+        global[1] *= scaleY;
+        global[2] *= scaleX;
+        global[3] *= scaleY;
+        global[4] = targetLeft + (global[4] - originalLeft) * scaleX;
+        global[5] = targetBottom + (global[5] - originalBottom) * scaleY;
+        if (!setImageCandidateMatrix(candidate, global)) return false;
+        if (candidate.form != null) changedForms.add(candidate.form);
+        else pageChanged = true;
+      }
+      for (PDFormXObject form : changedForms) {
+        ImageMatrixCandidate owner = candidates.stream()
+            .filter(candidate -> candidate.form == form)
+            .findFirst()
+            .orElse(null);
+        if (owner == null) continue;
+        try (OutputStream out = form.getContentStream().createOutputStream()) {
+          new ContentStreamWriter(out).writeTokens(owner.tokens);
+        }
+      }
+      if (pageChanged) writePageTokens(document, page, tokens);
+      return pageChanged || !changedForms.isEmpty();
+    }
+
+    ImageMatrixCandidate best = null;
+    double bestScore = Double.POSITIVE_INFINITY;
+    for (ImageMatrixCandidate candidate : candidates) {
+      double[] bounds = candidate.bounds;
+      double score = Math.abs(bounds[0] - originalLeft) / Math.max(1, pageWidth)
+          + Math.abs(bounds[1] - originalBottom) / Math.max(1, pageHeight)
+          + Math.abs(bounds[2] - originalRight) / Math.max(1, pageWidth)
+          + Math.abs(bounds[3] - originalTop) / Math.max(1, pageHeight);
+      if (score < bestScore) {
+        best = candidate;
+        bestScore = score;
+      }
+    }
+    if ((best == null || bestScore > 0.24) && edit.occurrence >= 0 && edit.occurrence < candidates.size()) {
+      best = candidates.get(edit.occurrence);
+    }
+    if (best == null) return false;
+
+    double[] global = best.globalMatrix.clone();
+    global[0] *= scaleX;
+    global[1] *= scaleX;
+    global[2] *= scaleY;
+    global[3] *= scaleY;
+    double[] scaledBounds = imageMatrixBounds(global);
+    global[4] += targetLeft - scaledBounds[0];
+    global[5] += targetBottom - scaledBounds[1];
+    if (!setImageCandidateMatrix(best, global)) return false;
+
+    if (best.form != null) {
+      try (OutputStream out = best.form.getContentStream().createOutputStream()) {
+        new ContentStreamWriter(out).writeTokens(best.tokens);
+      }
+    } else {
+      writePageTokens(document, page, best.tokens);
+    }
+    return true;
+  }
+
+  private static boolean setImageCandidateMatrix(
+      ImageMatrixCandidate candidate,
+      double[] global) {
+    try {
+      AffineTransform localTransform = candidate.parentMatrix.createAffineTransform().createInverse();
+      localTransform.concatenate(new AffineTransform(
+          global[0], global[1], global[2], global[3], global[4], global[5]));
+      double[] local = new double[6];
+      localTransform.getMatrix(local);
+      for (int operand = 0; operand < 6; operand += 1) {
+        candidate.tokens.set(candidate.operatorIndex - 6 + operand, new COSFloat((float) local[operand]));
+      }
+      return true;
+    } catch (NoninvertibleTransformException error) {
+      return false;
+    }
+  }
+
+  private static void writePageTokens(
+      PDDocument document,
+      PDPage page,
+      List<Object> tokens) throws IOException {
+    PDStream newContents = new PDStream(document);
+    try (OutputStream out = newContents.createOutputStream()) {
+      new ContentStreamWriter(out).writeTokens(tokens);
+    }
+    page.setContents(newContents);
+  }
+
+  private static void collectImageMatrixCandidates(
+      PDResources resources,
+      List<Object> tokens,
+      Matrix initialMatrix,
+      PDFormXObject ownerForm,
+      List<ImageMatrixCandidate> candidates,
+      Set<COSBase> visitedForms) throws IOException {
+    if (resources == null) return;
+    Matrix current = initialMatrix.clone();
+    Deque<Matrix> stack = new ArrayDeque<>();
+    int lastMatrixOperator = -1;
+    Matrix matrixParent = null;
+
+    for (int index = 0; index < tokens.size(); index += 1) {
+      Object token = tokens.get(index);
+      if (!(token instanceof Operator operator)) continue;
+      String name = operator.getName();
+      if ("q".equals(name)) {
+        stack.push(current.clone());
+        lastMatrixOperator = -1;
+        matrixParent = null;
+      } else if ("Q".equals(name)) {
+        if (!stack.isEmpty()) current = stack.pop();
+        lastMatrixOperator = -1;
+        matrixParent = null;
+      } else if ("cm".equals(name)) {
+        double[] values = matrixOperands(tokens, index);
+        if (values == null) continue;
+        matrixParent = current.clone();
+        current.concatenate(new Matrix(
+            (float) values[0],
+            (float) values[1],
+            (float) values[2],
+            (float) values[3],
+            (float) values[4],
+            (float) values[5]));
+        lastMatrixOperator = index;
+      } else if ("Do".equals(name) && index >= 1 && tokens.get(index - 1) instanceof COSName objectName) {
+        PDXObject object = resources.getXObject(objectName);
+        if (object instanceof PDImageXObject && lastMatrixOperator >= 6 && matrixParent != null) {
+          double[] global = matrixValues(current);
+          candidates.add(new ImageMatrixCandidate(
+              lastMatrixOperator,
+              tokens,
+              ownerForm,
+              matrixParent.clone(),
+              global,
+              imageMatrixBounds(global)));
+        } else if (object instanceof PDFormXObject form && visitedForms.add(form.getCOSObject())) {
+          PDResources formResources = form.getResources() != null ? form.getResources() : resources;
+          PDFStreamParser formParser = new PDFStreamParser(form);
+          List<Object> formTokens = formParser.parse();
+          Matrix formMatrix = current.clone();
+          if (form.getMatrix() != null) formMatrix.concatenate(form.getMatrix());
+          collectImageMatrixCandidates(
+              formResources,
+              formTokens,
+              formMatrix,
+              form,
+              candidates,
+              visitedForms);
+        }
+      }
+    }
+  }
+
+  private static double[] matrixValues(Matrix matrix) {
+    return new double[] {
+        matrix.getScaleX(),
+        matrix.getShearY(),
+        matrix.getShearX(),
+        matrix.getScaleY(),
+        matrix.getTranslateX(),
+        matrix.getTranslateY()
+    };
+  }
+
+  private static double[] matrixOperands(List<Object> tokens, int operatorIndex) {
+    if (operatorIndex < 6) return null;
+    double[] values = new double[6];
+    for (int index = 0; index < 6; index += 1) {
+      Object token = tokens.get(operatorIndex - 6 + index);
+      if (!(token instanceof COSNumber number)) return null;
+      values[index] = number.floatValue();
+    }
+    return values;
+  }
+
+  private static double[] imageMatrixBounds(double[] matrix) {
+    double[] xs = {
+        matrix[4],
+        matrix[0] + matrix[4],
+        matrix[2] + matrix[4],
+        matrix[0] + matrix[2] + matrix[4]
+    };
+    double[] ys = {
+        matrix[5],
+        matrix[1] + matrix[5],
+        matrix[3] + matrix[5],
+        matrix[1] + matrix[3] + matrix[5]
+    };
+    return new double[] {
+        Arrays.stream(xs).min().orElse(matrix[4]),
+        Arrays.stream(ys).min().orElse(matrix[5]),
+        Arrays.stream(xs).max().orElse(matrix[4]),
+        Arrays.stream(ys).max().orElse(matrix[5])
+    };
   }
 
   private static List<String> stripLeadingListMarkerCandidates(List<String> candidates) {
@@ -3775,6 +4036,7 @@ public class DocuflexPdfServer {
     List<TextEdit> edits = new ArrayList<>();
     for (Object raw : rawEdits) {
       Map<String, Object> edit = asObject(raw);
+      if ("image".equals(optionalString(edit.get("kind")))) continue;
       edits.add(new TextEdit(
           asInt(edit.get("page")),
           asString(edit.get("oldText")),
@@ -3800,6 +4062,21 @@ public class DocuflexPdfServer {
           optionalBoolean(edit.get("underline")),
           optionalBoolean(edit.get("strikethrough")),
           optionalDouble(edit.get("letterSpacing"))));
+    }
+    return edits;
+  }
+
+  private static List<ImageEdit> parseImageEdits(List<Object> rawEdits) {
+    List<ImageEdit> edits = new ArrayList<>();
+    for (Object raw : rawEdits) {
+      Map<String, Object> edit = asObject(raw);
+      if (!"image".equals(optionalString(edit.get("kind")))) continue;
+      edits.add(new ImageEdit(
+          asInt(edit.get("page")),
+          optionalInt(edit.get("occurrence"), -1),
+          optionalBoolean(edit.get("group")),
+          parseDoubleList(edit.get("rect")),
+          parseDoubleList(edit.get("originalRect"))));
     }
     return edits;
   }
@@ -4084,6 +4361,21 @@ public class DocuflexPdfServer {
       boolean underline,
       boolean strikethrough,
       double letterSpacing) {}
+
+  private record ImageEdit(
+      int page,
+      int occurrence,
+      boolean group,
+      List<Double> rect,
+      List<Double> originalRect) {}
+
+  private record ImageMatrixCandidate(
+      int operatorIndex,
+      List<Object> tokens,
+      PDFormXObject form,
+      Matrix parentMatrix,
+      double[] globalMatrix,
+      double[] bounds) {}
 
   private record AnnotationStroke(
       int page,

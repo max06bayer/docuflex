@@ -688,6 +688,20 @@
     return editsFromFrame.flatMap((item, index) => {
       if (!item || typeof item !== 'object') return [];
       const edit = /** @type {Record<string, unknown>} */ (item);
+      if (edit.kind === 'image') {
+        const rect = Array.isArray(edit.rect) ? edit.rect.map(Number).filter(Number.isFinite) : [];
+        const originalRect = Array.isArray(edit.originalRect) ? edit.originalRect.map(Number).filter(Number.isFinite) : [];
+        if (rect.length < 4 || originalRect.length < 4) return [];
+        return [{
+          kind: 'image',
+          id: typeof edit.id === 'string' ? edit.id : `html-image-${index}`,
+          page: Number.isFinite(Number(edit.page)) ? Number(edit.page) : 0,
+          occurrence: Number.isFinite(Number(edit.occurrence)) ? Number(edit.occurrence) : -1,
+          group: Boolean(edit.group),
+          rect,
+          originalRect
+        }];
+      }
       const oldText = normalizeLineText(String(edit.oldText ?? ''));
       const preserveLeadingSpacing = Boolean(edit.preserveLeadingSpacing);
       const rawNewText = String(edit.newText ?? '');
@@ -699,9 +713,11 @@
       if (!oldText || (!moved && !overlay && oldText === newText)) return [];
       const originalHtmlText = String(edit.originalHtmlText ?? '');
       return [{
+        kind: 'text',
         id: typeof edit.id === 'string' ? edit.id : `html-frame-${index}`,
         page: Number.isFinite(Number(edit.page)) ? Number(edit.page) : 0,
         occurrence: Number.isFinite(Number(edit.occurrence)) ? Number(edit.occurrence) : -1,
+        group: false,
         rect: Array.isArray(edit.rect) ? edit.rect.map(Number).filter(Number.isFinite) : [],
         alignRect: Array.isArray(edit.alignRect) ? edit.alignRect.map(Number).filter(Number.isFinite) : [],
         visualRect: Array.isArray(edit.visualRect) ? edit.visualRect.map(Number).filter(Number.isFinite) : [],
@@ -2521,6 +2537,280 @@
     });
     document.fonts?.ready?.then?.(() => docuflexBuildTextBoxes()).catch?.(() => {});
   };
+  const docuflexImageBoxNode = (target) => {
+    if (!(target instanceof Element)) return null;
+    return target.closest('.docuflex-image-box');
+  };
+  const docuflexSelectImageBox = (box) => {
+    if (!(box instanceof HTMLElement)) return;
+    document.querySelectorAll('.docuflex-textbox.docuflex-active').forEach((candidate) => {
+      candidate.classList.remove('docuflex-active', 'docuflex-editor-open');
+    });
+    document.querySelectorAll('.docuflex-image-box.docuflex-active').forEach((candidate) => {
+      if (candidate !== box) candidate.classList.remove('docuflex-active');
+    });
+    box.classList.add('docuflex-active');
+    parent.postMessage({ source: 'docuflex-html-editor', type: 'deactivate' }, '*');
+  };
+  const docuflexClampImageBoxToPage = (box) => {
+    const page = box?.closest?.('.pf');
+    if (!(box instanceof HTMLElement) || !(page instanceof HTMLElement)) return;
+    const width = Number.parseFloat(box.style.width || '0') || box.offsetWidth || 1;
+    const height = Number.parseFloat(box.style.height || '0') || box.offsetHeight || 1;
+    const left = Number.parseFloat(box.style.left || '0') || 0;
+    const top = Number.parseFloat(box.style.top || '0') || 0;
+    const pageWidth = page.offsetWidth || page.clientWidth || width;
+    const pageHeight = page.offsetHeight || page.clientHeight || height;
+    box.style.left = Math.min(Math.max(0, left), Math.max(0, pageWidth - width)) + 'px';
+    box.style.top = Math.min(Math.max(0, top), Math.max(0, pageHeight - height)) + 'px';
+  };
+  const docuflexApplyImageBoxGeometry = (box) => {
+    if (!(box instanceof HTMLElement)) return;
+    const imageId = box.dataset.docuflexImageId || '';
+    const image = imageId ? document.querySelector('[data-docuflex-image-id="' + CSS.escape(imageId) + '"]') : null;
+    if (!(image instanceof HTMLElement)) return;
+    const left = Number.parseFloat(box.style.left || '0') || 0;
+    const top = Number.parseFloat(box.style.top || '0') || 0;
+    const width = Number.parseFloat(box.style.width || '0') || box.offsetWidth || 1;
+    const height = Number.parseFloat(box.style.height || '0') || box.offsetHeight || 1;
+    const originalLeft = Number.parseFloat(box.dataset.docuflexOriginalLeft || '0') || 0;
+    const originalTop = Number.parseFloat(box.dataset.docuflexOriginalTop || '0') || 0;
+    const originalWidth = Math.max(1, Number.parseFloat(box.dataset.docuflexOriginalWidth || '1') || 1);
+    const originalHeight = Math.max(1, Number.parseFloat(box.dataset.docuflexOriginalHeight || '1') || 1);
+    image.style.transformOrigin = 'top left';
+    image.style.translate = (left - originalLeft) + 'px ' + (top - originalTop) + 'px';
+    image.style.scale = (width / originalWidth) + ' ' + (height / originalHeight);
+    box.dataset.docuflexMoved = 'true';
+    parent.postMessage({ source: 'docuflex-html-editor', type: 'geometry' }, '*');
+    docuflexScheduleDirty(null);
+  };
+  const docuflexImageBoxRect = (box, original = false) => {
+    const page = box?.closest?.('.pf');
+    if (!(box instanceof HTMLElement) || !(page instanceof HTMLElement)) return [];
+    const pageWidth = page.offsetWidth || page.clientWidth || 0;
+    const pageHeight = page.offsetHeight || page.clientHeight || 0;
+    if (!pageWidth || !pageHeight) return [];
+    const left = Number.parseFloat(original ? box.dataset.docuflexOriginalLeft || '0' : box.style.left || '0') || 0;
+    const top = Number.parseFloat(original ? box.dataset.docuflexOriginalTop || '0' : box.style.top || '0') || 0;
+    const width = Number.parseFloat(original ? box.dataset.docuflexOriginalWidth || '0' : box.style.width || '0') || 0;
+    const height = Number.parseFloat(original ? box.dataset.docuflexOriginalHeight || '0' : box.style.height || '0') || 0;
+    return [
+      left / pageWidth,
+      1 - ((top + height) / pageHeight),
+      (left + width) / pageWidth,
+      1 - (top / pageHeight)
+    ];
+  };
+  const docuflexCollectImageEdits = () => Array.from(document.querySelectorAll('.docuflex-image-box[data-docuflex-moved="true"]')).flatMap((box) => {
+    if (!(box instanceof HTMLElement)) return [];
+    const rect = docuflexImageBoxRect(box);
+    const originalRect = docuflexImageBoxRect(box, true);
+    if (rect.length < 4 || originalRect.length < 4) return [];
+    return [{
+      kind: 'image',
+      id: box.dataset.docuflexImageId || '',
+      page: Number.parseInt(box.dataset.docuflexPage || '0', 10) || 0,
+      occurrence: Number.parseInt(box.dataset.docuflexOccurrence || '-1', 10),
+      group: box.dataset.docuflexImageGroup === 'true',
+      rect,
+      originalRect
+    }];
+  });
+  const docuflexCreateImageBox = (image, index) => {
+    if (!(image instanceof HTMLImageElement) || image.classList.contains('docuflex-page-raster-backdrop')) return null;
+    if (image.dataset.docuflexImageId) {
+      return document.querySelector('.docuflex-image-box[data-docuflex-image-id="' + CSS.escape(image.dataset.docuflexImageId) + '"]');
+    }
+    const page = image.closest('.pf');
+    if (!(page instanceof HTMLElement)) return null;
+    const pageRect = page.getBoundingClientRect();
+    const imageRect = image.getBoundingClientRect();
+    const scaleX = page.offsetWidth ? pageRect.width / page.offsetWidth : 1;
+    const scaleY = page.offsetHeight ? pageRect.height / page.offsetHeight : 1;
+    if (!pageRect.width || !pageRect.height || imageRect.width < 6 || imageRect.height < 6) return null;
+    const left = (imageRect.left - pageRect.left) / (scaleX || 1);
+    const top = (imageRect.top - pageRect.top) / (scaleY || 1);
+    const width = imageRect.width / (scaleX || 1);
+    const height = imageRect.height / (scaleY || 1);
+    const imageId = 'image-' + index;
+    image.dataset.docuflexImageId = imageId;
+    const box = document.createElement('div');
+    box.className = 'docuflex-image-box';
+    box.dataset.docuflexImageId = imageId;
+    box.dataset.docuflexOriginalLeft = String(left);
+    box.dataset.docuflexOriginalTop = String(top);
+    box.dataset.docuflexOriginalWidth = String(width);
+    box.dataset.docuflexOriginalHeight = String(height);
+    box.dataset.docuflexPage = String(docuflexPage(image));
+    const pageImages = Array.from(page.querySelectorAll('img.bi:not(.docuflex-page-raster-backdrop)'));
+    box.dataset.docuflexOccurrence = String(pageImages.indexOf(image));
+    // pdf2htmlEX commonly flattens every PDF image on a page into one composite
+    // bitmap. Persist that one visible box as a transform of the page's image
+    // group rather than incorrectly matching it to just one PDF image object.
+    box.dataset.docuflexImageGroup = String(pageImages.length === 1);
+    box.style.left = left + 'px';
+    box.style.top = top + 'px';
+    box.style.width = width + 'px';
+    box.style.height = height + 'px';
+
+    const hitArea = document.createElement('span');
+    hitArea.className = 'docuflex-image-hit-area';
+    hitArea.contentEditable = 'false';
+    const controls = document.createElement('span');
+    controls.className = 'docuflex-selection-controls';
+    controls.contentEditable = 'false';
+    ['nw', 'ne', 'se', 'sw'].forEach((position) => {
+      const handle = document.createElement('span');
+      handle.className = 'docuflex-selection-handle docuflex-selection-handle-' + position;
+      handle.dataset.docuflexResize = position;
+      handle.contentEditable = 'false';
+      controls.append(handle);
+    });
+    ['n', 'e', 's', 'w'].forEach((position) => {
+      const edge = document.createElement('span');
+      edge.className = 'docuflex-selection-edge docuflex-selection-edge-' + position;
+      edge.dataset.docuflexResize = position;
+      edge.contentEditable = 'false';
+      controls.append(edge);
+    });
+    box.append(hitArea, controls);
+    page.append(box);
+
+    let drag = null;
+    hitArea.addEventListener('pointerdown', (event) => {
+      docuflexSelectImageBox(box);
+      drag = {
+        x: event.clientX,
+        y: event.clientY,
+        left: Number.parseFloat(box.style.left || '0') || 0,
+        top: Number.parseFloat(box.style.top || '0') || 0,
+        scaleX: page.offsetWidth ? page.getBoundingClientRect().width / page.offsetWidth : 1,
+        scaleY: page.offsetHeight ? page.getBoundingClientRect().height / page.offsetHeight : 1
+      };
+      hitArea.setPointerCapture(event.pointerId);
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    hitArea.addEventListener('pointermove', (event) => {
+      if (!drag) return;
+      box.style.left = drag.left + ((event.clientX - drag.x) / (drag.scaleX || 1)) + 'px';
+      box.style.top = drag.top + ((event.clientY - drag.y) / (drag.scaleY || 1)) + 'px';
+      docuflexClampImageBoxToPage(box);
+      docuflexApplyImageBoxGeometry(box);
+      event.preventDefault();
+    });
+    hitArea.addEventListener('pointerup', (event) => {
+      drag = null;
+      if (hitArea.hasPointerCapture(event.pointerId)) hitArea.releasePointerCapture(event.pointerId);
+      docuflexApplyImageBoxGeometry(box);
+    });
+    hitArea.addEventListener('click', (event) => {
+      docuflexSelectImageBox(box);
+      event.preventDefault();
+      event.stopPropagation();
+    });
+
+    box.querySelectorAll('.docuflex-selection-handle, .docuflex-selection-edge').forEach((resizeHandle) => {
+      if (!(resizeHandle instanceof HTMLElement)) return;
+      let resizeDrag = null;
+      resizeHandle.addEventListener('pointerdown', (event) => {
+        docuflexSelectImageBox(box);
+        resizeDrag = {
+          x: event.clientX,
+          y: event.clientY,
+          left: Number.parseFloat(box.style.left || '0') || 0,
+          top: Number.parseFloat(box.style.top || '0') || 0,
+          width: Number.parseFloat(box.style.width || '0') || box.offsetWidth || 12,
+          height: Number.parseFloat(box.style.height || '0') || box.offsetHeight || 12,
+          scaleX: page.offsetWidth ? page.getBoundingClientRect().width / page.offsetWidth : 1,
+          scaleY: page.offsetHeight ? page.getBoundingClientRect().height / page.offsetHeight : 1,
+          direction: resizeHandle.dataset.docuflexResize || 'se'
+        };
+        resizeHandle.setPointerCapture(event.pointerId);
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      resizeHandle.addEventListener('pointermove', (event) => {
+        if (!resizeDrag) return;
+        const dx = (event.clientX - resizeDrag.x) / (resizeDrag.scaleX || 1);
+        const dy = (event.clientY - resizeDrag.y) / (resizeDrag.scaleY || 1);
+        const west = resizeDrag.direction.includes('w');
+        const north = resizeDrag.direction.includes('n');
+        const horizontal = resizeDrag.direction.includes('e') || west;
+        const vertical = resizeDrag.direction.includes('s') || north;
+        const ratio = Math.max(1, Number.parseFloat(box.dataset.docuflexOriginalWidth || String(resizeDrag.width)) || resizeDrag.width)
+          / Math.max(1, Number.parseFloat(box.dataset.docuflexOriginalHeight || String(resizeDrag.height)) || resizeDrag.height);
+        let nextWidth = horizontal ? Math.max(12, resizeDrag.width + (west ? -dx : dx)) : resizeDrag.width;
+        let nextHeight = vertical ? Math.max(12, resizeDrag.height + (north ? -dy : dy)) : resizeDrag.height;
+        if (event.shiftKey) {
+          if (horizontal && vertical) {
+            if (Math.abs(nextWidth / resizeDrag.width - 1) >= Math.abs(nextHeight / resizeDrag.height - 1)) {
+              nextHeight = Math.max(12, nextWidth / ratio);
+            } else {
+              nextWidth = Math.max(12, nextHeight * ratio);
+            }
+          } else if (horizontal) {
+            nextHeight = Math.max(12, nextWidth / ratio);
+          } else if (vertical) {
+            nextWidth = Math.max(12, nextHeight * ratio);
+          }
+        }
+        const fixedRight = resizeDrag.left + resizeDrag.width;
+        const fixedBottom = resizeDrag.top + resizeDrag.height;
+        const pageWidth = page.offsetWidth || page.clientWidth || fixedRight;
+        const pageHeight = page.offsetHeight || page.clientHeight || fixedBottom;
+        const maxWidth = west ? fixedRight : pageWidth - resizeDrag.left;
+        const maxHeight = north ? fixedBottom : pageHeight - resizeDrag.top;
+        if (event.shiftKey) {
+          const constrainedScale = Math.min(
+            1,
+            maxWidth / Math.max(1, nextWidth),
+            maxHeight / Math.max(1, nextHeight)
+          );
+          nextWidth = Math.max(12, nextWidth * constrainedScale);
+          nextHeight = Math.max(12, nextHeight * constrainedScale);
+        } else {
+          nextWidth = Math.max(12, Math.min(nextWidth, maxWidth));
+          nextHeight = Math.max(12, Math.min(nextHeight, maxHeight));
+        }
+        let nextLeft = west ? fixedRight - nextWidth : resizeDrag.left;
+        let nextTop = north ? fixedBottom - nextHeight : resizeDrag.top;
+        if (event.shiftKey && horizontal && !vertical) nextTop = resizeDrag.top + (resizeDrag.height - nextHeight) / 2;
+        if (event.shiftKey && vertical && !horizontal) nextLeft = resizeDrag.left + (resizeDrag.width - nextWidth) / 2;
+        nextLeft = Math.max(0, Math.min(nextLeft, pageWidth - nextWidth));
+        nextTop = Math.max(0, Math.min(nextTop, pageHeight - nextHeight));
+        box.style.left = nextLeft + 'px';
+        box.style.top = nextTop + 'px';
+        box.style.width = nextWidth + 'px';
+        box.style.height = nextHeight + 'px';
+        docuflexApplyImageBoxGeometry(box);
+        event.preventDefault();
+      });
+      resizeHandle.addEventListener('pointerup', (event) => {
+        resizeDrag = null;
+        if (resizeHandle.hasPointerCapture(event.pointerId)) resizeHandle.releasePointerCapture(event.pointerId);
+        docuflexApplyImageBoxGeometry(box);
+      });
+    });
+    return box;
+  };
+  const docuflexBuildImageBoxes = () => {
+    document.querySelectorAll('.docuflex-image-box').forEach((box) => {
+      if (!(box instanceof HTMLElement)) return;
+      const id = box.dataset.docuflexImageId || '';
+      const image = id ? document.querySelector('[data-docuflex-image-id="' + CSS.escape(id) + '"]') : null;
+      if (!(image instanceof HTMLImageElement) || image.classList.contains('docuflex-page-raster-backdrop')) box.remove();
+    });
+    let index = document.querySelectorAll('.docuflex-image-box').length;
+    document.querySelectorAll('.pf img.bi:not(.docuflex-page-raster-backdrop)').forEach((image) => {
+      if (!(image instanceof HTMLImageElement)) return;
+      if (!image.complete) {
+        image.addEventListener('load', () => docuflexCreateImageBox(image, index++), { once: true });
+        return;
+      }
+      docuflexCreateImageBox(image, index++);
+    });
+  };
   const docuflexImagePaperColor = (element) => {
     if (!(element instanceof HTMLImageElement) || !element.complete || !element.naturalWidth || !element.naturalHeight) return '';
     try {
@@ -2687,7 +2977,7 @@
       newText
     }];
     });
-    return [...textBoxEdits, ...lineEdits];
+    return [...textBoxEdits, ...lineEdits, ...docuflexCollectImageEdits()];
   };
   const docuflexRebaseEdits = () => {
     const rebasedLines = new Map();
@@ -2758,6 +3048,7 @@
     docuflexBackdropTimer = setTimeout(() => {
       docuflexBackdropTimer = 0;
       docuflexHideDuplicatePageBackdrops();
+      docuflexBuildImageBoxes();
     }, 300);
   };
   window.__docuflexCollectEdits = docuflexCollectEdits;
@@ -2821,7 +3112,10 @@
   addEventListener('DOMContentLoaded', () => {
     document.body.contentEditable = 'false';
     docuflexHideDuplicatePageBackdrops();
-    requestAnimationFrame(docuflexHideDuplicatePageBackdrops);
+    requestAnimationFrame(() => {
+      docuflexHideDuplicatePageBackdrops();
+      docuflexBuildImageBoxes();
+    });
     document.querySelectorAll('.t').forEach((node) => {
       if (!node.dataset.docuflexOriginalText) {
         node.dataset.docuflexOriginalText = docuflexVisibleText(node) || docuflexNormalizeText(node.textContent);
@@ -2850,10 +3144,19 @@
       pages.forEach((page) => requestAnimationFrame(() => docuflexBuildTextBoxes(page)));
     });
     textboxObserver.observe(document.body, { childList: true, subtree: true });
-    addEventListener('load', () => docuflexBuildTextBoxes(), { once: true });
+    addEventListener('load', () => {
+      docuflexHideDuplicatePageBackdrops();
+      docuflexBuildTextBoxes();
+      docuflexBuildImageBoxes();
+    }, { once: true });
     addEventListener('scroll', () => docuflexScheduleTextBoxBuild(null, 120), { passive: true });
     addEventListener('resize', () => docuflexScheduleTextBoxBuild(null, 160), { passive: true });
     document.addEventListener('pointerdown', (event) => {
+      if (!docuflexImageBoxNode(event.target)) {
+        document.querySelectorAll('.docuflex-image-box.docuflex-active').forEach((box) => {
+          box.classList.remove('docuflex-active');
+        });
+      }
       if (!docuflexTextBoxNode(event.target)) {
         document.querySelectorAll('.docuflex-textbox.docuflex-active').forEach((box) => {
           box.classList.remove('docuflex-active', 'docuflex-editor-open');
@@ -3002,7 +3305,8 @@
   .t.docuflex-group-hidden * {
     visibility: hidden !important;
   }
-  .docuflex-textbox {
+  .docuflex-textbox,
+  .docuflex-image-box {
     position: absolute;
     z-index: 6 !important;
     box-sizing: border-box;
@@ -3013,11 +3317,18 @@
     outline-offset: 1px;
     background: transparent;
   }
-  .docuflex-textbox:hover {
+  .docuflex-image-box {
+    z-index: 3 !important;
+    min-width: 12px;
+    min-height: 12px;
+  }
+  .docuflex-textbox:hover,
+  .docuflex-image-box:hover {
     outline-color: rgba(22, 132, 248, 0.48);
   }
   .docuflex-textbox.docuflex-active,
-  .docuflex-textbox.docuflex-live-edit {
+  .docuflex-textbox.docuflex-live-edit,
+  .docuflex-image-box.docuflex-active {
     outline: 2px solid #0d99ff;
     outline-offset: 0;
     box-shadow: none;
@@ -3066,6 +3377,14 @@
     pointer-events: auto !important;
     background: transparent;
   }
+  .docuflex-image-hit-area {
+    position: absolute;
+    z-index: 3;
+    inset: 0;
+    cursor: move;
+    pointer-events: auto !important;
+    background: transparent;
+  }
   .docuflex-textbox.docuflex-editor-open .docuflex-textbox-hit-area {
     pointer-events: none !important;
   }
@@ -3076,7 +3395,8 @@
     display: none;
     pointer-events: none !important;
   }
-  .docuflex-textbox.docuflex-active .docuflex-selection-controls {
+  .docuflex-textbox.docuflex-active .docuflex-selection-controls,
+  .docuflex-image-box.docuflex-active .docuflex-selection-controls {
     display: block;
   }
   .docuflex-selection-handle {
@@ -3093,7 +3413,8 @@
     pointer-events: none !important;
   }
   .docuflex-textbox.docuflex-active > .docuflex-selection-handle,
-  .docuflex-textbox.docuflex-active .docuflex-selection-handle {
+  .docuflex-textbox.docuflex-active .docuflex-selection-handle,
+  .docuflex-image-box.docuflex-active .docuflex-selection-handle {
     display: block;
     pointer-events: auto !important;
   }
@@ -3104,7 +3425,8 @@
     background: transparent;
     pointer-events: none !important;
   }
-  .docuflex-textbox.docuflex-active .docuflex-selection-edge {
+  .docuflex-textbox.docuflex-active .docuflex-selection-edge,
+  .docuflex-image-box.docuflex-active .docuflex-selection-edge {
     display: block;
     pointer-events: auto !important;
   }
