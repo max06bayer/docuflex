@@ -73,6 +73,8 @@
   let htmlEditorStarted = false;
   /** @type {File | null} */
   let htmlTextEditBaseFile = null;
+  /** @type {ArrayBuffer | null} */
+  let workingPdfBytes = null;
   let htmlEditorReady = false;
   let htmlViewportMode = false;
   let htmlViewportVisible = false;
@@ -479,7 +481,15 @@
         htmlViewportMode = true;
         return;
       }
-      htmlTextEditBaseFile = workingFile;
+      // Files restored from IndexedDB can remain backed by a temporary WebKit
+      // blob resource. Safari may render that resource once, then reject a
+      // second arrayBuffer() read when the text editor mounts. Build the text
+      // editor's file from the durable byte snapshot retained by loadPdf().
+      const textEditBytes = workingPdfBytes?.slice(0) ?? await workingFile.arrayBuffer();
+      htmlTextEditBaseFile = new File([textEditBytes], workingFile.name, {
+        type: workingFile.type || 'application/pdf',
+        lastModified: workingFile.lastModified
+      });
       editorTransition = 'Preparing Document for Editing';
       htmlEditorReady = false;
       htmlEditorStarted = true;
@@ -4705,6 +4715,10 @@
       ]);
       pdfjs.GlobalWorkerOptions.workerSrc = worker.default;
       const bytes = await workingFile.arrayBuffer();
+      // Keep a separate copy because PDF.js may transfer its input buffer to
+      // the worker. This remains readable even when an IndexedDB-backed WebKit
+      // blob URL becomes invalid after the initial document load.
+      workingPdfBytes = bytes.slice(0);
       const loadingTask = pdfjs.getDocument({ data: bytes });
       pdfLoadingTask = loadingTask;
       loadingTask.onPassword = () => {
@@ -5860,7 +5874,7 @@
         bind:zoomLevel
         {activeTool}
         {zoomingOut}
-        file={workingFile}
+        file={htmlTextEditBaseFile ?? workingFile}
         visualAnnotations={htmlVisualAnnotations}
         onEditorReady={handleHtmlEditorReady}
       />
