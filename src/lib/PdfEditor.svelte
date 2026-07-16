@@ -7,7 +7,8 @@
 
   /** @typedef {{ x: number; y: number; pressure: number }} StrokePoint */
   /** @typedef {{ id: number; type: 'marker' | 'pen'; points: StrokePoint[] }} AnnotationStroke */
-  /** @typedef {{ id: number; type: 'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'measure' | 'crop' | 'textfield' | 'signature' | 'image' | 'checkbox' | 'input'; x: number; y: number; width: number; height: number; rotation: number; text?: string; imageData?: string; fieldName?: string; fieldValue?: string | boolean; existingField?: boolean; readOnly?: boolean; opacity?: number; cornerRadius?: number; fillPresent?: boolean; fillEnabled?: boolean; fillColor?: string; fillAlpha?: number; strokePresent?: boolean; strokeEnabled?: boolean; strokeColor?: string; strokeAlpha?: number; strokeWidth?: number; shadowPresent?: boolean; shadowEnabled?: boolean; shadowOpacity?: number; shadowBlur?: number; shadowX?: number; shadowY?: number; backgroundBlurPresent?: boolean; backgroundBlurEnabled?: boolean; backgroundBlur?: number }} AnnotationShape */
+  /** @typedef {{ start: number; end: number; color?: string; fontFamily?: string; fontSize?: number; fontWeight?: number; letterSpacing?: number; textAlign?: 'left' | 'center' | 'right'; italic?: boolean; underline?: boolean; strikethrough?: boolean }} TextStyleRange */
+  /** @typedef {{ id: number; type: 'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'measure' | 'crop' | 'textfield' | 'signature' | 'image' | 'checkbox' | 'input'; x: number; y: number; width: number; height: number; rotation: number; text?: string; textColor?: string; fontFamily?: string; fontSize?: number; fontWeight?: number; letterSpacing?: number; lineHeight?: number; textAlign?: 'left' | 'center' | 'right'; verticalAlign?: 'top' | 'middle' | 'bottom'; italic?: boolean; underline?: boolean; strikethrough?: boolean; textStyleRanges?: TextStyleRange[]; imageData?: string; fieldName?: string; fieldValue?: string | boolean; existingField?: boolean; readOnly?: boolean; opacity?: number; cornerRadius?: number; fillPresent?: boolean; fillEnabled?: boolean; fillColor?: string; fillAlpha?: number; strokePresent?: boolean; strokeEnabled?: boolean; strokeColor?: string; strokeAlpha?: number; strokeWidth?: number; shadowPresent?: boolean; shadowEnabled?: boolean; shadowOpacity?: number; shadowBlur?: number; shadowX?: number; shadowY?: number; backgroundBlurPresent?: boolean; backgroundBlurEnabled?: boolean; backgroundBlur?: number }} AnnotationShape */
   /** @typedef {{ id: number; type: 'highlight' | 'underline' | 'crossout' | 'blackout' | 'whiteout'; rects: { x: number; y: number; width: number; height: number; color?: [number, number, number] }[] }} TextHighlight */
 
   /** @type {File} */
@@ -168,8 +169,10 @@
   let applyingHistoryState = false;
   /** @type {{ pageIndex: number; id: number } | null} */
   let hoveredShape = null;
-  /** @type {{ property: 'fillColor' | 'strokeColor'; hue: number; saturation: number; value: number; alpha: number } | null} */
+  /** @type {{ property: 'fillColor' | 'strokeColor' | 'textColor'; hue: number; saturation: number; value: number; alpha: number } | null} */
   let colorPicker = null;
+  /** @type {{ pageIndex: number; id: number; start: number; end: number } | null} */
+  let textFormatSelection = null;
   /** @type {HTMLInputElement | null} */
   let inspectorXInput = null;
   /** @type {HTMLInputElement | null} */
@@ -1784,7 +1787,10 @@
     function commitTextFieldOnOutsidePointer(event) {
       if (!editingTextShape) return;
       const target = event.target;
-      if (target instanceof Element && target.closest('[data-text-editor]')) return;
+      if (
+        target instanceof Element &&
+        target.closest('[data-text-editor], .selection-properties-panel, .figma-color-picker')
+      ) return;
       commitActiveTextField();
     }
 
@@ -2123,15 +2129,280 @@
     return lines;
   }
 
+  /** @param {AnnotationShape} shape @param {number} index */
+  function resolvedTextStyle(shape, index) {
+    const style = {
+      color: shape.textColor ?? '#171717',
+      fontFamily: shape.fontFamily ?? 'Helvetica',
+      fontSize: Math.max(6, shape.fontSize ?? 16),
+      fontWeight: shape.fontWeight ?? 400,
+      letterSpacing: shape.letterSpacing ?? 0,
+      textAlign: shape.textAlign ?? 'left',
+      italic: Boolean(shape.italic),
+      underline: Boolean(shape.underline),
+      strikethrough: Boolean(shape.strikethrough)
+    };
+    for (const range of shape.textStyleRanges ?? []) {
+      if (index < range.start || index >= range.end) continue;
+      if (range.color) style.color = range.color;
+      if (range.fontFamily) style.fontFamily = range.fontFamily;
+      if (range.fontSize !== undefined) style.fontSize = range.fontSize;
+      if (range.fontWeight !== undefined) style.fontWeight = range.fontWeight;
+      if (range.letterSpacing !== undefined) style.letterSpacing = range.letterSpacing;
+      if (range.textAlign !== undefined) style.textAlign = range.textAlign;
+      if (range.italic !== undefined) style.italic = range.italic;
+      if (range.underline !== undefined) style.underline = range.underline;
+      if (range.strikethrough !== undefined) style.strikethrough = range.strikethrough;
+    }
+    return style;
+  }
+
+  /** @param {ReturnType<typeof resolvedTextStyle>} style */
+  function textStyleKey(style) {
+    return [style.color, style.fontFamily, style.fontSize, style.fontWeight, style.letterSpacing, style.textAlign, style.italic, style.underline, style.strikethrough].join('|');
+  }
+
+  /** @param {AnnotationShape} shape @param {number} index @param {string} character */
+  function styledCharacterWidth(shape, index, character) {
+    if (!textMeasureContext && typeof document !== 'undefined') textMeasureContext = document.createElement('canvas').getContext('2d');
+    const style = resolvedTextStyle(shape, index);
+    if (!textMeasureContext) return style.fontSize * 0.5 + style.letterSpacing;
+    textMeasureContext.font = `${style.italic ? 'italic ' : ''}${style.fontWeight} ${style.fontSize}px ${textFontStack(style.fontFamily)}`;
+    return textMeasureContext.measureText(character).width + style.letterSpacing;
+  }
+
+  /** @param {string | undefined} family */
+  function textFontStack(family) {
+    if (family === 'Arial') return 'Arial, Helvetica, sans-serif';
+    if (family === 'Inter') return 'Inter Variable, Inter, Arial, sans-serif';
+    if (family === 'Geist') return 'Geist Variable, Geist, Inter Variable, Arial, sans-serif';
+    if (family === 'Times New Roman') return '"Times New Roman", Times, serif';
+    if (family === 'Georgia') return 'Georgia, "Times New Roman", serif';
+    if (family === 'Courier New') return '"Courier New", Courier, monospace';
+    return 'Helvetica, Arial, sans-serif';
+  }
+
+  /** @param {AnnotationShape} shape @param {number} start @param {number} end */
+  function styledTextWidth(shape, start, end) {
+    let width = 0;
+    for (let index = start; index < end; index += 1) width += styledCharacterWidth(shape, index, shape.text?.[index] ?? '');
+    return width;
+  }
+
+  /** @param {AnnotationShape} shape */
+  function styledTextFieldLines(shape) {
+    const text = (shape.text ?? '').replace(/\r\n?/g, '\n');
+    const availableWidth = Math.max(1, shape.width - 12);
+    /** @type {{ start: number; end: number; width: number; segments: { start: number; end: number; text: string; style: ReturnType<typeof resolvedTextStyle> }[] }[]} */
+    const lines = [];
+    let lineStart = 0;
+    let index = 0;
+    let width = 0;
+    let lastSpace = -1;
+
+    /** @param {number} start @param {number} end */
+    const pushLine = (start, end) => {
+      while (end > start && text[end - 1] === ' ') end -= 1;
+      const segments = [];
+      let segmentStart = start;
+      let previousKey = start < end ? textStyleKey(resolvedTextStyle(shape, start)) : '';
+      for (let cursor = start + 1; cursor <= end; cursor += 1) {
+        const nextKey = cursor < end ? textStyleKey(resolvedTextStyle(shape, cursor)) : '';
+        if (cursor === end || nextKey !== previousKey) {
+          segments.push({ start: segmentStart, end: cursor, text: text.slice(segmentStart, cursor), style: resolvedTextStyle(shape, segmentStart) });
+          segmentStart = cursor;
+          previousKey = nextKey;
+        }
+      }
+      lines.push({ start, end, width: styledTextWidth(shape, start, end), segments });
+    };
+
+    while (index < text.length) {
+      if (text[index] === '\n') {
+        pushLine(lineStart, index);
+        index += 1;
+        lineStart = index;
+        width = 0;
+        lastSpace = -1;
+        continue;
+      }
+      const characterWidth = styledCharacterWidth(shape, index, text[index]);
+      if (width + characterWidth > availableWidth && index > lineStart) {
+        const lineEnd = lastSpace >= lineStart ? lastSpace : index;
+        pushLine(lineStart, lineEnd);
+        index = lineEnd;
+        while (index < text.length && text[index] === ' ') index += 1;
+        lineStart = index;
+        width = 0;
+        lastSpace = -1;
+        continue;
+      }
+      width += characterWidth;
+      if (text[index] === ' ') lastSpace = index;
+      index += 1;
+    }
+    if (lineStart <= text.length) pushLine(lineStart, text.length);
+    return lines.length ? lines : [{ start: 0, end: 0, width: 0, segments: [] }];
+  }
+
+  /** @param {AnnotationShape} shape */
+  function editableTextSegments(shape) {
+    const text = shape.text ?? '';
+    const boundaries = new Set([0, text.length]);
+    for (const range of shape.textStyleRanges ?? []) {
+      boundaries.add(clamp(range.start, 0, text.length));
+      boundaries.add(clamp(range.end, 0, text.length));
+    }
+    const sorted = [...boundaries].sort((a, b) => a - b);
+    return sorted.slice(0, -1).map((start, index) => ({
+      text: text.slice(start, sorted[index + 1]),
+      style: resolvedTextStyle(shape, start)
+    })).filter((segment) => segment.text);
+  }
+
+  /** @param {AnnotationShape} shape */
+  function editableTextParagraphs(shape) {
+    const text = shape.text ?? '';
+    const paragraphs = [];
+    let start = 0;
+    while (start <= text.length) {
+      const newline = text.indexOf('\n', start);
+      const end = newline < 0 ? text.length : newline;
+      const boundaries = new Set([start, end]);
+      for (const range of shape.textStyleRanges ?? []) {
+        if (range.start > start && range.start < end) boundaries.add(range.start);
+        if (range.end > start && range.end < end) boundaries.add(range.end);
+      }
+      const sorted = [...boundaries].sort((a, b) => a - b);
+      const segments = sorted.slice(0, -1).map((segmentStart, index) => ({
+        text: text.slice(segmentStart, sorted[index + 1]),
+        style: resolvedTextStyle(shape, segmentStart),
+        alignmentOverride: textAlignmentOverride(shape, segmentStart)
+      })).filter((segment) => segment.text);
+      paragraphs.push({ start, end, alignment: resolvedTextStyle(shape, start).textAlign, segments });
+      if (newline < 0) break;
+      start = newline + 1;
+    }
+    return paragraphs;
+  }
+
+  /** @param {AnnotationShape} shape @param {string} text @param {{ start: number; end: number }} range */
+  function visualLineTextRange(shape, text, range) {
+    const lines = styledTextFieldLines({ ...shape, text });
+    const selectedLines = lines.filter((line) => line.end > range.start && line.start < range.end);
+    if (!selectedLines.length) return range;
+    return { start: selectedLines[0].start, end: selectedLines[selectedLines.length - 1].end };
+  }
+
+  /** @param {AnnotationShape} shape @param {number} index */
+  function textAlignmentOverride(shape, index) {
+    let alignment = null;
+    for (const range of shape.textStyleRanges ?? []) {
+      if (index >= range.start && index < range.end && range.textAlign !== undefined) alignment = range.textAlign;
+    }
+    return alignment;
+  }
+
+  /** @param {AnnotationShape} shape */
+  function textEditorRenderKey(shape) {
+    return JSON.stringify([
+      shape.text,
+      shape.textColor,
+      shape.fontFamily,
+      shape.fontSize,
+      shape.fontWeight,
+      shape.letterSpacing,
+      shape.lineHeight,
+      shape.textAlign,
+      shape.verticalAlign,
+      shape.italic,
+      shape.underline,
+      shape.strikethrough,
+      shape.textStyleRanges
+    ]);
+  }
+
+  /** @param {AnnotationShape} shape @param {number} lineCount */
+  function textFieldStartY(shape, lineCount) {
+    const fontSize = Math.max(6, shape.fontSize ?? 16);
+    const lineHeight = Math.max(fontSize, shape.lineHeight ?? 19.2);
+    const contentHeight = lineCount * lineHeight;
+    if (shape.verticalAlign === 'middle') return (shape.height - contentHeight) / 2 + fontSize * 0.95;
+    if (shape.verticalAlign === 'bottom') return shape.height - contentHeight + fontSize * 0.95 - 3;
+    return fontSize * 0.95;
+  }
+
   /** @param {number} id @param {boolean} [selectAll] */
   function focusTextEditor(id, selectAll = false) {
-    const editor = viewer?.querySelector(`textarea[data-text-editor="${id}"]`);
-    if (!(editor instanceof HTMLTextAreaElement)) return;
-    editor.style.height = 'auto';
-    editor.style.height = `${Math.max(Number(editor.dataset.minHeight) || 0, editor.scrollHeight)}px`;
+    const editor = viewer?.querySelector(`[data-text-editor="${id}"]`);
+    if (!(editor instanceof HTMLElement)) return;
     editor.focus();
-    if (selectAll) editor.select();
-    else editor.setSelectionRange(editor.value.length, editor.value.length);
+    const selection = window.getSelection();
+    if (!selection) return;
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    if (!selectAll) range.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  /** @param {number} id @param {number} start @param {number} end */
+  function restoreTextEditorSelection(id, start, end) {
+    const editor = viewer?.querySelector(`[data-text-editor="${id}"]`);
+    if (!(editor instanceof HTMLElement)) return;
+    const locate = (/** @type {number} */ target) => {
+      const paragraphs = [...editor.querySelectorAll('[data-text-paragraph]')];
+      const paragraph = paragraphs.find((item) => target >= Number(item.getAttribute('data-start')) && target <= Number(item.getAttribute('data-end'))) ?? paragraphs.at(-1);
+      if (!(paragraph instanceof HTMLElement)) return null;
+      const localTarget = clamp(target - Number(paragraph.dataset.start ?? 0), 0, paragraph.innerText.length);
+      const walker = document.createTreeWalker(paragraph, NodeFilter.SHOW_TEXT);
+      let node = walker.nextNode();
+      let offset = 0;
+      while (node) {
+        const length = node.textContent?.length ?? 0;
+        if (localTarget <= offset + length) return { node, offset: clamp(localTarget - offset, 0, length) };
+        offset += length;
+        node = walker.nextNode();
+      }
+      return { node: paragraph, offset: paragraph.childNodes.length };
+    };
+    const startPoint = locate(start);
+    const endPoint = locate(end);
+    if (!startPoint || !endPoint) return focusTextEditor(id);
+    const range = document.createRange();
+    range.setStart(startPoint.node, startPoint.offset);
+    range.setEnd(endPoint.node, endPoint.offset);
+    const selection = window.getSelection();
+    editor.focus({ preventScroll: true });
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  }
+
+  /** @param {number} id @param {number} start @param {number} end @param {Partial<AnnotationShape>} changes */
+  function paintTextEditorSelection(id, start, end, changes) {
+    if (end <= start) return;
+    restoreTextEditorSelection(id, start, end);
+    const selection = window.getSelection();
+    if (!selection?.rangeCount) return;
+    const range = selection.getRangeAt(0);
+    const editor = viewer?.querySelector(`[data-text-editor="${id}"]`);
+    if (!(editor instanceof HTMLElement) || !editor.contains(range.commonAncestorContainer)) return;
+    const span = document.createElement('span');
+    if (typeof changes.textColor === 'string') span.style.color = changes.textColor;
+    if (typeof changes.fontFamily === 'string') span.style.fontFamily = textFontStack(changes.fontFamily);
+    if (typeof changes.fontSize === 'number') span.style.fontSize = `${changes.fontSize}px`;
+    if (typeof changes.fontWeight === 'number') span.style.fontWeight = String(changes.fontWeight);
+    if (typeof changes.letterSpacing === 'number') span.style.letterSpacing = `${changes.letterSpacing}px`;
+    if (typeof changes.italic === 'boolean') span.style.fontStyle = changes.italic ? 'italic' : 'normal';
+    const current = resolvedTextStyle(findShape(selectedShape?.pageIndex ?? -1, id) ?? /** @type {AnnotationShape} */ ({}), start);
+    const underline = typeof changes.underline === 'boolean' ? changes.underline : current.underline;
+    const strikethrough = typeof changes.strikethrough === 'boolean' ? changes.strikethrough : current.strikethrough;
+    span.style.textDecoration = `${underline ? 'underline' : ''}${underline && strikethrough ? ' ' : ''}${strikethrough ? 'line-through' : ''}` || 'none';
+    span.append(range.extractContents());
+    range.insertNode(span);
+    range.selectNodeContents(span);
+    selection.removeAllRanges();
+    selection.addRange(range);
   }
 
   /** @param {number} pageIndex @param {number} id */
@@ -2144,24 +2415,140 @@
   /** @param {Event} event */
   function updateTextField(event) {
     const input = event.currentTarget;
-    if (!(input instanceof HTMLTextAreaElement)) return;
-    input.style.height = 'auto';
-    input.style.height = `${Math.max(Number(input.dataset.minHeight) || 0, input.scrollHeight)}px`;
+    if (!(input instanceof HTMLElement)) return;
+    input.style.minHeight = `${Math.max(Number(input.dataset.minHeight) || 0, input.scrollHeight)}px`;
+  }
+
+  /** @param {Element} editor */
+  function richTextEditorValue(editor) {
+    return editor instanceof HTMLElement ? editor.innerText.replace(/\r/g, '') : '';
+  }
+
+  /** @param {string} previousText @param {string} nextText @param {TextStyleRange[]} ranges */
+  function remapTextStyleRanges(previousText, nextText, ranges) {
+    if (previousText === nextText) return ranges;
+    let prefix = 0;
+    while (prefix < previousText.length && prefix < nextText.length && previousText[prefix] === nextText[prefix]) prefix += 1;
+    let oldEnd = previousText.length;
+    let newEnd = nextText.length;
+    while (oldEnd > prefix && newEnd > prefix && previousText[oldEnd - 1] === nextText[newEnd - 1]) {
+      oldEnd -= 1;
+      newEnd -= 1;
+    }
+    const delta = newEnd - oldEnd;
+    return ranges.map((range) => {
+      if (range.end <= prefix) return range;
+      if (range.start >= oldEnd) return { ...range, start: range.start + delta, end: range.end + delta };
+      return {
+        ...range,
+        start: Math.min(range.start, prefix),
+        end: Math.max(prefix, range.end >= oldEnd ? range.end + delta : newEnd)
+      };
+    }).filter((range) => range.end > range.start);
   }
 
   function commitActiveTextField() {
     if (!editingTextShape) return;
     const { pageIndex, id } = editingTextShape;
-    const input = viewer?.querySelector(`textarea[data-text-editor="${id}"]`);
+    const input = viewer?.querySelector(`[data-text-editor="${id}"]`);
     const shape = findShape(pageIndex, id);
-    if (shape && input instanceof HTMLTextAreaElement) replaceShape(pageIndex, { ...shape, text: input.value });
+    if (shape && input instanceof HTMLElement) {
+      const text = richTextEditorValue(input);
+      replaceShape(pageIndex, {
+        ...shape,
+        text,
+        textStyleRanges: remapTextStyleRanges(shape.text ?? '', text, shape.textStyleRanges ?? [])
+      });
+    }
     editingTextShape = null;
+  }
+
+  /** @param {Event} event @param {number} pageIndex @param {number} id */
+  function captureTextFormatSelection(event, pageIndex, id) {
+    const input = event.currentTarget;
+    if (!(input instanceof HTMLElement)) return;
+    const selection = window.getSelection();
+    if (!selection?.rangeCount || !input.contains(selection.anchorNode) || !input.contains(selection.focusNode)) return;
+    const pointOffset = (/** @type {Node} */ node, /** @type {number} */ offset) => {
+      const element = node instanceof Element ? node : node.parentElement;
+      const paragraph = element?.closest('[data-text-paragraph]');
+      if (!(paragraph instanceof HTMLElement)) return 0;
+      const before = document.createRange();
+      before.selectNodeContents(paragraph);
+      before.setEnd(node, offset);
+      return Number(paragraph.dataset.start ?? 0) + before.toString().length;
+    };
+    if (!selection.anchorNode || !selection.focusNode) return;
+    const anchor = pointOffset(selection.anchorNode, selection.anchorOffset);
+    const focus = pointOffset(selection.focusNode, selection.focusOffset);
+    textFormatSelection = { pageIndex, id, start: Math.min(anchor, focus), end: Math.max(anchor, focus) };
+  }
+
+  /** @param {AnnotationShape} shape */
+  function selectedTextRange(shape) {
+    if (!selectedShape || !textFormatSelection || textFormatSelection.pageIndex !== selectedShape.pageIndex || textFormatSelection.id !== shape.id) return null;
+    return textFormatSelection.end > textFormatSelection.start ? textFormatSelection : null;
+  }
+
+  /** @param {AnnotationShape} shape @param {'textColor' | 'fontFamily' | 'fontSize' | 'fontWeight' | 'letterSpacing' | 'textAlign' | 'italic' | 'underline' | 'strikethrough'} property */
+  function textFormattingValue(shape, property) {
+    const range = selectedTextRange(shape);
+    if (!range) return shape[property];
+    const style = resolvedTextStyle(shape, range.start);
+    if (property === 'textColor') return style.color;
+    return style[property];
+  }
+
+  /** @param {Partial<AnnotationShape>} changes */
+  function updateTextFormatting(changes) {
+    const shape = inspectorSelection()[0];
+    if (!shape || shape.type !== 'textfield' || !selectedShape) return;
+    const range = selectedTextRange(shape);
+    const inlineChange = ['textColor', 'fontFamily', 'fontSize', 'fontWeight', 'letterSpacing', 'textAlign', 'italic', 'underline', 'strikethrough']
+      .some((property) => Object.prototype.hasOwnProperty.call(changes, property));
+    if (!range || !inlineChange) {
+      const editor = viewer?.querySelector(`[data-text-editor="${shape.id}"]`);
+      const text = editor instanceof HTMLElement ? richTextEditorValue(editor) : shape.text ?? '';
+      const caret = textFormatSelection?.id === shape.id ? textFormatSelection : null;
+      replaceShape(selectedShape.pageIndex, {
+        ...shape,
+        ...changes,
+        text,
+        textStyleRanges: remapTextStyleRanges(shape.text ?? '', text, shape.textStyleRanges ?? [])
+      });
+      if (editingTextShape?.id === shape.id) {
+        tick().then(() => restoreTextEditorSelection(shape.id, caret?.start ?? text.length, caret?.end ?? text.length));
+      }
+      return;
+    }
+    const input = viewer?.querySelector(`[data-text-editor="${shape.id}"]`);
+    const text = input instanceof HTMLElement ? richTextEditorValue(input) : shape.text ?? '';
+    const existingRanges = remapTextStyleRanges(shape.text ?? '', text, shape.textStyleRanges ?? []);
+    const formattingRange = changes.textAlign !== undefined ? visualLineTextRange(shape, text, range) : range;
+    /** @type {TextStyleRange} */
+    const inlineStyle = { start: formattingRange.start, end: formattingRange.end };
+    if (typeof changes.textColor === 'string') inlineStyle.color = changes.textColor;
+    if (typeof changes.fontFamily === 'string') inlineStyle.fontFamily = changes.fontFamily;
+    if (typeof changes.fontSize === 'number') inlineStyle.fontSize = changes.fontSize;
+    if (typeof changes.fontWeight === 'number') inlineStyle.fontWeight = changes.fontWeight;
+    if (typeof changes.letterSpacing === 'number') inlineStyle.letterSpacing = changes.letterSpacing;
+    if (changes.textAlign === 'left' || changes.textAlign === 'center' || changes.textAlign === 'right') inlineStyle.textAlign = changes.textAlign;
+    if (typeof changes.italic === 'boolean') inlineStyle.italic = changes.italic;
+    if (typeof changes.underline === 'boolean') inlineStyle.underline = changes.underline;
+    if (typeof changes.strikethrough === 'boolean') inlineStyle.strikethrough = changes.strikethrough;
+    paintTextEditorSelection(shape.id, formattingRange.start, formattingRange.end, changes);
+    replaceShape(selectedShape.pageIndex, {
+      ...shape,
+      text,
+      textStyleRanges: [...existingRanges, inlineStyle]
+    });
+    tick().then(() => restoreTextEditorSelection(shape.id, range.start, range.end));
   }
 
   /** @param {FocusEvent} event @param {number} id */
   function retainTextEditorFocus(event, id) {
     const input = event.currentTarget;
-    if (!(input instanceof HTMLTextAreaElement)) return;
+    if (!(input instanceof HTMLElement)) return;
     setTimeout(() => {
       if (!textEditorPointerActive || editingTextShape?.id !== id || !input.isConnected || document.activeElement === input) return;
       input.focus({ preventScroll: true });
@@ -2476,7 +2863,7 @@
     return `#${[red, green, blue].map((channel) => Math.round((channel + match) * 255).toString(16).padStart(2, '0')).join('').toUpperCase()}`;
   }
 
-  /** @param {'fillColor' | 'strokeColor'} property */
+  /** @param {'fillColor' | 'strokeColor' | 'textColor'} property */
   function openColorPicker(property) {
     const shape = inspectorSelection()[0];
     if (!shape) return;
@@ -2486,18 +2873,24 @@
     }
     const color = property === 'fillColor'
       ? shape.fillColor ?? '#ff4d55'
-      : shape.strokeColor ?? (shapeHasFill(shape) ? '#de3542' : '#ff4d55');
+      : property === 'strokeColor'
+        ? shape.strokeColor ?? (shapeHasFill(shape) ? '#de3542' : '#ff4d55')
+        : String(textFormattingValue(shape, 'textColor') ?? '#171717');
     const hsv = hexToHsv(color);
     colorPicker = {
       property,
       ...hsv,
-      alpha: property === 'fillColor' ? shape.fillAlpha ?? 1 : shape.strokeAlpha ?? 1
+      alpha: property === 'fillColor' ? shape.fillAlpha ?? 1 : property === 'strokeColor' ? shape.strokeAlpha ?? 1 : 1
     };
   }
 
   function applyColorPicker() {
     if (!colorPicker) return;
     const color = hsvToHex(colorPicker.hue, colorPicker.saturation, colorPicker.value);
+    if (colorPicker.property === 'textColor') {
+      updateTextFormatting({ textColor: color });
+      return;
+    }
     const alphaProperty = colorPicker.property === 'fillColor' ? 'fillAlpha' : 'strokeAlpha';
     const prefix = colorPicker.property === 'fillColor' ? 'fill' : 'stroke';
     updateSelectedShapes({
@@ -2676,6 +3069,14 @@
     if (colorPicker?.property === property) colorPicker = { ...colorPicker, ...hexToHsv(color) };
   }
 
+  /** @param {string} value */
+  function updateSelectedTextColor(value) {
+    const color = normalizedHex(value);
+    if (!color) return;
+    updateTextFormatting({ textColor: color });
+    if (colorPicker?.property === 'textColor') colorPicker = { ...colorPicker, ...hexToHsv(color) };
+  }
+
   /** @param {'fill' | 'stroke' | 'shadow' | 'backgroundBlur'} property */
   function toggleShapeProperty(property) {
     const shape = inspectorSelection()[0];
@@ -2752,7 +3153,10 @@
   function setShapeSelection(pageIndex, ids) {
     const previousKey = selectedShape ? `${selectedShape.pageIndex}:${[...selectedShapeIds].join(',')}` : '';
     const nextKey = ids.length ? `${pageIndex}:${ids.join(',')}` : '';
-    if (previousKey !== nextKey) colorPicker = null;
+    if (previousKey !== nextKey) {
+      colorPicker = null;
+      textFormatSelection = null;
+    }
     selectedShapeIds = new Set(ids);
     selectedShape = ids.length ? { pageIndex, id: ids[ids.length - 1] } : null;
     const bounds = selectionBounds(selectedShapesOnPage(pageIndex));
@@ -4193,6 +4597,20 @@
           radiusY: Math.max(0, shape.cornerRadius ?? 0) / pageSize.height,
           color: shapeExportStyle(shape),
           text: shape.text ?? '',
+          textStyle: shape.type === 'textfield' ? {
+            color: shape.textColor ?? '#171717',
+            fontFamily: shape.fontFamily ?? 'Helvetica',
+            fontSize: shape.fontSize ?? 16,
+            fontWeight: shape.fontWeight ?? 400,
+            letterSpacing: shape.letterSpacing ?? 0,
+            lineHeight: shape.lineHeight ?? 19.2,
+            textAlign: shape.textAlign ?? 'left',
+            verticalAlign: shape.verticalAlign ?? 'top',
+            italic: Boolean(shape.italic),
+            underline: Boolean(shape.underline),
+            strikethrough: Boolean(shape.strikethrough)
+          } : null,
+          textStyleRanges: shape.type === 'textfield' ? shape.textStyleRanges ?? [] : [],
           imageData: shape.imageData ?? '',
           fieldName: shape.fieldName ?? '',
           fieldValue: shape.fieldValue ?? '',
@@ -4377,7 +4795,9 @@
         {@const currentSelection = currentSelectedShapes.length > 1 && multiSelectionFrame?.pageIndex === index && selectedShape ? frameAsShape(multiSelectionFrame, selectedShape.id) : singleSelection}
         {@const hoverSelection = hoveredShape?.pageIndex === index ? findShape(index, hoveredShape.id) : null}
         {@const cropShape = (shapes[index] ?? []).find((shape) => shape.type === 'crop')}
-        {@const activeTextEditorShape = editingTextShape?.pageIndex === index ? findShape(index, editingTextShape.id) : null}
+        {@const activeTextEditorShape = editingTextShape?.pageIndex === index
+          ? (shapes[index] ?? []).find((shape) => shape.id === editingTextShape?.id) ?? null
+          : null}
         <div class="pdf-page" aria-label={`Page ${index + 1}`}>
           <canvas></canvas>
           {#if appliedWatermarkText && pageSizes[index]}
@@ -4461,7 +4881,7 @@
             aria-label={`Shapes on page ${index + 1}`}
           >
             {#each (shapes[index] ?? []) as shape (shape.id)}
-              {@const wrappedTextLines = shape.type === 'textfield' ? textFieldLines(shape.text ?? '', shape.width) : []}
+              {@const wrappedTextLines = shape.type === 'textfield' ? styledTextFieldLines(shape) : []}
               <g
                 transform={`rotate(${shape.rotation} ${shape.x + shape.width / 2} ${shape.y + shape.height / 2})`}
                 style={shapeEffectStyle(shape)}
@@ -4473,8 +4893,8 @@
                 {/if}
                 {#if shape.type === 'textfield'}
                   {#if editingTextShape?.pageIndex !== index || editingTextShape.id !== shape.id}
-                    {@const displayedLines = shape.text ? wrappedTextLines : ['Type here']}
-                    {@const displayedHeight = Math.max(shape.height, Math.max(1, displayedLines.length) * 19.2)}
+                    {@const displayedHeight = Math.max(shape.height, Math.max(1, wrappedTextLines.length) * Math.max(shape.fontSize ?? 16, shape.lineHeight ?? 19.2))}
+                    {@const textStartY = textFieldStartY(shape, wrappedTextLines.length)}
                     <g
                       class="pdf-text-field-display"
                       class:placeholder={!shape.text}
@@ -4488,9 +4908,28 @@
                         width={shape.width}
                         height={displayedHeight}
                       />
-                      {#each displayedLines as line, lineIndex}
-                        <text x={shape.x + 6} y={shape.y + 15.2 + lineIndex * 19.2}>{line}</text>
-                      {/each}
+                      {#if shape.text}
+                        {#each wrappedTextLines as line, lineIndex}
+                          {@const lineAlignment = resolvedTextStyle(shape, line.start).textAlign}
+                          {@const lineX = lineAlignment === 'center' ? shape.x + shape.width / 2 : lineAlignment === 'right' ? shape.x + shape.width - 6 : shape.x + 6}
+                          {@const lineAnchor = lineAlignment === 'center' ? 'middle' : lineAlignment === 'right' ? 'end' : 'start'}
+                          <text
+                            x={lineX}
+                            y={shape.y + textStartY + lineIndex * Math.max(shape.fontSize ?? 16, shape.lineHeight ?? 19.2)}
+                            text-anchor={lineAnchor}
+                          >{#each line.segments as segment}<tspan
+                              fill={segment.style.color}
+                              style:font-family={textFontStack(segment.style.fontFamily)}
+                              font-size={`${segment.style.fontSize}px`}
+                              font-weight={segment.style.fontWeight}
+                              font-style={segment.style.italic ? 'italic' : 'normal'}
+                              letter-spacing={`${segment.style.letterSpacing}px`}
+                              text-decoration={`${segment.style.underline ? 'underline' : ''}${segment.style.underline && segment.style.strikethrough ? ' ' : ''}${segment.style.strikethrough ? 'line-through' : ''}` || 'none'}
+                            >{segment.text}</tspan>{/each}</text>
+                        {/each}
+                      {:else}
+                        <text x={shape.x + 6} y={shape.y + 15.2}>Type here</text>
+                      {/if}
                     </g>
                   {/if}
                 {:else if shape.type === 'signature' || shape.type === 'image'}
@@ -5001,20 +5440,50 @@
               style:transform={`rotate(${activeTextEditorShape.rotation}deg)`}
               style:transform-origin={`${activeTextEditorShape.width / 2}px ${activeTextEditorShape.height / 2}px`}
             >
-              <textarea
+              {#key textEditorRenderKey(activeTextEditorShape)}
+              <div
                 data-text-editor={activeTextEditorShape.id}
                 data-min-height={activeTextEditorShape.height}
+                contenteditable="true"
+                tabindex="0"
+                role="textbox"
+                aria-multiline="true"
                 aria-label="Edit text field"
-                rows="1"
-                wrap="soft"
-                value={activeTextEditorShape.text ?? ''}
+                style:color={activeTextEditorShape.textColor ?? '#171717'}
+                style:font-family={textFontStack(activeTextEditorShape.fontFamily)}
+                style:font-size={`${Math.max(6, activeTextEditorShape.fontSize ?? 16)}px`}
+                style:font-weight={activeTextEditorShape.fontWeight ?? 400}
+                style:font-style={activeTextEditorShape.italic ? 'italic' : 'normal'}
+                style:letter-spacing={`${activeTextEditorShape.letterSpacing ?? 0}px`}
+                style:line-height={`${Math.max(activeTextEditorShape.fontSize ?? 16, activeTextEditorShape.lineHeight ?? 19.2)}px`}
+                style:text-align={activeTextEditorShape.textAlign ?? 'left'}
+                style:text-decoration={`${activeTextEditorShape.underline ? 'underline' : ''}${activeTextEditorShape.underline && activeTextEditorShape.strikethrough ? ' ' : ''}${activeTextEditorShape.strikethrough ? 'line-through' : ''}` || 'none'}
                 oninput={updateTextField}
                 onkeydown={handleTextFieldKeydown}
                 onpointerdown={handleTextEditorPointerDown}
+                onpointerup={(event) => captureTextFormatSelection(event, index, activeTextEditorShape.id)}
+                onkeyup={(event) => captureTextFormatSelection(event, index, activeTextEditorShape.id)}
                 onmousedown={(event) => event.stopPropagation()}
                 onclick={(event) => event.stopPropagation()}
                 onblur={(event) => retainTextEditorFocus(event, activeTextEditorShape.id)}
-              ></textarea>
+              >{#each editableTextParagraphs(activeTextEditorShape) as paragraph}<div
+                  data-text-paragraph
+                  data-start={paragraph.start}
+                  data-end={paragraph.end}
+                  style:text-align={paragraph.alignment}
+                  >{#each paragraph.segments as segment}<span
+                    style:display={segment.alignmentOverride ? 'block' : 'inline'}
+                    style:width={segment.alignmentOverride ? '100%' : null}
+                    style:text-align={segment.alignmentOverride ?? null}
+                    style:color={segment.style.color}
+                    style:font-family={textFontStack(segment.style.fontFamily)}
+                    style:font-size={`${segment.style.fontSize}px`}
+                    style:font-weight={segment.style.fontWeight}
+                    style:font-style={segment.style.italic ? 'italic' : 'normal'}
+                    style:letter-spacing={`${segment.style.letterSpacing}px`}
+                    style:text-decoration={`${segment.style.underline ? 'underline' : ''}${segment.style.underline && segment.style.strikethrough ? ' ' : ''}${segment.style.strikethrough ? 'line-through' : ''}` || 'none'}
+                  >{segment.text}</span>{/each}{#if !paragraph.segments.length}<br />{/if}</div>{/each}</div>
+              {/key}
             </div>
           {/if}
           <svg
@@ -5160,6 +5629,68 @@
             <label class="inspector-field inspector-field-wide"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectionGeometry('rotation', value))}>Rotation</span><input class="scrubbable-number" bind:this={inspectorRotationInput} type="number" step="1" value={Math.round(inspectedObjects.length === 1 ? inspectedObject.rotation : (multiSelectionFrame?.rotation ?? 0))} onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectionGeometry('rotation', value))} oninput={(event) => updateSelectionGeometry('rotation', Number(event.currentTarget.value))} /><em>°</em></label>
           </section>
         {/if}
+        {#if inspectedObjects.length === 1 && inspectedObject.type === 'textfield'}
+          <section class="selection-property-section typography-section" aria-label="Typography">
+            <div class="typography-color-row">
+              <span>Color</span>
+              <input aria-label="Text color hex" value={String(textFormattingValue(inspectedObject, 'textColor') ?? '#171717').replace('#', '').toUpperCase()} oninput={(event) => updateSelectedTextColor(event.currentTarget.value)} />
+              <button class="property-color" type="button" aria-label="Open text color picker" class:active={colorPicker?.property === 'textColor'} style:--property-color={String(textFormattingValue(inspectedObject, 'textColor') ?? '#171717')} onclick={() => openColorPicker('textColor')}></button>
+            </div>
+            <label class="typography-select-row">
+              <span>Font</span>
+              <select value={String(textFormattingValue(inspectedObject, 'fontFamily') ?? 'Helvetica')} onchange={(event) => updateTextFormatting({ fontFamily: event.currentTarget.value })}>
+                <option value="Helvetica">Helvetica</option>
+                <option value="Arial">Arial</option>
+                <option value="Times New Roman">Times New Roman</option>
+                <option value="Georgia">Georgia</option>
+                <option value="Courier New">Courier New</option>
+                <option value="Inter">Inter</option>
+                <option value="Geist">Geist</option>
+              </select>
+            </label>
+            <div class="typography-weight-size-grid">
+              <label class="typography-select-row compact-weight-row">
+                <span>Weight</span>
+                <select value={String(textFormattingValue(inspectedObject, 'fontWeight') ?? 400)} onchange={(event) => updateTextFormatting({ fontWeight: Number(event.currentTarget.value) })}>
+                  <option value="300">Light</option>
+                  <option value="400">Regular</option>
+                  <option value="500">Medium</option>
+                  <option value="600">Semibold</option>
+                  <option value="700">Bold</option>
+                  <option value="800">Extra Bold</option>
+                </select>
+              </label>
+              <label class="inspector-field typography-size-field"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => updateTextFormatting({ fontSize: value }), { step: 0.1, min: 6, max: 200 })}>Size</span><input class="scrubbable-number" type="number" min="6" max="200" step="0.5" value={Number(textFormattingValue(inspectedObject, 'fontSize') ?? 16)} onpointerdown={(event) => startNumberScrub(event, (value) => updateTextFormatting({ fontSize: value }), { step: 0.1, min: 6, max: 200 })} oninput={(event) => updateTextFormatting({ fontSize: Math.max(6, Number(event.currentTarget.value)) })} /></label>
+            </div>
+            <div class="typography-spacing-grid">
+              <label class="inspector-field"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => updateTextFormatting({ letterSpacing: value }), { step: 0.05, min: -5, max: 20 })}>Letter</span><input class="scrubbable-number" type="number" min="-5" max="20" step="0.1" value={inspectedObject.letterSpacing ?? 0} onpointerdown={(event) => startNumberScrub(event, (value) => updateTextFormatting({ letterSpacing: value }), { step: 0.05, min: -5, max: 20 })} oninput={(event) => updateTextFormatting({ letterSpacing: Number(event.currentTarget.value) })} /></label>
+              <label class="inspector-field"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => updateTextFormatting({ lineHeight: value }), { step: 0.1, min: 8, max: 80 })}>Line</span><input class="scrubbable-number" type="number" min="8" max="80" step="0.5" value={inspectedObject.lineHeight ?? 19.2} onpointerdown={(event) => startNumberScrub(event, (value) => updateTextFormatting({ lineHeight: value }), { step: 0.1, min: 8, max: 80 })} oninput={(event) => updateTextFormatting({ lineHeight: Math.max(8, Number(event.currentTarget.value)) })} /></label>
+            </div>
+            <div class="typography-alignment-row">
+              <span>Horizontal</span>
+              <div class="typography-segments" aria-label="Horizontal text alignment">
+                <button class:active={(textFormattingValue(inspectedObject, 'textAlign') ?? 'left') === 'left'} type="button" title="Align left" onclick={() => updateTextFormatting({ textAlign: 'left' })}><img src="/align/align-left.svg" alt="" /></button>
+                <button class:active={textFormattingValue(inspectedObject, 'textAlign') === 'center'} type="button" title="Align center" onclick={() => updateTextFormatting({ textAlign: 'center' })}><img src="/align/align-center.svg" alt="" /></button>
+                <button class:active={textFormattingValue(inspectedObject, 'textAlign') === 'right'} type="button" title="Align right" onclick={() => updateTextFormatting({ textAlign: 'right' })}><img src="/align/align-right.svg" alt="" /></button>
+              </div>
+            </div>
+            <div class="typography-alignment-row">
+              <span>Vertical</span>
+              <div class="typography-segments" aria-label="Vertical text alignment">
+                <button class:active={(inspectedObject.verticalAlign ?? 'top') === 'top'} type="button" title="Align top" onclick={() => updateTextFormatting({ verticalAlign: 'top' })}><img src="/align/align-top.svg" alt="" /></button>
+                <button class:active={inspectedObject.verticalAlign === 'middle'} type="button" title="Align middle" onclick={() => updateTextFormatting({ verticalAlign: 'middle' })}><img src="/align/align-middle.svg" alt="" /></button>
+                <button class:active={inspectedObject.verticalAlign === 'bottom'} type="button" title="Align bottom" onclick={() => updateTextFormatting({ verticalAlign: 'bottom' })}><img src="/align/align-bottom.svg" alt="" /></button>
+              </div>
+            </div>
+            <div class="typography-style-row" aria-label="Text styles">
+              <button class:active={Number(textFormattingValue(inspectedObject, 'fontWeight') ?? 400) >= 700} type="button" title="Bold" onclick={() => updateTextFormatting({ fontWeight: Number(textFormattingValue(inspectedObject, 'fontWeight') ?? 400) >= 700 ? 400 : 700 })}><b>B</b></button>
+              <button class:active={Boolean(textFormattingValue(inspectedObject, 'italic'))} type="button" title="Italic" onclick={() => updateTextFormatting({ italic: !Boolean(textFormattingValue(inspectedObject, 'italic')) })}><i>I</i></button>
+              <button class:active={Boolean(textFormattingValue(inspectedObject, 'underline'))} type="button" title="Underline" onclick={() => updateTextFormatting({ underline: !Boolean(textFormattingValue(inspectedObject, 'underline')) })}><u>U</u></button>
+              <button class:active={Boolean(textFormattingValue(inspectedObject, 'strikethrough'))} type="button" title="Strikethrough" onclick={() => updateTextFormatting({ strikethrough: !Boolean(textFormattingValue(inspectedObject, 'strikethrough')) })}><s>S</s></button>
+            </div>
+          </section>
+        {/if}
+        {#if shapeHasFill(inspectedObject) || shapeSupportsStroke(inspectedObject)}
         <section class="selection-property-section object-properties" aria-label="Object properties">
           {#if shapeHasFill(inspectedObject)}
             <div class:property-disabled={!shapePropertyEnabled(inspectedObject, 'fill')} class="object-property-row color-property-row">
@@ -5179,6 +5710,7 @@
             </div>
           {/if}
         </section>
+        {/if}
       </div>
     </div>
     {#if colorPicker}
@@ -5199,9 +5731,11 @@
         <div class="picker-slider hue-slider" role="slider" aria-label="Hue" aria-valuenow={Math.round(colorPicker.hue)} tabindex="0" onpointerdown={(event) => updateColorControl(event, 'hue')} onpointermove={(event) => { if (event.buttons) updateColorControl(event, 'hue'); }}>
           <span style:left={`${colorPicker.hue / 360 * 100}%`} style:--thumb-color={pickerHex}></span>
         </div>
-        <div class="picker-slider alpha-slider" style:--picker-color={pickerHex} role="slider" aria-label="Color opacity" aria-valuenow={Math.round(colorPicker.alpha * 100)} tabindex="0" onpointerdown={(event) => updateColorControl(event, 'alpha')} onpointermove={(event) => { if (event.buttons) updateColorControl(event, 'alpha'); }}>
-          <span style:left={`${colorPicker.alpha * 100}%`} style:--thumb-color={colorWithAlpha(pickerHex, colorPicker.alpha)}></span>
-        </div>
+        {#if colorPicker.property !== 'textColor'}
+          <div class="picker-slider alpha-slider" style:--picker-color={pickerHex} role="slider" aria-label="Color opacity" aria-valuenow={Math.round(colorPicker.alpha * 100)} tabindex="0" onpointerdown={(event) => updateColorControl(event, 'alpha')} onpointermove={(event) => { if (event.buttons) updateColorControl(event, 'alpha'); }}>
+            <span style:left={`${colorPicker.alpha * 100}%`} style:--thumb-color={colorWithAlpha(pickerHex, colorPicker.alpha)}></span>
+          </div>
+        {/if}
       </div>
     {/if}
   {/if}
@@ -5692,7 +6226,7 @@
     min-width: 0;
     min-height: 0;
     overflow: hidden;
-    background: #e9e9e9;
+    background: #f5f5f5;
   }
 
   .protect-panel {
@@ -5819,6 +6353,156 @@
   .object-properties {
     display: grid;
     gap: 9px;
+  }
+
+  .typography-section {
+    display: grid;
+    gap: 9px;
+  }
+
+  .typography-color-row,
+  .typography-select-row {
+    display: grid;
+    grid-template-columns: 74px minmax(0, 1fr) 38px;
+    align-items: center;
+    box-sizing: border-box;
+    min-width: 0;
+    height: 39px;
+    overflow: hidden;
+    border: 1px solid #d7d7d7;
+    border-radius: 8px;
+    background: #f3f3f3;
+    font-size: 18px;
+  }
+
+  .typography-color-row > span,
+  .typography-select-row > span {
+    padding-left: 10px;
+    color: #7a7a7a;
+  }
+
+  .typography-color-row input,
+  .typography-select-row select {
+    box-sizing: border-box;
+    min-width: 0;
+    width: 100%;
+    height: 100%;
+    padding: 0 8px;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: #111;
+    font: inherit;
+    text-align: right;
+  }
+
+  .typography-select-row {
+    grid-template-columns: 74px minmax(0, 1fr);
+  }
+
+  .typography-select-row select {
+    cursor: pointer;
+    text-align-last: right;
+    appearance: none;
+    -webkit-appearance: none;
+  }
+
+  .typography-weight-size-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.45fr) minmax(0, 0.9fr);
+    gap: 9px;
+  }
+
+  .compact-weight-row {
+    grid-template-columns: 67px minmax(0, 1fr);
+  }
+
+  .typography-size-field {
+    padding-inline: 9px;
+  }
+
+  .typography-size-field input {
+    padding-left: 5px;
+    text-align: right;
+  }
+
+  .typography-spacing-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 9px;
+  }
+
+  .typography-alignment-row {
+    display: grid;
+    grid-template-columns: 82px minmax(0, 1fr);
+    align-items: center;
+    min-width: 0;
+    color: #7a7a7a;
+    font-size: 16px;
+  }
+
+  .typography-segments,
+  .typography-style-row {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    height: 39px;
+    overflow: hidden;
+    border: 1px solid #d7d7d7;
+    border-radius: 8px;
+    background: #f3f3f3;
+  }
+
+  .typography-segments button,
+  .typography-style-row button {
+    position: relative;
+    display: grid;
+    place-items: center;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    border-left: 1px solid #d7d7d7;
+    background: transparent;
+    color: #656565;
+    font: inherit;
+    font-size: 17px;
+    cursor: pointer;
+    transition: color 150ms ease, background-color 150ms ease;
+  }
+
+  .typography-segments button:first-child,
+  .typography-style-row button:first-child {
+    border-left: 0;
+  }
+
+  .typography-segments button:hover,
+  .typography-style-row button:hover {
+    color: #111;
+    background: #ededed;
+  }
+
+  .typography-segments button.active,
+  .typography-style-row button.active {
+    z-index: 1;
+    color: #fff;
+    background: #111;
+  }
+
+  .typography-segments img {
+    display: block;
+    width: 21px;
+    height: 21px;
+    object-fit: contain;
+    pointer-events: none;
+    transition: filter 150ms ease;
+  }
+
+  .typography-segments button.active img {
+    filter: brightness(0) invert(1);
+  }
+
+  .typography-style-row {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    margin-top: 2px;
   }
 
   .object-property-row {
@@ -6971,7 +7655,7 @@
     width: 117.6470588%;
     height: 117.6470588%;
     overflow: hidden;
-    background: #e9e9e9;
+    background: #f5f5f5;
     visibility: hidden;
     pointer-events: none;
   }
@@ -7379,7 +8063,7 @@
     white-space: normal;
   }
 
-  .pdf-text-editor-overlay textarea {
+  .pdf-text-editor-overlay [data-text-editor] {
     box-sizing: border-box;
     width: 100%;
     min-height: 100%;
@@ -7392,7 +8076,7 @@
     font: inherit;
     line-height: inherit;
     overflow-wrap: anywhere;
-    resize: none;
+    white-space: pre-wrap;
   }
 
   .pdf-text-field-display text {

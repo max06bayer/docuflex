@@ -2639,7 +2639,7 @@
     height: 100%;
     margin: 0;
     overflow: auto;
-    background: #e9e9e9;
+    background: #f5f5f5;
     scrollbar-width: none;
   }
   html::-webkit-scrollbar { display: none; }
@@ -2654,7 +2654,7 @@
       var(--docuflex-viewer-padding-right, 35.556px)
       var(--docuflex-viewer-padding-bottom, 59.259px);
     overflow: visible;
-    background: #e9e9e9;
+    background: #f5f5f5;
   }
   #sidebar, #outline, .loading-indicator {
     display: none !important;
@@ -3867,7 +3867,7 @@ ${setupScript}`;
     inset: 0;
     min-height: 0;
     overflow: hidden;
-    background: #e9e9e9;
+    background: #f5f5f5;
     scrollbar-width: none;
   }
 
@@ -3884,7 +3884,7 @@ ${setupScript}`;
     width: 100%;
     min-height: 100%;
     border: 0;
-    background: #e9e9e9;
+    background: #f5f5f5;
   }
 
   .html-editor-state {

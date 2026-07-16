@@ -9,6 +9,17 @@
     return annotations.filter((annotation) => Number(annotation?.page) === page);
   }
 
+  /** @param {string | undefined} family */
+  function textFontStack(family) {
+    if (family === 'Arial') return 'Arial, Helvetica, sans-serif';
+    if (family === 'Inter') return 'Inter Variable, Inter, Arial, sans-serif';
+    if (family === 'Geist') return 'Geist Variable, Geist, Inter Variable, Arial, sans-serif';
+    if (family === 'Times New Roman') return '"Times New Roman", Times, serif';
+    if (family === 'Georgia') return 'Georgia, "Times New Roman", serif';
+    if (family === 'Courier New') return '"Courier New", Courier, monospace';
+    return 'Helvetica, Arial, sans-serif';
+  }
+
   /** @param {any[]} points @param {number} width @param {number} height */
   function normalizedPath(points, width, height) {
     return points.map((point, index) => `${index ? 'L' : 'M'} ${Number(point.x || 0) * width} ${Number(point.y || 0) * height}`).join(' ');
@@ -48,6 +59,47 @@
       ? `drop-shadow(${Number(style[16] ?? 0)}px ${Number(style[17] ?? 3)}px ${Number(style[15] ?? 6)}px rgba(0,0,0,${Math.max(0, Math.min(1, Number(style[14] ?? 0.25)))}))`
       : 'none';
     return `opacity:${Math.max(0, Math.min(1, Number(style[6] ?? 1)))};filter:${shadow};--object-fill:${fill};--object-stroke:${stroke};--object-stroke-width:${Math.max(0, Number(style[7] ?? 1.35))}px`;
+  }
+
+  /** @param {any} annotation @param {number} index */
+  function annotationTextStyle(annotation, index) {
+    const style = {
+      color: annotation.textStyle?.color ?? '#171717',
+      fontFamily: annotation.textStyle?.fontFamily ?? 'Helvetica',
+      fontSize: Math.max(6, Number(annotation.textStyle?.fontSize ?? 16)),
+      fontWeight: Number(annotation.textStyle?.fontWeight ?? 400),
+      letterSpacing: Number(annotation.textStyle?.letterSpacing ?? 0),
+      italic: Boolean(annotation.textStyle?.italic),
+      underline: Boolean(annotation.textStyle?.underline),
+      strikethrough: Boolean(annotation.textStyle?.strikethrough)
+    };
+    for (const range of annotation.textStyleRanges ?? []) {
+      if (index < Number(range.start ?? 0) || index >= Number(range.end ?? 0)) continue;
+      if (range.color) style.color = range.color;
+      if (range.fontFamily) style.fontFamily = range.fontFamily;
+      if (range.fontSize !== undefined) style.fontSize = Math.max(6, Number(range.fontSize));
+      if (range.fontWeight !== undefined) style.fontWeight = Number(range.fontWeight);
+      if (range.letterSpacing !== undefined) style.letterSpacing = Number(range.letterSpacing);
+      if (range.italic !== undefined) style.italic = Boolean(range.italic);
+      if (range.underline !== undefined) style.underline = Boolean(range.underline);
+      if (range.strikethrough !== undefined) style.strikethrough = Boolean(range.strikethrough);
+    }
+    return style;
+  }
+
+  /** @param {any} annotation */
+  function annotationTextSegments(annotation) {
+    const text = String(annotation.text ?? '');
+    const boundaries = new Set([0, text.length]);
+    for (const range of annotation.textStyleRanges ?? []) {
+      boundaries.add(Math.max(0, Math.min(text.length, Number(range.start ?? 0))));
+      boundaries.add(Math.max(0, Math.min(text.length, Number(range.end ?? 0))));
+    }
+    const sorted = [...boundaries].sort((a, b) => a - b);
+    return sorted.slice(0, -1).map((start, index) => ({
+      text: text.slice(start, sorted[index + 1]),
+      style: annotationTextStyle(annotation, start)
+    })).filter((segment) => segment.text);
   }
 </script>
 
@@ -131,7 +183,27 @@
               {/if}
             {:else if annotation.type === 'textfield'}
               <foreignObject {x} {y} width={Math.max(1, width)} height={Math.max(height, 20)}>
-                <div class="text-field">{annotation.text ?? ''}</div>
+                <div
+                  class="text-field"
+                  style:color={annotation.textStyle?.color ?? '#171717'}
+                  style:font-family={textFontStack(annotation.textStyle?.fontFamily)}
+                  style:font-size={`${Math.max(6, Number(annotation.textStyle?.fontSize ?? 16))}px`}
+                  style:font-weight={Number(annotation.textStyle?.fontWeight ?? 400)}
+                  style:font-style={annotation.textStyle?.italic ? 'italic' : 'normal'}
+                  style:letter-spacing={`${Number(annotation.textStyle?.letterSpacing ?? 0)}px`}
+                  style:line-height={`${Math.max(8, Number(annotation.textStyle?.lineHeight ?? 19.2))}px`}
+                  style:text-align={annotation.textStyle?.textAlign ?? 'left'}
+                  style:text-decoration={`${annotation.textStyle?.underline ? 'underline' : ''}${annotation.textStyle?.underline && annotation.textStyle?.strikethrough ? ' ' : ''}${annotation.textStyle?.strikethrough ? 'line-through' : ''}` || 'none'}
+                  style:justify-content={annotation.textStyle?.verticalAlign === 'middle' ? 'center' : annotation.textStyle?.verticalAlign === 'bottom' ? 'flex-end' : 'flex-start'}
+                ><span class="text-field-content">{#each annotationTextSegments(annotation) as segment}<span
+                    style:color={segment.style.color}
+                    style:font-family={textFontStack(segment.style.fontFamily)}
+                    style:font-size={`${segment.style.fontSize}px`}
+                    style:font-weight={segment.style.fontWeight}
+                    style:font-style={segment.style.italic ? 'italic' : 'normal'}
+                    style:letter-spacing={`${segment.style.letterSpacing}px`}
+                    style:text-decoration={`${segment.style.underline ? 'underline' : ''}${segment.style.underline && segment.style.strikethrough ? ' ' : ''}${segment.style.strikethrough ? 'line-through' : ''}` || 'none'}
+                  >{segment.text}</span>{/each}</span></div>
               </foreignObject>
             {/if}
           </g>
@@ -233,10 +305,20 @@
   .object-background-blur > div.triangle { clip-path: polygon(50% 0, 100% 100%, 0 100%); }
 
   .text-field {
+    display: flex;
+    flex-direction: column;
+    box-sizing: border-box;
+    width: 100%;
+    height: 100%;
     color: #171717;
     font: 400 16px/1.2 Helvetica, Arial, sans-serif;
     overflow-wrap: anywhere;
     white-space: pre-wrap;
+  }
+
+  .text-field-content {
+    display: block;
+    width: 100%;
   }
 
   .watermark {

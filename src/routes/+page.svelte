@@ -3,6 +3,8 @@
   import PdfEditor from '$lib/PdfEditor.svelte';
   // @ts-ignore Fontsource exposes CSS through package exports without JS type declarations.
   import '@fontsource-variable/geist/wght.css';
+  // @ts-ignore Fontsource exposes CSS through package exports without JS type declarations.
+  import '@fontsource-variable/inter/wght.css';
   import mergeIcon from '../../public/quicktools/merge.svg?raw';
   import splitIcon from '../../public/quicktools/split.svg?raw';
   import convertIcon from '../../public/quicktools/convert.svg?raw';

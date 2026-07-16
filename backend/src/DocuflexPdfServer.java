@@ -18,6 +18,7 @@ import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import org.apache.pdfbox.contentstream.operator.Operator;
@@ -72,7 +73,7 @@ public class DocuflexPdfServer {
   private static final int PORT = environmentInt("PDF_BACKEND_PORT", 8080);
   private static final String HOST = environmentString("PDF_BACKEND_HOST", "127.0.0.1");
   private static final int MAX_REQUEST_BYTES = 150 * 1024 * 1024;
-  private static final float EDITOR_PAGE_SCALE = 1.35f;
+  private static final float EDITOR_PAGE_SCALE = 1.42f;
 
   public static void main(String[] args) throws IOException {
     HttpServer server = HttpServer.create(new InetSocketAddress(HOST, PORT), 0);
@@ -980,7 +981,12 @@ public class DocuflexPdfServer {
         .replace('\r', '\n');
     if (text.isBlank()) return;
 
-    PDFont font = new PDType1Font(Standard14Fonts.FontName.HELVETICA);
+    String fontFamily = textStyleString(shape, "fontFamily", "Helvetica");
+    int fontWeight = (int) textStyleNumber(shape, "fontWeight", 400);
+    boolean italic = textStyleBoolean(shape, "italic", false);
+    boolean underline = textStyleBoolean(shape, "underline", false);
+    boolean strikethrough = textStyleBoolean(shape, "strikethrough", false);
+    PDFont font = standardTextFieldFont(fontFamily, fontWeight, italic);
     PdfPoint topLeft = shapePoint(page, shape, 0, 0);
     PdfPoint bottomLeft = shapePoint(page, shape, 0, 1);
     PdfPoint leftCenter = shapePoint(page, shape, 0, 0.5);
@@ -989,32 +995,234 @@ public class DocuflexPdfServer {
     double physicalWidth = Math.hypot(rightCenter.x - leftCenter.x, rightCenter.y - leftCenter.y);
     // PDF.js renders page coordinates at 1.35 CSS units per PDF point. Convert
     // every text metric back to PDF points so export matches the SVG editor.
-    float fontSize = 16f / EDITOR_PAGE_SCALE;
+    float fontSize = (float) Math.max(6, textStyleNumber(shape, "fontSize", 16)) / EDITOR_PAGE_SCALE;
+    float letterSpacing = (float) textStyleNumber(shape, "letterSpacing", 0) / EDITOR_PAGE_SCALE;
     float horizontalPadding = 6f / EDITOR_PAGE_SCALE;
     float availableWidth = (float) Math.max(1, physicalWidth - horizontalPadding * 2);
-    List<String> lines = wrapTextFieldLines(font, fontSize, availableWidth, text);
+    List<String> lines = wrapTextFieldLines(font, fontSize, letterSpacing, availableWidth, text);
 
     double angle = Math.atan2(rightCenter.y - leftCenter.y, rightCenter.x - leftCenter.x);
     float cosine = (float) Math.cos(angle);
     float sine = (float) Math.sin(angle);
-    content.setNonStrokingColor(0.09f, 0.09f, 0.09f);
-    float lineHeight = 19.2f / EDITOR_PAGE_SCALE;
-    double localX = horizontalPadding / Math.max(1, physicalWidth);
+    float[] textColor = parseTextColor(textStyleString(shape, "color", "#171717"));
+    content.setNonStrokingColor(textColor[0], textColor[1], textColor[2]);
+    content.setStrokingColor(textColor[0], textColor[1], textColor[2]);
+    float lineHeight = (float) Math.max(fontSize * EDITOR_PAGE_SCALE, textStyleNumber(shape, "lineHeight", 19.2)) / EDITOR_PAGE_SCALE;
+    String verticalAlignment = textStyleString(shape, "verticalAlign", "top");
+    double contentHeight = lines.size() * lineHeight;
+    double firstBaseline = fontSize * 0.95;
+    if ("middle".equals(verticalAlignment)) firstBaseline += Math.max(0, (physicalHeight - contentHeight) / 2);
+    else if ("bottom".equals(verticalAlignment)) firstBaseline += Math.max(0, physicalHeight - contentHeight - 3f / EDITOR_PAGE_SCALE);
+    int sourceCursor = 0;
     for (int lineIndex = 0; lineIndex < lines.size(); lineIndex += 1) {
-      double baselineDistance = 15.2 / EDITOR_PAGE_SCALE + lineIndex * lineHeight;
-      PdfPoint baseline = shapePoint(page, shape, localX, baselineDistance / Math.max(1, physicalHeight));
-      content.beginText();
-      content.setFont(font, fontSize);
-      content.setTextMatrix(new Matrix(cosine, sine, -sine, cosine, baseline.x, baseline.y));
-      if (!lines.get(lineIndex).isEmpty()) content.showText(lines.get(lineIndex));
-      content.endText();
+      String line = lines.get(lineIndex);
+      int sourceStart = line.isEmpty() ? sourceCursor : text.indexOf(line, sourceCursor);
+      if (sourceStart < 0) sourceStart = sourceCursor;
+      int sourceEnd = Math.min(text.length(), sourceStart + line.length());
+      sourceCursor = sourceEnd;
+      while (sourceCursor < text.length() && (text.charAt(sourceCursor) == ' ' || text.charAt(sourceCursor) == '\n')) sourceCursor += 1;
+      List<PdfTextSegment> segments = pdfTextSegments(shape, text, sourceStart, sourceEnd);
+      String horizontalAlignment = resolvedPdfTextAlignment(shape, sourceStart);
+      float lineWidth = 0;
+      for (PdfTextSegment segment : segments) {
+        lineWidth += textWidth(segment.style.font, segment.style.fontSize, segment.style.letterSpacing, segment.text);
+      }
+      double startDistance = horizontalPadding;
+      if ("center".equals(horizontalAlignment)) startDistance = (physicalWidth - lineWidth) / 2;
+      else if ("right".equals(horizontalAlignment)) startDistance = physicalWidth - horizontalPadding - lineWidth;
+      startDistance = Math.max(0, startDistance);
+      double baselineDistance = firstBaseline + lineIndex * lineHeight;
+      double advance = 0;
+      for (PdfTextSegment segment : segments) {
+        float segmentWidth = textWidth(segment.style.font, segment.style.fontSize, segment.style.letterSpacing, segment.text);
+        double localX = (startDistance + advance) / Math.max(1, physicalWidth);
+        PdfPoint baseline = shapePoint(page, shape, localX, baselineDistance / Math.max(1, physicalHeight));
+        content.setNonStrokingColor(segment.style.color[0], segment.style.color[1], segment.style.color[2]);
+        content.setStrokingColor(segment.style.color[0], segment.style.color[1], segment.style.color[2]);
+        content.beginText();
+        content.setFont(segment.style.font, segment.style.fontSize);
+        content.setCharacterSpacing(segment.style.letterSpacing);
+        content.setTextMatrix(new Matrix(cosine, sine, -sine, cosine, baseline.x, baseline.y));
+        if (!segment.text.isEmpty()) content.showText(segment.text);
+        content.endText();
+        if (!segment.text.isEmpty() && (segment.style.underline || segment.style.strikethrough)) {
+          double segmentEnd = startDistance + advance + segmentWidth;
+          if (segment.style.underline) {
+            double decorationY = baselineDistance + 1.8 / EDITOR_PAGE_SCALE;
+            drawTextDecoration(content, page, shape, startDistance + advance, segmentEnd, physicalWidth, physicalHeight, decorationY, segment.style.fontSize);
+          }
+          if (segment.style.strikethrough) {
+            double decorationY = baselineDistance - segment.style.fontSize * 0.32;
+            drawTextDecoration(content, page, shape, startDistance + advance, segmentEnd, physicalWidth, physicalHeight, decorationY, segment.style.fontSize);
+          }
+        }
+        advance += segmentWidth;
+      }
     }
+    content.setCharacterSpacing(0);
     content.setNonStrokingColor(1f, 0.302f, 0.333f);
+    content.setStrokingColor(0.871f, 0.208f, 0.259f);
+  }
+
+  private static void drawTextDecoration(
+      PDPageContentStream content,
+      PDPage page,
+      AnnotationStroke shape,
+      double startDistance,
+      double endDistance,
+      double physicalWidth,
+      double physicalHeight,
+      double localY,
+      float fontSize) throws IOException {
+    PdfPoint start = shapePoint(page, shape, startDistance / Math.max(1, physicalWidth), localY / Math.max(1, physicalHeight));
+    PdfPoint end = shapePoint(page, shape, endDistance / Math.max(1, physicalWidth), localY / Math.max(1, physicalHeight));
+    content.setLineWidth(Math.max(0.55f, fontSize * 0.065f));
+    content.moveTo(start.x, start.y);
+    content.lineTo(end.x, end.y);
+    content.stroke();
+  }
+
+  private static List<PdfTextSegment> pdfTextSegments(
+      AnnotationStroke shape,
+      String text,
+      int start,
+      int end) {
+    if (end <= start) return List.of(new PdfTextSegment("", resolvedPdfTextStyle(shape, start)));
+    List<Integer> boundaries = new ArrayList<>();
+    boundaries.add(start);
+    boundaries.add(end);
+    for (Map<String, Object> range : shape.textStyleRanges) {
+      int rangeStart = (int) optionalDouble(range.get("start"));
+      int rangeEnd = (int) optionalDouble(range.get("end"));
+      if (rangeStart > start && rangeStart < end) boundaries.add(rangeStart);
+      if (rangeEnd > start && rangeEnd < end) boundaries.add(rangeEnd);
+    }
+    Collections.sort(boundaries);
+    List<PdfTextSegment> segments = new ArrayList<>();
+    for (int index = 0; index + 1 < boundaries.size(); index += 1) {
+      int segmentStart = boundaries.get(index);
+      int segmentEnd = boundaries.get(index + 1);
+      if (segmentEnd <= segmentStart) continue;
+      segments.add(new PdfTextSegment(text.substring(segmentStart, segmentEnd), resolvedPdfTextStyle(shape, segmentStart)));
+    }
+    return segments;
+  }
+
+  private static PdfTextStyle resolvedPdfTextStyle(AnnotationStroke shape, int index) {
+    Map<String, Object> base = shape.textStyle == null ? Map.of() : shape.textStyle;
+    String color = mapString(base, "color", "#171717");
+    String family = mapString(base, "fontFamily", "Helvetica");
+    int weight = (int) mapNumber(base, "fontWeight", 400);
+    double size = mapNumber(base, "fontSize", 16);
+    double spacing = mapNumber(base, "letterSpacing", 0);
+    boolean italic = mapBoolean(base, "italic", false);
+    boolean underline = mapBoolean(base, "underline", false);
+    boolean strikethrough = mapBoolean(base, "strikethrough", false);
+    for (Map<String, Object> range : shape.textStyleRanges) {
+      int start = (int) optionalDouble(range.get("start"));
+      int end = (int) optionalDouble(range.get("end"));
+      if (index < start || index >= end) continue;
+      color = mapString(range, "color", color);
+      family = mapString(range, "fontFamily", family);
+      weight = (int) mapNumber(range, "fontWeight", weight);
+      size = mapNumber(range, "fontSize", size);
+      spacing = mapNumber(range, "letterSpacing", spacing);
+      italic = mapBoolean(range, "italic", italic);
+      underline = mapBoolean(range, "underline", underline);
+      strikethrough = mapBoolean(range, "strikethrough", strikethrough);
+    }
+    return new PdfTextStyle(
+        standardTextFieldFont(family, weight, italic),
+        (float) Math.max(6, size) / EDITOR_PAGE_SCALE,
+        (float) spacing / EDITOR_PAGE_SCALE,
+        parseTextColor(color),
+        underline,
+        strikethrough);
+  }
+
+  private static String resolvedPdfTextAlignment(AnnotationStroke shape, int index) {
+    String alignment = mapString(shape.textStyle == null ? Map.of() : shape.textStyle, "textAlign", "left");
+    for (Map<String, Object> range : shape.textStyleRanges) {
+      int start = (int) optionalDouble(range.get("start"));
+      int end = (int) optionalDouble(range.get("end"));
+      if (index >= start && index < end) alignment = mapString(range, "textAlign", alignment);
+    }
+    return alignment;
+  }
+
+  private static String mapString(Map<String, Object> map, String key, String fallback) {
+    Object value = map.get(key);
+    return value instanceof String string && !string.isBlank() ? string : fallback;
+  }
+
+  private static double mapNumber(Map<String, Object> map, String key, double fallback) {
+    Object value = map.get(key);
+    return value instanceof Number number && Double.isFinite(number.doubleValue()) ? number.doubleValue() : fallback;
+  }
+
+  private static boolean mapBoolean(Map<String, Object> map, String key, boolean fallback) {
+    Object value = map.get(key);
+    return value instanceof Boolean bool ? bool : fallback;
+  }
+
+  private static String textStyleString(AnnotationStroke shape, String key, String fallback) {
+    Object value = shape.textStyle == null ? null : shape.textStyle.get(key);
+    return value instanceof String string && !string.isBlank() ? string : fallback;
+  }
+
+  private static double textStyleNumber(AnnotationStroke shape, String key, double fallback) {
+    Object value = shape.textStyle == null ? null : shape.textStyle.get(key);
+    return value instanceof Number number && Double.isFinite(number.doubleValue()) ? number.doubleValue() : fallback;
+  }
+
+  private static boolean textStyleBoolean(AnnotationStroke shape, String key, boolean fallback) {
+    Object value = shape.textStyle == null ? null : shape.textStyle.get(key);
+    return value instanceof Boolean bool ? bool : fallback;
+  }
+
+  private static PDFont standardTextFieldFont(String family, int weight, boolean italic) {
+    boolean bold = weight >= 600;
+    String normalized = family.toLowerCase(Locale.ROOT);
+    Standard14Fonts.FontName name;
+    if (normalized.contains("times") || normalized.contains("georgia")) {
+      name = bold && italic ? Standard14Fonts.FontName.TIMES_BOLD_ITALIC
+          : bold ? Standard14Fonts.FontName.TIMES_BOLD
+          : italic ? Standard14Fonts.FontName.TIMES_ITALIC
+          : Standard14Fonts.FontName.TIMES_ROMAN;
+    } else if (normalized.contains("courier")) {
+      name = bold && italic ? Standard14Fonts.FontName.COURIER_BOLD_OBLIQUE
+          : bold ? Standard14Fonts.FontName.COURIER_BOLD
+          : italic ? Standard14Fonts.FontName.COURIER_OBLIQUE
+          : Standard14Fonts.FontName.COURIER;
+    } else {
+      name = bold && italic ? Standard14Fonts.FontName.HELVETICA_BOLD_OBLIQUE
+          : bold ? Standard14Fonts.FontName.HELVETICA_BOLD
+          : italic ? Standard14Fonts.FontName.HELVETICA_OBLIQUE
+          : Standard14Fonts.FontName.HELVETICA;
+    }
+    return new PDType1Font(name);
+  }
+
+  private static float[] parseTextColor(String color) {
+    if (color != null && color.matches("#[0-9A-Fa-f]{6}")) {
+      return new float[] {
+          Integer.parseInt(color.substring(1, 3), 16) / 255f,
+          Integer.parseInt(color.substring(3, 5), 16) / 255f,
+          Integer.parseInt(color.substring(5, 7), 16) / 255f
+      };
+    }
+    return new float[] {0.09f, 0.09f, 0.09f};
+  }
+
+  private static float textWidth(PDFont font, float fontSize, float letterSpacing, String text) throws IOException {
+    if (text.isEmpty()) return 0;
+    return font.getStringWidth(text) / 1000f * fontSize + Math.max(0, text.length() - 1) * letterSpacing;
   }
 
   private static List<String> wrapTextFieldLines(
       PDFont font,
       float fontSize,
+      float letterSpacing,
       float availableWidth,
       String text) throws IOException {
     List<String> lines = new ArrayList<>();
@@ -1027,7 +1235,7 @@ public class DocuflexPdfServer {
       while (!remaining.isEmpty()) {
         int fittingLength = 0;
         for (int index = 1; index <= remaining.length(); index += 1) {
-          if (font.getStringWidth(remaining.substring(0, index)) / 1000f * fontSize > availableWidth) break;
+          if (textWidth(font, fontSize, letterSpacing, remaining.substring(0, index)) > availableWidth) break;
           fittingLength = index;
         }
         if (fittingLength == 0) fittingLength = 1;
@@ -3362,6 +3570,15 @@ public class DocuflexPdfServer {
         }
         String imageData = optionalString(annotation.get("imageData"));
         String text = optionalString(annotation.get("text"));
+        Map<String, Object> textStyle = annotation.get("textStyle") instanceof Map<?, ?>
+            ? asObject(annotation.get("textStyle"))
+            : Map.of();
+        List<Map<String, Object>> textStyleRanges = new ArrayList<>();
+        if (annotation.get("textStyleRanges") instanceof List<?>) {
+          for (Object rawRange : asArray(annotation.get("textStyleRanges"))) {
+            if (rawRange instanceof Map<?, ?>) textStyleRanges.add(asObject(rawRange));
+          }
+        }
         if ("watermark".equals(type) && text.codePointCount(0, text.length()) > 80) {
           throw new IllegalArgumentException("Watermark text is too long.");
         }
@@ -3373,7 +3590,8 @@ public class DocuflexPdfServer {
             x, y, width, height, rotation, Math.max(0, radiusX), Math.max(0, radiusY),
             color, text, imageData,
             optionalString(annotation.get("fieldName")), optionalString(annotation.get("fieldValue")),
-            optionalBoolean(annotation.get("fieldValue")), optionalBoolean(annotation.get("existingField"))));
+            optionalBoolean(annotation.get("fieldValue")), optionalBoolean(annotation.get("existingField")),
+            textStyle, textStyleRanges));
         continue;
       }
       List<NormalizedPoint> points = new ArrayList<>();
@@ -3391,7 +3609,8 @@ public class DocuflexPdfServer {
         }
       }
       annotations.add(new AnnotationStroke(
-          asInt(annotation.get("page")), type, points, 0, 0, 0, 0, 0, 0, 0, List.of(), "", "", "", "", false, false));
+          asInt(annotation.get("page")), type, points, 0, 0, 0, 0, 0, 0, 0, List.of(), "", "", "", "", false, false,
+          Map.of(), List.of()));
     }
     return annotations;
   }
@@ -3604,11 +3823,23 @@ public class DocuflexPdfServer {
       String fieldName,
       String fieldValue,
       boolean fieldChecked,
-      boolean existingField) {}
+      boolean existingField,
+      Map<String, Object> textStyle,
+      List<Map<String, Object>> textStyleRanges) {}
 
   private record NormalizedPoint(double x, double y) {}
 
   private record PdfPoint(float x, float y) {}
+
+  private record PdfTextStyle(
+      PDFont font,
+      float fontSize,
+      float letterSpacing,
+      float[] color,
+      boolean underline,
+      boolean strikethrough) {}
+
+  private record PdfTextSegment(String text, PdfTextStyle style) {}
 
   private record EmbeddedFont(String pdfJsName, String family, String baseName, String css) {}
 
