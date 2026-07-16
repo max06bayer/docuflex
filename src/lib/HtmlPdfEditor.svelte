@@ -3036,6 +3036,15 @@ ${setupScript}`;
         const pathData = points.map((point, pointIndex) =>
           `${pointIndex ? 'L' : 'M'} ${Number(point.x || 0)} ${Number(point.y || 0)}`
         ).join(' ');
+        const strokeStyle = Array.isArray(annotation.color) ? annotation.color : [];
+        const red = Math.round(Math.max(0, Math.min(1, Number(strokeStyle[0] ?? 1))) * 255);
+        const green = Math.round(Math.max(0, Math.min(1, Number(strokeStyle[1] ?? 0.894))) * 255);
+        const blue = Math.round(Math.max(0, Math.min(1, Number(strokeStyle[2] ?? 0.231))) * 255);
+        const strokeColor = `rgb(${red} ${green} ${blue})`;
+        const strokeOpacity = Math.max(0.01, Math.min(1, Number(strokeStyle[3] ?? 0.34)));
+        const strokeWidth = Math.max(0.5, Number(strokeStyle[4] ?? 16));
+        const falloff = Math.max(0, Math.min(1, Number(strokeStyle[5] ?? 0.35)));
+        const normalizedWidth = 0.0175 * strokeWidth / 16;
         let paths = group.querySelectorAll(':scope > path');
         if (paths.length !== 2) {
           group.replaceChildren();
@@ -3045,19 +3054,19 @@ ${setupScript}`;
         const edge = paths[0];
         edge.setAttribute('d', pathData);
         edge.setAttribute('fill', 'none');
-        edge.setAttribute('stroke', '#f4cd19');
-        edge.setAttribute('stroke-width', '0.022');
+        edge.setAttribute('stroke', strokeColor);
+        edge.setAttribute('stroke-width', `${normalizedWidth * (1 + falloff * 0.4)}`);
         edge.setAttribute('stroke-linecap', 'round');
         edge.setAttribute('stroke-linejoin', 'round');
-        edge.setAttribute('opacity', '0.13');
+        edge.setAttribute('opacity', `${strokeOpacity * falloff * 0.72}`);
         const ink = paths[1];
         ink.setAttribute('d', pathData);
         ink.setAttribute('fill', 'none');
-        ink.setAttribute('stroke', '#ffe43b');
-        ink.setAttribute('stroke-width', '0.0175');
+        ink.setAttribute('stroke', strokeColor);
+        ink.setAttribute('stroke-width', `${normalizedWidth}`);
         ink.setAttribute('stroke-linecap', 'round');
         ink.setAttribute('stroke-linejoin', 'round');
-        ink.setAttribute('opacity', '0.34');
+        ink.setAttribute('opacity', `${strokeOpacity}`);
       });
       existingGroups.forEach((group, annotationId) => {
         if (!activeGroupIds.has(annotationId)) group.remove();

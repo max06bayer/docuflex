@@ -1440,32 +1440,53 @@ public class DocuflexPdfServer {
     // an explicit white page background.
     try (PDPageContentStream content = new PDPageContentStream(
         document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
-      PDExtendedGraphicsState graphicsState = new PDExtendedGraphicsState();
-      graphicsState.setStrokingAlphaConstant(markerLayer ? 0.34f : 0.94f);
-      graphicsState.setBlendMode(markerLayer ? BlendMode.MULTIPLY : BlendMode.NORMAL);
-      content.setGraphicsStateParameters(graphicsState);
       content.setLineCapStyle(1);
       content.setLineJoinStyle(1);
-      content.setLineWidth(markerLayer ? 11.85f : 1.52f);
-      if (markerLayer) {
-        content.setStrokingColor(1f, 0.894f, 0.231f);
-      } else {
-        content.setStrokingColor(0.886f, 0.114f, 0.196f);
-      }
 
       for (AnnotationStroke stroke : strokes) {
-        PdfPoint first = normalizedToPdfPoint(page, stroke.points.get(0));
-        content.moveTo(first.x, first.y);
-        if (stroke.points.size() == 1) {
-          content.lineTo(first.x + 0.01f, first.y + 0.01f);
-        } else {
-          for (int index = 1; index < stroke.points.size(); index += 1) {
-            PdfPoint point = normalizedToPdfPoint(page, stroke.points.get(index));
-            content.lineTo(point.x, point.y);
-          }
+        float red = (float) listValue(stroke.color, 0, markerLayer ? 1 : 0.886);
+        float green = (float) listValue(stroke.color, 1, markerLayer ? 0.894 : 0.114);
+        float blue = (float) listValue(stroke.color, 2, markerLayer ? 0.231 : 0.196);
+        float opacity = (float) Math.max(0.01, Math.min(1, listValue(stroke.color, 3, markerLayer ? 0.34 : 0.94)));
+        float editorWidth = (float) Math.max(0.25, listValue(stroke.color, 4, markerLayer ? 16 : 2.05));
+        float lineWidth = editorWidth * 0.740625f;
+        float falloff = (float) Math.max(0, Math.min(1, listValue(stroke.color, 5, 0)));
+        content.setStrokingColor(red, green, blue);
+        if (markerLayer && falloff > 0.001f) {
+          setStrokeGraphicsState(content, opacity * falloff * 0.72f, true);
+          content.setLineWidth(lineWidth * (1 + falloff * 0.4f));
+          appendAnnotationStrokePath(content, page, stroke);
+          content.stroke();
         }
+        setStrokeGraphicsState(content, opacity, markerLayer);
+        content.setLineWidth(lineWidth);
+        appendAnnotationStrokePath(content, page, stroke);
         content.stroke();
       }
+    }
+  }
+
+  private static double listValue(List<Double> values, int index, double fallback) {
+    return values != null && values.size() > index && Double.isFinite(values.get(index)) ? values.get(index) : fallback;
+  }
+
+  private static void setStrokeGraphicsState(PDPageContentStream content, float opacity, boolean multiply) throws IOException {
+    PDExtendedGraphicsState graphicsState = new PDExtendedGraphicsState();
+    graphicsState.setStrokingAlphaConstant(Math.max(0.01f, Math.min(1f, opacity)));
+    graphicsState.setBlendMode(multiply ? BlendMode.MULTIPLY : BlendMode.NORMAL);
+    content.setGraphicsStateParameters(graphicsState);
+  }
+
+  private static void appendAnnotationStrokePath(PDPageContentStream content, PDPage page, AnnotationStroke stroke) throws IOException {
+    PdfPoint first = normalizedToPdfPoint(page, stroke.points.get(0));
+    content.moveTo(first.x, first.y);
+    if (stroke.points.size() == 1) {
+      content.lineTo(first.x + 0.01f, first.y + 0.01f);
+      return;
+    }
+    for (int index = 1; index < stroke.points.size(); index += 1) {
+      PdfPoint point = normalizedToPdfPoint(page, stroke.points.get(index));
+      content.lineTo(point.x, point.y);
     }
   }
 
@@ -3616,7 +3637,7 @@ public class DocuflexPdfServer {
         }
       }
       annotations.add(new AnnotationStroke(
-          asInt(annotation.get("page")), type, points, 0, 0, 0, 0, 0, 0, 0, List.of(), "", "", "", "", false, false,
+          asInt(annotation.get("page")), type, points, 0, 0, 0, 0, 0, 0, 0, parseDoubleList(annotation.get("color")), "", "", "", "", false, false,
           Map.of(), List.of()));
     }
     return annotations;

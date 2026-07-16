@@ -6,7 +6,7 @@
   import HtmlPdfEditor from '$lib/HtmlPdfEditor.svelte';
 
   /** @typedef {{ x: number; y: number; pressure: number }} StrokePoint */
-  /** @typedef {{ id: number; type: 'marker' | 'pen'; points: StrokePoint[] }} AnnotationStroke */
+  /** @typedef {{ id: number; type: 'marker' | 'pen'; points: StrokePoint[]; rawPoints?: StrokePoint[]; color?: string; thickness?: number; opacity?: number; falloff?: number; smoothing?: number }} AnnotationStroke */
   /** @typedef {{ start: number; end: number; color?: string; fontFamily?: string; fontSize?: number; fontWeight?: number; letterSpacing?: number; textAlign?: 'left' | 'center' | 'right'; italic?: boolean; underline?: boolean; strikethrough?: boolean }} TextStyleRange */
   /** @typedef {{ id: number; type: 'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'measure' | 'crop' | 'textfield' | 'signature' | 'image' | 'checkbox' | 'input'; x: number; y: number; width: number; height: number; rotation: number; text?: string; textColor?: string; fontFamily?: string; fontSize?: number; fontWeight?: number; letterSpacing?: number; lineHeight?: number; textAlign?: 'left' | 'center' | 'right'; verticalAlign?: 'top' | 'middle' | 'bottom'; italic?: boolean; underline?: boolean; strikethrough?: boolean; textStyleRanges?: TextStyleRange[]; imageData?: string; fieldName?: string; fieldValue?: string | boolean; existingField?: boolean; readOnly?: boolean; opacity?: number; cornerRadius?: number; fillPresent?: boolean; fillEnabled?: boolean; fillColor?: string; fillAlpha?: number; strokePresent?: boolean; strokeEnabled?: boolean; strokeColor?: string; strokeAlpha?: number; strokeWidth?: number; shadowPresent?: boolean; shadowEnabled?: boolean; shadowOpacity?: number; shadowBlur?: number; shadowX?: number; shadowY?: number; backgroundBlurPresent?: boolean; backgroundBlurEnabled?: boolean; backgroundBlur?: number }} AnnotationShape */
   /** @typedef {{ id: number; type: 'highlight' | 'underline' | 'crossout' | 'blackout' | 'whiteout'; rects: { x: number; y: number; width: number; height: number; color?: [number, number, number]; thickness?: number }[] }} TextHighlight */
@@ -41,6 +41,15 @@
   /** @type {AbortController | null} */
   let textLayerAbortController = null;
   let activeTool = 'select';
+  let markerColor = '#FFE43B';
+  let markerThickness = 16;
+  let markerOpacity = 0.34;
+  let markerFalloff = 35;
+  let markerStraighten = true;
+  let penColor = '#E21D32';
+  let penThickness = 2.05;
+  let penOpacity = 0.94;
+  let penSmoothing = 55;
   /** @type {any} */
   let htmlEditor;
   let htmlEditorStarted = false;
@@ -169,7 +178,7 @@
   let applyingHistoryState = false;
   /** @type {{ pageIndex: number; id: number } | null} */
   let hoveredShape = null;
-  /** @type {{ property: 'fillColor' | 'strokeColor' | 'textColor' | 'selectionHighlightColor' | 'selectionUnderlineColor' | 'selectionCrossoutColor'; hue: number; saturation: number; value: number; alpha: number } | null} */
+  /** @type {{ property: 'fillColor' | 'strokeColor' | 'textColor' | 'selectionHighlightColor' | 'selectionUnderlineColor' | 'selectionCrossoutColor' | 'markerColor' | 'penColor'; hue: number; saturation: number; value: number; alpha: number } | null} */
   let colorPicker = null;
   /** @type {{ pageIndex: number; id: number; start: number; end: number } | null} */
   let textFormatSelection = null;
@@ -3112,9 +3121,39 @@
     colorPicker = { property, ...hexToHsv(color), alpha: 1 };
   }
 
+  /** @param {'markerColor' | 'penColor'} property */
+  function openDrawingColorPicker(property) {
+    if (colorPicker?.property === property) {
+      colorPicker = null;
+      return;
+    }
+    const marker = property === 'markerColor';
+    colorPicker = { property, ...hexToHsv(marker ? markerColor : penColor), alpha: marker ? markerOpacity : penOpacity };
+  }
+
+  /** @param {'marker' | 'pen'} tool @param {string} value */
+  function updateDrawingColor(tool, value) {
+    const color = normalizedHex(value);
+    if (!color) return;
+    if (tool === 'marker') markerColor = color;
+    else penColor = color;
+    const property = tool === 'marker' ? 'markerColor' : 'penColor';
+    if (colorPicker?.property === property) colorPicker = { ...colorPicker, ...hexToHsv(color) };
+  }
+
   function applyColorPicker() {
     if (!colorPicker) return;
     const color = hsvToHex(colorPicker.hue, colorPicker.saturation, colorPicker.value);
+    if (colorPicker.property === 'markerColor' || colorPicker.property === 'penColor') {
+      if (colorPicker.property === 'markerColor') {
+        markerColor = color;
+        markerOpacity = colorPicker.alpha;
+      } else {
+        penColor = color;
+        penOpacity = colorPicker.alpha;
+      }
+      return;
+    }
     if (colorPicker.property.startsWith('selection')) {
       const type = colorPicker.property === 'selectionHighlightColor' ? 'highlight'
         : colorPicker.property === 'selectionUnderlineColor' ? 'underline' : 'crossout';
@@ -4020,6 +4059,37 @@
     return appendInterpolatedPoint([start], end, 2);
   }
 
+  /** @param {StrokePoint[]} points @param {number} amount */
+  function smoothPenStroke(points, amount) {
+    if (points.length < 3 || amount <= 0) return points;
+    const normalized = clamp(amount / 100, 0, 1);
+    const radius = Math.max(1, Math.round(1 + normalized * 7));
+    const passes = Math.max(1, Math.round(1 + normalized * 3));
+    let result = points;
+    for (let pass = 0; pass < passes; pass += 1) {
+      result = result.map((point, index) => {
+        if (index === 0 || index === result.length - 1) return point;
+        const start = Math.max(0, index - radius);
+        const end = Math.min(result.length - 1, index + radius);
+        let x = 0;
+        let y = 0;
+        let count = 0;
+        for (let sample = start; sample <= end; sample += 1) {
+          x += result[sample].x;
+          y += result[sample].y;
+          count += 1;
+        }
+        const strength = 0.28 + normalized * 0.67;
+        return {
+          x: point.x * (1 - strength) + x / count * strength,
+          y: point.y * (1 - strength) + y / count * strength,
+          pressure: point.pressure
+        };
+      });
+    }
+    return result;
+  }
+
   /** @param {number} pageIndex @param {AnnotationStroke} stroke */
   function replaceStroke(pageIndex, stroke) {
     annotations = {
@@ -4228,10 +4298,17 @@
     if (event.button === 0 && pageHit && (activeTool === 'marker' || activeTool === 'pen')) {
       event.preventDefault();
       window.getSelection()?.removeAllRanges();
+      const firstPoint = pointOnPage(event, pageHit.shell);
       const stroke = {
         id: nextAnnotationId++,
         type: /** @type {'marker' | 'pen'} */ (activeTool),
-        points: [pointOnPage(event, pageHit.shell)]
+        points: [firstPoint],
+        rawPoints: [firstPoint],
+        color: activeTool === 'marker' ? markerColor : penColor,
+        thickness: activeTool === 'marker' ? markerThickness : penThickness,
+        opacity: activeTool === 'marker' ? markerOpacity : penOpacity,
+        falloff: activeTool === 'marker' ? markerFalloff : 0,
+        smoothing: activeTool === 'pen' ? penSmoothing : 0
       };
       annotations = {
         ...annotations,
@@ -4320,12 +4397,18 @@
       const pages = [...viewer.querySelectorAll('.pdf-page')];
       const shell = pages[drawingStroke.pageIndex];
       if (!(shell instanceof HTMLElement)) return;
-      let points = drawingStroke.stroke.points;
+      let points = drawingStroke.stroke.rawPoints ?? drawingStroke.stroke.points;
       const events = event.getCoalescedEvents?.() ?? [event];
       for (const coalescedEvent of events) {
         points = appendInterpolatedPoint(points, pointOnPage(coalescedEvent, shell));
       }
-      drawingStroke.stroke = { ...drawingStroke.stroke, points };
+      drawingStroke.stroke = {
+        ...drawingStroke.stroke,
+        rawPoints: points,
+        points: drawingStroke.stroke.type === 'pen'
+          ? smoothPenStroke(points, drawingStroke.stroke.smoothing ?? 0)
+          : points
+      };
       replaceStroke(drawingStroke.pageIndex, drawingStroke.stroke);
       return;
     }
@@ -4402,11 +4485,22 @@
       shapeGuides = null;
     }
     if (drawingStroke && event.pointerId === drawingStroke.pointerId) {
-      if (drawingStroke.stroke.type === 'marker') {
+      if (drawingStroke.stroke.type === 'marker' && markerStraighten) {
         drawingStroke.stroke = {
           ...drawingStroke.stroke,
-          points: straightenMarker(drawingStroke.stroke.points)
+          points: straightenMarker(drawingStroke.stroke.rawPoints ?? drawingStroke.stroke.points),
+          rawPoints: undefined
         };
+        replaceStroke(drawingStroke.pageIndex, drawingStroke.stroke);
+      } else if (drawingStroke.stroke.type === 'pen') {
+        drawingStroke.stroke = {
+          ...drawingStroke.stroke,
+          points: smoothPenStroke(drawingStroke.stroke.rawPoints ?? drawingStroke.stroke.points, drawingStroke.stroke.smoothing ?? 0),
+          rawPoints: undefined
+        };
+        replaceStroke(drawingStroke.pageIndex, drawingStroke.stroke);
+      } else if (drawingStroke.stroke.rawPoints) {
+        drawingStroke.stroke = { ...drawingStroke.stroke, rawPoints: undefined };
         replaceStroke(drawingStroke.pageIndex, drawingStroke.stroke);
       }
       drawingStroke = null;
@@ -4805,6 +4899,12 @@
         .map((stroke) => ({
           page: Number(page),
           type: stroke.type,
+          color: [
+            ...normalizedRgb(stroke.color ?? (stroke.type === 'marker' ? '#FFE43B' : '#E21D32')),
+            clamp(stroke.opacity ?? (stroke.type === 'marker' ? 0.34 : 0.94), 0, 1),
+            Math.max(0.25, stroke.thickness ?? (stroke.type === 'marker' ? 16 : 2.05)),
+            clamp((stroke.falloff ?? 0) / 100, 0, 1)
+          ],
           points: stroke.points.map((point) => ({
             x: point.x / pageSize.width,
             y: point.y / pageSize.height
@@ -5073,8 +5173,8 @@
             aria-hidden="true"
           >
             {#each (annotations[index] ?? []).filter((stroke) => stroke.type === 'marker') as stroke (stroke.id)}
-              <path class="marker-edge" d={strokePath(stroke.points)} />
-              <path class="marker-ink" d={strokePath(stroke.points)} />
+              <path class="marker-edge" d={strokePath(stroke.points)} style:stroke={stroke.color ?? '#FFE43B'} style:stroke-width={`${(stroke.thickness ?? 16) * (1 + (stroke.falloff ?? 35) / 250)}px`} style:opacity={(stroke.opacity ?? 0.34) * (stroke.falloff ?? 35) / 100 * 0.72} />
+              <path class="marker-ink" d={strokePath(stroke.points)} style:stroke={stroke.color ?? '#FFE43B'} style:stroke-width={`${stroke.thickness ?? 16}px`} style:opacity={stroke.opacity ?? 0.34} />
             {/each}
           </svg>
           <svg
@@ -5729,8 +5829,8 @@
             aria-hidden="true"
           >
             {#each (annotations[index] ?? []).filter((stroke) => stroke.type === 'pen') as stroke (stroke.id)}
-              <path class="pen-soft-edge" d={strokePath(stroke.points)} />
-              <path class="pen-ink" d={strokePath(stroke.points)} />
+              <path class="pen-soft-edge" d={strokePath(stroke.points)} style:stroke={stroke.color ?? '#E21D32'} style:stroke-width={`${(stroke.thickness ?? 2.05) + 1.35}px`} style:opacity={(stroke.opacity ?? 0.94) * 0.16} />
+              <path class="pen-ink" d={strokePath(stroke.points)} style:stroke={stroke.color ?? '#E21D32'} style:stroke-width={`${stroke.thickness ?? 2.05}px`} style:opacity={stroke.opacity ?? 0.94} />
             {/each}
           </svg>
           <svg
@@ -5845,6 +5945,44 @@
         </footer>
       </div>
     </div>
+  {/if}
+  {#if activeTool === 'marker' || activeTool === 'pen'}
+    {@const drawingIsMarker = activeTool === 'marker'}
+    {@const drawingColor = drawingIsMarker ? markerColor : penColor}
+    <div class="protect-panel selection-properties-panel drawing-properties-panel" role="dialog" aria-label={`${drawingIsMarker ? 'Marker' : 'Pen'} properties`} transition:fly={{ x: 18, duration: 240, easing: cubicOut }}>
+      <header class="protect-panel-header">
+        <img src={`/toolbar/small/${activeTool}.svg`} alt="" />
+        <h2>{drawingIsMarker ? 'Marker' : 'Pen'}</h2>
+        <button class="protect-panel-close" type="button" aria-label={`Close ${activeTool} properties`} onclick={() => { colorPicker = null; activeTool = 'select'; }}><span></span><span></span></button>
+      </header>
+      <div class="selection-properties-scroll">
+        <section class="selection-property-section drawing-property-section" aria-label="Appearance">
+          <div class="drawing-color-row">
+            <span>Color</span>
+            <input aria-label={`${activeTool} color hex`} value={drawingColor.replace('#', '').toUpperCase()} oninput={(event) => updateDrawingColor(drawingIsMarker ? 'marker' : 'pen', event.currentTarget.value)} />
+            <button class="property-color" type="button" aria-label={`Open ${activeTool} color picker`} class:active={colorPicker?.property === `${activeTool}Color`} style:--property-color={drawingColor} onclick={() => openDrawingColorPicker(drawingIsMarker ? 'markerColor' : 'penColor')}></button>
+          </div>
+          <div class="drawing-number-grid">
+            <label class="inspector-field"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => drawingIsMarker ? markerThickness = value : penThickness = value, { step: 0.05, min: 0.5, max: 40 })}>Width</span><input class="scrubbable-number" type="number" min="0.5" max="40" step="0.25" value={drawingIsMarker ? markerThickness : penThickness} onpointerdown={(event) => startNumberScrub(event, (value) => drawingIsMarker ? markerThickness = value : penThickness = value, { step: 0.05, min: 0.5, max: 40 })} oninput={(event) => drawingIsMarker ? markerThickness = clamp(Number(event.currentTarget.value), 0.5, 40) : penThickness = clamp(Number(event.currentTarget.value), 0.5, 40)} /></label>
+            <label class="inspector-field"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => drawingIsMarker ? markerOpacity = value / 100 : penOpacity = value / 100, { min: 1, max: 100 })}>Opacity</span><input class="scrubbable-number" type="number" min="1" max="100" step="1" value={Math.round((drawingIsMarker ? markerOpacity : penOpacity) * 100)} onpointerdown={(event) => startNumberScrub(event, (value) => drawingIsMarker ? markerOpacity = value / 100 : penOpacity = value / 100, { min: 1, max: 100 })} oninput={(event) => drawingIsMarker ? markerOpacity = clamp(Number(event.currentTarget.value) / 100, 0.01, 1) : penOpacity = clamp(Number(event.currentTarget.value) / 100, 0.01, 1)} /><em>%</em></label>
+          </div>
+          {#if drawingIsMarker}
+            <label class="inspector-field inspector-field-wide"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => markerFalloff = value, { min: 0, max: 100 })}>Falloff</span><input class="scrubbable-number" type="number" min="0" max="100" step="1" value={markerFalloff} onpointerdown={(event) => startNumberScrub(event, (value) => markerFalloff = value, { min: 0, max: 100 })} oninput={(event) => markerFalloff = clamp(Number(event.currentTarget.value), 0, 100)} /><em>%</em></label>
+            <button class:active={markerStraighten} class="drawing-toggle" type="button" onclick={() => markerStraighten = !markerStraighten}><span>Straighten</span><em>{markerStraighten ? 'On' : 'Off'}</em></button>
+          {:else}
+            <label class="inspector-field inspector-field-wide"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => penSmoothing = value, { min: 0, max: 100 })}>Smoothing</span><input class="scrubbable-number" type="number" min="0" max="100" step="1" value={penSmoothing} onpointerdown={(event) => startNumberScrub(event, (value) => penSmoothing = value, { min: 0, max: 100 })} oninput={(event) => penSmoothing = clamp(Number(event.currentTarget.value), 0, 100)} /><em>%</em></label>
+          {/if}
+        </section>
+      </div>
+    </div>
+    {#if colorPicker?.property === 'markerColor' || colorPicker?.property === 'penColor'}
+      {@const pickerHex = hsvToHex(colorPicker.hue, colorPicker.saturation, colorPicker.value)}
+      <div class="figma-color-picker drawing-color-picker" role="dialog" aria-label="Color picker" transition:fly={{ x: 8, duration: 190, easing: cubicOut }}>
+        <div class="color-saturation" style:--picker-hue={`hsl(${colorPicker.hue} 100% 50%)`} role="slider" aria-label="Color saturation and brightness" aria-valuenow={Math.round(colorPicker.saturation * 100)} tabindex="0" onpointerdown={(event) => updateColorControl(event, 'saturation')} onpointermove={(event) => { if (event.buttons) updateColorControl(event, 'saturation'); }}><span style:left={`${colorPicker.saturation * 100}%`} style:top={`${(1 - colorPicker.value) * 100}%`} style:--thumb-color={pickerHex}></span></div>
+        <div class="picker-slider hue-slider" role="slider" aria-label="Hue" aria-valuenow={Math.round(colorPicker.hue)} tabindex="0" onpointerdown={(event) => updateColorControl(event, 'hue')} onpointermove={(event) => { if (event.buttons) updateColorControl(event, 'hue'); }}><span style:left={`${colorPicker.hue / 360 * 100}%`} style:--thumb-color={pickerHex}></span></div>
+        <div class="picker-slider alpha-slider" style:--picker-color={pickerHex} role="slider" aria-label="Color opacity" aria-valuenow={Math.round(colorPicker.alpha * 100)} tabindex="0" onpointerdown={(event) => updateColorControl(event, 'alpha')} onpointermove={(event) => { if (event.buttons) updateColorControl(event, 'alpha'); }}><span style:left={`${colorPicker.alpha * 100}%`} style:--thumb-color={colorWithAlpha(pickerHex, colorPicker.alpha)}></span></div>
+      </div>
+    {/if}
   {/if}
   {#if activeTool === 'select' && pdfTextSelection}
     <div class="protect-panel selection-properties-panel text-selection-panel" role="dialog" aria-label="Selected text properties" transition:fly={{ x: 18, duration: 240, easing: cubicOut }}>
@@ -6570,6 +6708,65 @@
     gap: 9px;
     border-bottom: 0;
   }
+
+  .drawing-property-section {
+    display: grid;
+    gap: 10px;
+    border-bottom: 0;
+  }
+
+  .drawing-color-row {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) 40px;
+    align-items: center;
+    min-height: 39px;
+    overflow: hidden;
+    border: 1px solid #d7d7d7;
+    border-radius: 8px;
+    background: #f3f3f3;
+    font-size: 18px;
+  }
+
+  .drawing-color-row > span { padding-left: 12px; color: #7a7a7a; }
+  .drawing-color-row input {
+    min-width: 0;
+    padding: 0 8px;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: #111;
+    font: inherit;
+    text-align: right;
+  }
+
+  .drawing-color-row .property-color { justify-self: center; }
+
+  .drawing-number-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 9px;
+  }
+
+  .drawing-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 39px;
+    padding: 0 12px;
+    border: 1px solid #d7d7d7;
+    border-radius: 8px;
+    background: #f3f3f3;
+    color: #111;
+    font: inherit;
+    font-size: 18px;
+    cursor: pointer;
+    transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
+  }
+
+  .drawing-toggle em { color: #7a7a7a; font-style: normal; transition: color 150ms ease; }
+  .drawing-toggle.active { border-color: #111; background: #111; color: #fff; }
+  .drawing-toggle.active em { color: #fff; }
+  .figma-color-picker.drawing-color-picker { top: 118px; }
 
   .text-mark-row {
     display: grid;

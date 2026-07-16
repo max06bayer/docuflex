@@ -125,12 +125,21 @@
           <rect class="text-highlight" x={x} y={y} {width} {height} rx={Math.min(2, height * 0.12)} />
         {:else if annotation.type === 'marker'}
           {@const path = normalizedPath(annotation.points ?? [], frame.width, frame.height)}
-          <path class="marker-edge" d={path} />
-          <path class="marker-ink" d={path} />
+          {@const strokeStyle = Array.isArray(annotation.color) ? annotation.color : []}
+          {@const strokeColor = styleRgba(strokeStyle, 0, [1, 0.894, 0.231], 1)}
+          {@const strokeOpacity = Math.max(0.01, Math.min(1, Number(strokeStyle[3] ?? 0.34)))}
+          {@const strokeWidth = Math.max(0.5, Number(strokeStyle[4] ?? 16))}
+          {@const falloff = Math.max(0, Math.min(1, Number(strokeStyle[5] ?? 0.35)))}
+          <path class="marker-edge" d={path} style:stroke={strokeColor} style:stroke-width={`${strokeWidth * (1 + falloff * 0.4)}px`} style:opacity={strokeOpacity * falloff * 0.72} />
+          <path class="marker-ink" d={path} style:stroke={strokeColor} style:stroke-width={`${strokeWidth}px`} style:opacity={strokeOpacity} />
         {:else if annotation.type === 'pen'}
           {@const path = normalizedPath(annotation.points ?? [], frame.width, frame.height)}
-          <path class="pen-edge" d={path} />
-          <path class="pen-ink" d={path} />
+          {@const strokeStyle = Array.isArray(annotation.color) ? annotation.color : []}
+          {@const strokeColor = styleRgba(strokeStyle, 0, [0.886, 0.114, 0.196], 1)}
+          {@const strokeOpacity = Math.max(0.01, Math.min(1, Number(strokeStyle[3] ?? 0.94)))}
+          {@const strokeWidth = Math.max(0.5, Number(strokeStyle[4] ?? 2.05))}
+          <path class="pen-edge" d={path} style:stroke={strokeColor} style:stroke-width={`${strokeWidth + 1.35}px`} style:opacity={strokeOpacity * 0.16} />
+          <path class="pen-ink" d={path} style:stroke={strokeColor} style:stroke-width={`${strokeWidth}px`} style:opacity={strokeOpacity} />
         {:else}
           <g transform={`rotate(${Number(annotation.rotation || 0)} ${centerX} ${centerY})`} style={objectStyle(annotation)}>
             {#if Array.isArray(annotation.color) && Number(annotation.color[18]) >= 0.5 && Number(annotation.color[19]) >= 0.5 && !['line', 'arrow', 'check', 'cross', 'textfield'].includes(annotation.type)}
