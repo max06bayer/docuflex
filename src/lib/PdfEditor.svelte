@@ -71,6 +71,8 @@
   /** @type {any} */
   let htmlEditor;
   let htmlEditorStarted = false;
+  /** @type {File | null} */
+  let htmlTextEditBaseFile = null;
   let htmlEditorReady = false;
   let htmlViewportMode = false;
   let htmlViewportVisible = false;
@@ -236,7 +238,10 @@
     observedTool = activeTool;
     void handleToolTransition(previousTool, activeTool);
   }
-  $: htmlViewportVisible = htmlEditorStarted && htmlEditorReady && htmlViewportMode && HTML_VIEW_TOOLS.has(activeTool);
+  $: htmlViewportVisible = htmlEditorStarted
+    && htmlEditorReady
+    && htmlViewportMode
+    && (HTML_VIEW_TOOLS.has(activeTool) || editorTransition === 'Applying Changes to Document');
   $: {
     annotations;
     shapes;
@@ -375,6 +380,7 @@
     onProtectionChange({ enabled: encryptionEnabled, password: protectionPassword });
     if (fileChanged) {
       htmlEditorStarted = false;
+      htmlTextEditBaseFile = null;
       htmlEditorReady = false;
       htmlViewportMode = false;
       await loadPdf(false);
@@ -473,6 +479,7 @@
         htmlViewportMode = true;
         return;
       }
+      htmlTextEditBaseFile = workingFile;
       editorTransition = 'Preparing Document for Editing';
       htmlEditorReady = false;
       htmlEditorStarted = true;
@@ -490,12 +497,15 @@
       if (htmlEditor?.resolvedTextHighlights) {
         applyResolvedTextHighlights(htmlEditor.resolvedTextHighlights());
       }
-      const sourceBytes = await workingFile.arrayBuffer();
-      const hasTextEdits = htmlEditor?.hasPendingTextEdits
-        ? await htmlEditor.hasPendingTextEdits()
-        : true;
+      const sourceBytes = await (htmlTextEditBaseFile ?? workingFile).arrayBuffer();
+      // Capture once while the editable iframe is still visible and laid out.
+      // Re-reading after the layer is hidden can lose contenteditable geometry
+      // and caused textbox edits to be treated as unchanged.
+      const pendingTextEdits = htmlEditor?.capturePendingTextEdits
+        ? await htmlEditor.capturePendingTextEdits()
+        : null;
       const editedBytes = htmlEditor?.applyTextEdits
-        ? await htmlEditor.applyTextEdits(sourceBytes)
+        ? await htmlEditor.applyTextEdits(sourceBytes, pendingTextEdits)
         : sourceBytes;
       if (generation !== editorTransitionGeneration) return;
       workingFile = new File([editedBytes], workingFile.name, {
@@ -504,14 +514,14 @@
       });
       htmlViewportMode = false;
       await loadPdf(false);
-      if (hasTextEdits && htmlEditor?.commitAppliedTextEdits) {
-        await htmlEditor.commitAppliedTextEdits(editedBytes);
-      }
+      // Keep the iframe's changes cumulative against the clean baseline. This
+      // avoids stacking old font, size, and decoration overlays on each pass.
     } catch (error) {
       console.error(error);
       status = error instanceof Error ? error.message : 'Could not apply the edited PDF text.';
       htmlViewportMode = false;
       htmlEditorStarted = false;
+      htmlTextEditBaseFile = null;
       htmlEditorReady = false;
     } finally {
       if (generation === editorTransitionGeneration) editorTransition = '';
@@ -741,6 +751,7 @@
       });
       ocrTextLayerActive = true;
       htmlEditorStarted = false;
+      htmlTextEditBaseFile = null;
       htmlEditorReady = false;
       htmlViewportMode = false;
       await loadPdf(false);
@@ -3575,6 +3586,7 @@
       lastModified: Date.now()
     });
     htmlEditorStarted = false;
+    htmlTextEditBaseFile = null;
     htmlEditorReady = false;
     htmlViewportMode = false;
     await loadPdf(false);
@@ -5206,6 +5218,7 @@
       textHighlights = reorderPageRecords(textHighlights, order);
       workingFile = new File([result], workingFile.name, { type: 'application/pdf', lastModified: Date.now() });
       htmlEditorStarted = false;
+      htmlTextEditBaseFile = null;
       htmlEditorReady = false;
       htmlViewportMode = false;
       await loadPdf(false, true, order.length);
@@ -5297,6 +5310,7 @@
       const nextPageCount = pageCount + insertedCount;
       workingFile = new File([result], workingFile.name, { type: 'application/pdf', lastModified: Date.now() });
       htmlEditorStarted = false;
+      htmlTextEditBaseFile = null;
       htmlEditorReady = false;
       htmlViewportMode = false;
       await loadPdf(false, true, nextPageCount);
@@ -5376,6 +5390,7 @@
       const nextPageCount = pageCount + insertedCount;
       workingFile = new File([result], workingFile.name, { type: 'application/pdf', lastModified: Date.now() });
       htmlEditorStarted = false;
+      htmlTextEditBaseFile = null;
       htmlEditorReady = false;
       htmlViewportMode = false;
       await loadPdf(false, true, nextPageCount);
@@ -5468,6 +5483,7 @@
       }));
       workingFile = new File([result], workingFile.name, { type: 'application/pdf', lastModified: Date.now() });
       htmlEditorStarted = false;
+      htmlTextEditBaseFile = null;
       htmlEditorReady = false;
       htmlViewportMode = false;
       await loadPdf(false, true, pageCount);

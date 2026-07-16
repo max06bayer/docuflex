@@ -62,18 +62,37 @@
   let convertedHtmlOriginalTexts = {};
   let detectedFont = '';
   let activeHtmlTextId = '';
+  let activeHtmlTextBoxId = '';
+  let htmlBoxSelectionActive = false;
   let htmlBoldActive = false;
   let htmlItalicActive = false;
+  let htmlUnderlineActive = false;
+  let htmlStrikethroughActive = false;
+  let htmlFontFamily = '';
+  let htmlFontSize = 16;
+  let htmlFontWeight = 400;
+  let htmlTextColor = '#171717';
+  let htmlLetterSpacing = 0;
+  let htmlLineHeight = 19.2;
+  let htmlTextAlign = 'left';
+  /** @type {Record<string, { value: string; label: string }>} */
+  let htmlOriginalFonts = {};
+  /** @type {{ hue: number; saturation: number; value: number } | null} */
+  let htmlColorPicker = null;
   /** @type {{ pointerId: number; x: number; y: number; scrollLeft: number; scrollTop: number } | null} */
   let htmlPanStart = null;
   let htmlShiftPressed = false;
   /** @type {Range | null} */
   let savedHtmlSelection = null;
 
-  const scale = 1.35;
+  const scale = 1.45;
   const minZoom = 0.5;
   const maxZoom = 4;
   const clickZoomFactor = 1.25;
+  // Keep empty scrollable space beyond both page edges. The matching initial
+  // scroll offset makes this invisible until the user pans into it.
+  const horizontalPanGutter = 420;
+  const verticalPanGutter = 520;
   const backendUrl = '/api/pdf/edit';
   const fontUrl = '/api/pdf/fonts';
   const htmlConvertUrl = '/api/pdf/convert';
@@ -97,10 +116,14 @@
     embeddedFontFamilies = {};
     htmlFontNames = {};
     convertedHtmlOriginalTexts = {};
+    htmlOriginalFonts = {};
     detectedFont = '';
     activeHtmlTextId = '';
+    activeHtmlTextBoxId = '';
+    htmlBoxSelectionActive = false;
     htmlBoldActive = false;
     htmlItalicActive = false;
+    resetHtmlFormattingState();
     savedHtmlSelection = null;
     fileName = file.name || 'document.pdf';
     pdfBytes = await file.arrayBuffer();
@@ -126,10 +149,14 @@
     embeddedFontFamilies = {};
     htmlFontNames = {};
     convertedHtmlOriginalTexts = {};
+    htmlOriginalFonts = {};
     detectedFont = '';
     activeHtmlTextId = '';
+    activeHtmlTextBoxId = '';
+    htmlBoxSelectionActive = false;
     htmlBoldActive = false;
     htmlItalicActive = false;
+    resetHtmlFormattingState();
     savedHtmlSelection = null;
     fileName = file.name || 'document.pdf';
     pdfBytes = await file.arrayBuffer();
@@ -528,15 +555,21 @@
     return htmlEdits;
   }
 
+  export async function capturePendingTextEdits() {
+    htmlFrame?.contentDocument?.body?.normalize();
+    return collectConvertedHtmlEdits();
+  }
+
   /**
    * Applies the currently staged HTML text changes to a PDF and returns its bytes.
    * The parent editor can then apply marker, pen, highlight, and shape annotations.
    * @param {ArrayBuffer | null} [sourceBytes]
+   * @param {unknown[] | null} [capturedEdits]
    */
-  export async function applyTextEdits(sourceBytes = pdfBytes) {
+  export async function applyTextEdits(sourceBytes = pdfBytes, capturedEdits = null) {
     if (!sourceBytes) throw new Error('The source PDF is not available.');
     htmlFrame?.contentDocument?.body?.normalize();
-    const htmlEdits = await collectConvertedHtmlEdits();
+    const htmlEdits = Array.isArray(capturedEdits) ? capturedEdits : await collectConvertedHtmlEdits();
     if (!htmlEdits.length) return sourceBytes.slice(0);
 
     const response = await fetch(backendUrl, {
@@ -677,6 +710,13 @@
         fontSize: Number.isFinite(Number(edit.fontSize)) ? Number(edit.fontSize) : 0,
         fontName: resolvedFrameFontName(edit),
         bold: Boolean(edit.bold),
+        fontChanged: Boolean(edit.fontChanged),
+        boldChanged: Boolean(edit.boldChanged),
+        italic: Boolean(edit.italic),
+        italicChanged: Boolean(edit.italicChanged),
+        underline: Boolean(edit.underline),
+        strikethrough: Boolean(edit.strikethrough),
+        letterSpacing: Number.isFinite(Number(edit.letterSpacing)) ? Number(edit.letterSpacing) : 0,
         moved,
         overlay,
         alignment: typeof edit.alignment === 'string' ? edit.alignment : '',
@@ -697,6 +737,7 @@
   /** @param {Record<string, unknown>} edit */
   function resolvedFrameFontName(edit) {
     const explicit = typeof edit.fontName === 'string' ? cleanFontFamilyLabel(edit.fontName) : '';
+    if (explicit && !/^ff[0-9a-f]+$/i.test(explicit)) return explicit;
     const mapped = frameFontName(typeof edit.fontClass === 'string' ? edit.fontClass : '');
     if (mapped && !/^ff[0-9a-f]+$/i.test(mapped)) return mapped;
     const family = typeof edit.fontFamily === 'string' ? cleanFontFamilyLabel(edit.fontFamily) : '';
@@ -1425,14 +1466,39 @@
       fontSize: style.fontSize || '',
       fontWeight: style.fontWeight || '',
       fontStyle: style.fontStyle || '',
+      letterSpacing: style.letterSpacing || '',
+      lineHeight: style.lineHeight || '',
+      textAlign: style.textAlign || 'left',
+      underline: /underline/i.test(style.textDecorationLine || style.textDecoration || ''),
+      strikethrough: /line-through/i.test(style.textDecorationLine || style.textDecoration || ''),
       color,
       bold: Number.isFinite(explicitWeight) ? explicitWeight >= 600 : computedWeight >= 600 || familyLooksBold,
       italic: /italic|oblique/i.test(style.fontFamily) || /italic|oblique/i.test(style.fontStyle)
     };
   };
+  const docuflexSelectTextBox = (box) => {
+    if (!(box instanceof HTMLElement)) return;
+    document.querySelectorAll('.docuflex-textbox.docuflex-active').forEach((candidate) => {
+      if (candidate !== box) candidate.classList.remove('docuflex-active', 'docuflex-editor-open');
+    });
+    box.classList.add('docuflex-active');
+    const line = docuflexTextBoxLines(box)[0];
+    if (line) {
+      const row = box.querySelector('.docuflex-textbox-rich-line');
+      const font = docuflexFontInfo(row instanceof HTMLElement ? row : line);
+      font.id = line.dataset.docuflexEditId || '';
+      font.textBoxId = box.dataset.docuflexTextBoxId || '';
+      font.boxSelection = true;
+      parent.postMessage({
+        source: 'docuflex-html-editor',
+        type: 'activate',
+        font
+      }, '*');
+    }
+  };
   const docuflexActivate = (target) => {
     const targetBox = docuflexTextBoxNode(target);
-    if (targetBox && !target?.closest?.('.docuflex-textbox-handle, .docuflex-textbox-resize')) {
+    if (targetBox && !target?.closest?.('.docuflex-textbox-hit-area, .docuflex-selection-handle, .docuflex-selection-edge')) {
       return docuflexOpenTextBoxEditor(targetBox, 'preserve');
     }
     const node = docuflexTextNode(target);
@@ -1654,10 +1720,15 @@
       selection?.removeAllRanges();
       selection?.addRange(range);
     }
+    const styleSource = editor.querySelector('.docuflex-textbox-rich-line');
+    const font = docuflexFontInfo(styleSource instanceof HTMLElement ? styleSource : lines[0]);
+    font.id = lines[0].dataset.docuflexEditId || '';
+    font.textBoxId = box.dataset.docuflexTextBoxId || '';
+    font.boxSelection = false;
     parent.postMessage({
       source: 'docuflex-html-editor',
       type: 'activate',
-      font: docuflexFontInfo(lines[0])
+      font
     }, '*');
     return editor;
   };
@@ -1721,6 +1792,41 @@
     const currentHeight = Number.parseFloat(box.style.minHeight || '0') || box.getBoundingClientRect().height || 0;
     const neededHeight = Math.ceil(editor.scrollHeight);
     if (neededHeight > currentHeight) box.style.minHeight = neededHeight + 'px';
+  };
+  const docuflexFitTextBoxToOriginalRows = (box) => {
+    const editor = box?.querySelector?.('.docuflex-textbox-editor');
+    if (!(box instanceof HTMLElement) || !(editor instanceof HTMLElement)) return;
+    const rows = Array.from(editor.querySelectorAll('.docuflex-textbox-rich-line'));
+    if (!rows.length) return;
+    const editorStyle = getComputedStyle(editor);
+    const horizontalPadding = (Number.parseFloat(editorStyle.paddingLeft || '0') || 0)
+      + (Number.parseFloat(editorStyle.paddingRight || '0') || 0);
+    let widestRow = 0;
+    rows.forEach((row) => {
+      if (!(row instanceof HTMLElement)) return;
+      const previousWhiteSpace = row.style.whiteSpace;
+      const previousWidth = row.style.width;
+      const previousMaxWidth = row.style.maxWidth;
+      row.style.whiteSpace = 'nowrap';
+      row.style.width = 'max-content';
+      row.style.maxWidth = 'none';
+      const marginLeft = Number.parseFloat(getComputedStyle(row).marginLeft || '0') || 0;
+      widestRow = Math.max(widestRow, marginLeft + row.scrollWidth);
+      row.style.whiteSpace = previousWhiteSpace;
+      row.style.width = previousWidth;
+      row.style.maxWidth = previousMaxWidth;
+    });
+    const currentWidth = Number.parseFloat(box.style.width || '0') || box.offsetWidth || 24;
+    const fontSize = Number.parseFloat(editorStyle.fontSize || '0') || 16;
+    const neededWidth = Math.ceil(widestRow + horizontalPadding + Math.max(8, fontSize * 0.2));
+    if (neededWidth <= currentWidth) return;
+    const page = box.closest('.pf');
+    if (!(page instanceof HTMLElement)) return;
+    const pageWidth = page.getBoundingClientRect().width || 0;
+    const rightLimit = pageWidth > 0 ? pageWidth * 0.97 : 0;
+    const left = Number.parseFloat(box.style.left || '0') || 0;
+    const maxWidth = rightLimit > 0 ? Math.max(24, rightLimit - left) : neededWidth;
+    box.style.width = Math.min(neededWidth, maxWidth) + 'px';
   };
   const docuflexAlignTextBoxEditor = (box, force = false) => {
     const editor = box?.querySelector?.('.docuflex-textbox-editor');
@@ -1804,7 +1910,11 @@
   const docuflexFormattedTextBoxRows = (rows) => rows.some((row) => {
     if (!(row instanceof HTMLElement)) return false;
     const explicitlyAligned = Boolean(row.dataset.docuflexAlign || row.style.textAlign);
-    return explicitlyAligned || Boolean(docuflexTextBoxRowAlignment(row)) || row.dataset.docuflexBullet === 'true' || row.dataset.docuflexBullet === 'false';
+    return row.dataset.docuflexStyleDirty === 'true'
+      || explicitlyAligned
+      || Boolean(docuflexTextBoxRowAlignment(row))
+      || row.dataset.docuflexBullet === 'true'
+      || row.dataset.docuflexBullet === 'false';
   });
   const docuflexTextBoxRowTexts = (rows, original) => {
     const values = rows.map((row) => row instanceof HTMLElement ? docuflexNormalizeText(row.textContent || '') : '');
@@ -1844,13 +1954,17 @@
       0
     ];
   };
-  const docuflexTextBoxLineEdit = (box, line, newText, index, moved, row) => {
+  const docuflexTextBoxLineEdit = (box, line, newText, index, moved, row, formattingDirty = false) => {
     const node = document.querySelector('[data-docuflex-edit-id="' + CSS.escape(String(line.id || '')) + '"]');
     if (!(node instanceof HTMLElement)) return null;
     const oldText = docuflexNormalizeText(line.text || '');
     const replacement = docuflexNormalizeText(newText || '');
     const alignment = docuflexTextBoxRowAlignment(row);
-    const overlay = !moved && (alignment === 'center' || alignment === 'right');
+    // A resized or moved textbox still needs the overlay path once its
+    // typography changes. The movement-only backend deliberately preserves
+    // original styling, which previously caused every later panel change to
+    // appear to stop working after using the blue-box controls.
+    const overlay = formattingDirty || (!moved && (alignment === 'center' || alignment === 'right'));
     if (!oldText || (!moved && !overlay && oldText === replacement)) return null;
     const movedRect = moved ? docuflexMovedTextBoxRect(box, node) : [];
     const baseRect = movedRect.length
@@ -1860,7 +1974,10 @@
     const alignRect = overlay ? docuflexTextBoxAlignRect(box, node) : [];
     const visualRect = overlay ? docuflexVisualTextRect(row, node) : [];
     const originalRect = docuflexRect(node);
-    const exportFontNode = (moved || overlay) && row instanceof HTMLElement ? row : node;
+    const exportFontNode = (moved || overlay || formattingDirty) && row instanceof HTMLElement ? row : node;
+    const exportFont = docuflexFontInfo(exportFontNode);
+    const originalFont = docuflexFontInfo(node);
+    const normalizedFamily = (value) => String(value || '').replace(/["']/g, '').replace(/\s+/g, '').toLowerCase();
     return {
       id: 'textbox-' + (box.dataset.docuflexTextBoxId || 'box') + '-' + index,
       page: docuflexPage(node),
@@ -1871,14 +1988,22 @@
       originalRect,
       pageSize: (() => {
         const page = node.closest('.pf');
-        const rect = page?.getBoundingClientRect();
-        return rect ? [rect.width, rect.height] : [];
+        if (!(page instanceof HTMLElement)) return [];
+        return [page.offsetWidth || page.clientWidth, page.offsetHeight || page.clientHeight];
       })(),
       fontSize: Number.parseFloat(getComputedStyle(exportFontNode).fontSize || '0') || 0,
       fontClass: docuflexFontInfo(node).fontClass,
-      fontFamily: docuflexFontInfo(node).fontFamily,
-      bold: docuflexFontInfo(node).bold,
-      color: docuflexFontInfo(node).color,
+      fontName: formattingDirty ? exportFont.fontFamily : '',
+      fontFamily: exportFont.fontFamily,
+      bold: exportFont.bold,
+      fontChanged: formattingDirty && normalizedFamily(exportFont.fontFamily) !== normalizedFamily(originalFont.fontFamily),
+      boldChanged: formattingDirty && exportFont.bold !== originalFont.bold,
+      italic: Boolean(exportFont.italic),
+      italicChanged: formattingDirty && Boolean(exportFont.italic) !== Boolean(originalFont.italic),
+      underline: Boolean(exportFont.underline),
+      strikethrough: Boolean(exportFont.strikethrough),
+      letterSpacing: Number.parseFloat(exportFont.letterSpacing || '0') || 0,
+      color: exportFont.color,
       oldText,
       originalHtmlText: line.htmlText || oldText,
       currentHtmlText: replacement,
@@ -1893,8 +2018,26 @@
     const original = docuflexTextBoxOriginalLines(box);
     const dirty = docuflexTextBoxDirty(box);
     const rows = Array.from(box.querySelectorAll('.docuflex-textbox-rich-line'));
+    const savedStyles = docuflexParseJson(box.dataset.docuflexStyleSnapshot, []);
+    rows.forEach((row, index) => {
+      if (!(row instanceof HTMLElement)) return;
+      const saved = savedStyles[index];
+      if (!saved || typeof saved !== 'object') return;
+      Object.entries(saved).forEach(([property, value]) => {
+        if (typeof value === 'string') row.style.setProperty(property, value);
+      });
+      row.dataset.docuflexStyleDirty = 'true';
+    });
+    // Formatting controls also put the box into visual-edit mode. Treat that
+    // live state as authoritative even if a blur/tool transition races the
+    // dataset marker, otherwise the collector falls back to a text-only edit.
+    const formattingDirty = savedStyles.length > 0
+      || rows.some((row) => row instanceof HTMLElement && row.dataset.docuflexStyleDirty === 'true')
+      || box.dataset.docuflexFormattingDirty === 'true'
+      || box.dataset.docuflexVisualEditing === 'true'
+      || box.classList.contains('docuflex-live-edit');
     const formattedRows = docuflexFormattedTextBoxRows(rows);
-    if (!moved && !box.classList.contains('docuflex-editor-open') && !formattedRows) return [];
+    if (!moved && !dirty && !formattingDirty && !box.classList.contains('docuflex-editor-open') && !formattedRows) return [];
     const wrapped = dirty || formattedRows
       ? (formattedRows ? docuflexTextBoxRowTexts(rows, original) : docuflexWrappedTextBoxLines(box))
       : original.map((line) => docuflexNormalizeText(line.text || ''));
@@ -1905,7 +2048,7 @@
         replacement = [replacement, ...wrapped.slice(original.length)].filter(Boolean).join(' ');
       }
       const row = rows[index] instanceof HTMLElement ? rows[index] : null;
-      const edit = docuflexTextBoxLineEdit(box, line, replacement, index, moved, row);
+      const edit = docuflexTextBoxLineEdit(box, line, replacement, index, moved, row, formattingDirty);
       if (edit) edits.push(edit);
     });
     return edits;
@@ -2023,7 +2166,7 @@
     while (start > 0 && docuflexLooseTextFlow(lines[start - 1], lines[start])) start -= 1;
     while (end < lines.length - 1 && docuflexLooseTextFlow(lines[end], lines[end + 1])) end += 1;
     const group = lines.slice(start, end + 1);
-    const candidates = group.length >= 2 ? group : [lines[index]].filter(docuflexSingleLineBoxCandidate);
+    const candidates = group.length >= 2 ? group : [lines[index]];
     if (!candidates.length) return null;
     const boxIndex = document.querySelectorAll('.docuflex-textbox').length;
     docuflexCreateTextBox(candidates, boxIndex);
@@ -2143,13 +2286,31 @@
     box.dataset.docuflexOriginalLeft = String(boxLeft);
     box.dataset.docuflexOriginalTop = String(Math.max(0, top - padTop));
     const handle = document.createElement('span');
-    handle.className = 'docuflex-textbox-handle';
+    handle.className = 'docuflex-textbox-hit-area';
     handle.contentEditable = 'false';
     handle.textContent = '';
     const resize = document.createElement('span');
-    resize.className = 'docuflex-textbox-resize';
+    resize.className = 'docuflex-selection-handle docuflex-selection-handle-se';
+    resize.dataset.docuflexResize = 'se';
     resize.contentEditable = 'false';
     resize.textContent = '';
+    const selectionControls = document.createElement('span');
+    selectionControls.className = 'docuflex-selection-controls';
+    selectionControls.contentEditable = 'false';
+    ['nw', 'ne', 'sw'].forEach((position) => {
+      const control = document.createElement('span');
+      control.className = 'docuflex-selection-handle docuflex-selection-handle-' + position;
+      control.dataset.docuflexResize = position;
+      control.contentEditable = 'false';
+      selectionControls.append(control);
+    });
+    ['n', 'e', 's', 'w'].forEach((position) => {
+      const edge = document.createElement('span');
+      edge.className = 'docuflex-selection-edge docuflex-selection-edge-' + position;
+      edge.dataset.docuflexResize = position;
+      edge.contentEditable = 'false';
+      selectionControls.append(edge);
+    });
     const editor = document.createElement('div');
     editor.className = 'docuflex-textbox-editor';
     editor.contentEditable = 'true';
@@ -2157,7 +2318,7 @@
     editor.setAttribute('role', 'textbox');
     editor.style.padding = padTop + 'px ' + padRight + 'px ' + padBottom + 'px ' + padLeft + 'px';
     editor.textContent = lines.map((line) => line.text).join(' ');
-    box.append(handle, resize, editor);
+    box.append(editor, handle, selectionControls, resize);
     page.append(box);
     docuflexTextBoxStyleFromLine(box, lines[0].node, lineGap);
     lines.forEach((line) => {
@@ -2170,24 +2331,33 @@
     });
     docuflexPopulateTextBoxEditor(box, lines.map((line) => line.node));
     docuflexApplyTextBoxLiveRows(box);
+    docuflexFitTextBoxToOriginalRows(box);
     box.classList.add('docuflex-textbox-preview');
     docuflexAlignTextBoxEditor(box, true);
     docuflexSetTextBoxLinesHidden(box, true);
+    requestAnimationFrame(() => {
+      docuflexFitTextBoxToOriginalRows(box);
+      docuflexAlignTextBoxEditor(box, true);
+    });
     let drag = null;
     handle.addEventListener('pointerdown', (event) => {
+      docuflexSelectTextBox(box);
       drag = {
         x: event.clientX,
         y: event.clientY,
         left: Number.parseFloat(box.style.left || '0') || 0,
-        top: Number.parseFloat(box.style.top || '0') || 0
+        top: Number.parseFloat(box.style.top || '0') || 0,
+        scaleX: page.offsetWidth ? page.getBoundingClientRect().width / page.offsetWidth : 1,
+        scaleY: page.offsetHeight ? page.getBoundingClientRect().height / page.offsetHeight : 1
       };
       handle.setPointerCapture(event.pointerId);
       event.preventDefault();
+      event.stopPropagation();
     });
     handle.addEventListener('pointermove', (event) => {
       if (!drag) return;
-      const dx = event.clientX - drag.x;
-      const dy = event.clientY - drag.y;
+      const dx = (event.clientX - drag.x) / (drag.scaleX || 1);
+      const dy = (event.clientY - drag.y) / (drag.scaleY || 1);
       box.style.left = Math.max(0, drag.left + dx) + 'px';
       box.style.top = Math.max(0, drag.top + dy) + 'px';
       docuflexClampTextBoxToPage(box);
@@ -2201,35 +2371,67 @@
       handle.releasePointerCapture(event.pointerId);
       parent.postMessage({ source: 'docuflex-html-editor', type: 'geometry' }, '*');
     });
-    let resizeDrag = null;
-    resize.addEventListener('pointerdown', (event) => {
-      resizeDrag = {
-        x: event.clientX,
-        y: event.clientY,
-        width: box.getBoundingClientRect().width,
-        height: box.getBoundingClientRect().height
-      };
-      resize.setPointerCapture(event.pointerId);
+    handle.addEventListener('click', (event) => {
+      docuflexSelectTextBox(box);
       event.preventDefault();
+      event.stopPropagation();
     });
-    resize.addEventListener('pointermove', (event) => {
-      if (!resizeDrag) return;
-      const pageWidth = page.getBoundingClientRect().width || 0;
-      const rightLimit = pageWidth > 0 ? pageWidth * 0.97 : 0;
-      const left = Number.parseFloat(box.style.left || '0') || 0;
-      const maxWidth = rightLimit > 0 ? Math.max(24, rightLimit - left) : Infinity;
-      box.style.width = Math.min(maxWidth, Math.max(24, resizeDrag.width + event.clientX - resizeDrag.x)) + 'px';
-      box.style.minHeight = Math.max(12, resizeDrag.height + event.clientY - resizeDrag.y) + 'px';
-      docuflexBeginTextBoxVisualEditing(box);
+    handle.addEventListener('dblclick', (event) => {
+      drag = null;
       docuflexOpenTextBoxEditor(box, 'preserve');
-      docuflexGrowTextBoxToEditor(box);
-      parent.postMessage({ source: 'docuflex-html-editor', type: 'geometry' }, '*');
       event.preventDefault();
+      event.stopPropagation();
     });
-    resize.addEventListener('pointerup', (event) => {
-      resizeDrag = null;
-      resize.releasePointerCapture(event.pointerId);
-      parent.postMessage({ source: 'docuflex-html-editor', type: 'geometry' }, '*');
+    Array.from(box.querySelectorAll('.docuflex-selection-handle, .docuflex-selection-edge')).forEach((resizeHandle) => {
+      if (!(resizeHandle instanceof HTMLElement)) return;
+      let resizeDrag = null;
+      resizeHandle.addEventListener('pointerdown', (event) => {
+        docuflexSelectTextBox(box);
+        resizeDrag = {
+          x: event.clientX,
+          y: event.clientY,
+          left: Number.parseFloat(box.style.left || '0') || 0,
+          top: Number.parseFloat(box.style.top || '0') || 0,
+          width: Number.parseFloat(box.style.width || '0') || box.offsetWidth || 24,
+          height: Number.parseFloat(box.style.minHeight || '0') || box.offsetHeight || 12,
+          scaleX: page.offsetWidth ? page.getBoundingClientRect().width / page.offsetWidth : 1,
+          scaleY: page.offsetHeight ? page.getBoundingClientRect().height / page.offsetHeight : 1,
+          direction: resizeHandle.dataset.docuflexResize || 'se'
+        };
+        resizeHandle.setPointerCapture(event.pointerId);
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      resizeHandle.addEventListener('pointermove', (event) => {
+        if (!resizeDrag) return;
+        const dx = (event.clientX - resizeDrag.x) / (resizeDrag.scaleX || 1);
+        const dy = (event.clientY - resizeDrag.y) / (resizeDrag.scaleY || 1);
+        const west = resizeDrag.direction.includes('w');
+        const north = resizeDrag.direction.includes('n');
+        const horizontal = resizeDrag.direction.includes('e') || west;
+        const vertical = resizeDrag.direction.includes('s') || north;
+        const nextWidth = horizontal
+          ? Math.max(24, resizeDrag.width + (west ? -dx : dx))
+          : resizeDrag.width;
+        const nextHeight = vertical
+          ? Math.max(12, resizeDrag.height + (north ? -dy : dy))
+          : resizeDrag.height;
+        if (west) box.style.left = Math.max(0, resizeDrag.left + resizeDrag.width - nextWidth) + 'px';
+        if (north) box.style.top = Math.max(0, resizeDrag.top + resizeDrag.height - nextHeight) + 'px';
+        box.style.width = nextWidth + 'px';
+        box.style.minHeight = nextHeight + 'px';
+        docuflexClampTextBoxToPage(box);
+        box.dataset.docuflexMoved = 'true';
+        docuflexBeginTextBoxVisualEditing(box);
+        docuflexGrowTextBoxToEditor(box);
+        parent.postMessage({ source: 'docuflex-html-editor', type: 'geometry' }, '*');
+        event.preventDefault();
+      });
+      resizeHandle.addEventListener('pointerup', (event) => {
+        resizeDrag = null;
+        resizeHandle.releasePointerCapture(event.pointerId);
+        parent.postMessage({ source: 'docuflex-html-editor', type: 'geometry' }, '*');
+      });
     });
     lines.forEach((line) => {
       line.node.addEventListener('focus', () => {
@@ -2275,7 +2477,7 @@
       const groupedLines = new Set(groups.flat());
       groups.forEach((group) => docuflexCreateTextBox(group, boxIndex++));
       lines
-        .filter((line) => !groupedLines.has(line) && docuflexSingleLineBoxCandidate(line))
+        .filter((line) => !groupedLines.has(line))
         .forEach((line) => docuflexCreateTextBox([line], boxIndex++));
     });
   };
@@ -2424,11 +2626,18 @@
     }
     return occurrence;
   };
-  const docuflexCollectEdits = () => [
-    ...docuflexCollectTextBoxEdits(),
-    ...Array.from(document.querySelectorAll('.t[data-docuflex-edit-id]')).flatMap((node, index) => {
+  const docuflexCollectEdits = () => {
+    const textBoxEdits = docuflexCollectTextBoxEdits();
+    const lineEdits = Array.from(document.querySelectorAll('.t[data-docuflex-edit-id]')).flatMap((node, index) => {
     const groupBox = node.dataset.docuflexGrouped === 'true' ? docuflexTextBoxForLine(node) : null;
-    if (groupBox?.classList?.contains('docuflex-editor-open')) return [];
+    if (groupBox && (
+      groupBox.classList.contains('docuflex-editor-open')
+      || groupBox.classList.contains('docuflex-live-edit')
+      || groupBox.dataset.docuflexFormattingDirty === 'true'
+      || groupBox.dataset.docuflexVisualEditing === 'true'
+      || docuflexTextBoxDirty(groupBox)
+      || docuflexTextBoxMoved(groupBox)
+    )) return [];
     const oldText = docuflexNormalizeText(node.dataset.docuflexOriginalText || '');
     const newText = docuflexVisibleText(node) || docuflexNormalizeText(node.innerText || node.textContent || '');
     if (!oldText || oldText === newText) return [];
@@ -2439,8 +2648,8 @@
       rect: docuflexRect(node),
       pageSize: (() => {
         const page = node.closest('.pf');
-        const rect = page?.getBoundingClientRect();
-        return rect ? [rect.width, rect.height] : [];
+        if (!(page instanceof HTMLElement)) return [];
+        return [page.offsetWidth || page.clientWidth, page.offsetHeight || page.clientHeight];
       })(),
       fontSize: Number.parseFloat(getComputedStyle(node).fontSize || '0') || 0,
       fontClass: docuflexFontInfo(node).fontClass,
@@ -2452,7 +2661,9 @@
       currentHtmlText: docuflexVisibleText(node) || node.textContent || '',
       newText
     }];
-  })];
+    });
+    return [...textBoxEdits, ...lineEdits];
+  };
   const docuflexRebaseEdits = () => {
     const rebasedLines = new Map();
     document.querySelectorAll('.docuflex-textbox').forEach((box) => {
@@ -2477,6 +2688,7 @@
       box.dataset.docuflexOriginalLeft = box.style.left || '0';
       box.dataset.docuflexOriginalTop = box.style.top || '0';
       delete box.dataset.docuflexMoved;
+      delete box.dataset.docuflexFormattingDirty;
       box.classList.remove('docuflex-live-edit');
     });
 
@@ -2525,6 +2737,16 @@
   };
   window.__docuflexCollectEdits = docuflexCollectEdits;
   window.__docuflexRebaseEdits = docuflexRebaseEdits;
+  window.__docuflexNotifyTextBoxFormatting = (boxId) => {
+    const box = Array.from(document.querySelectorAll('.docuflex-textbox')).find((candidate) => {
+      return candidate instanceof HTMLElement && candidate.dataset.docuflexTextBoxId === String(boxId || '');
+    });
+    if (!(box instanceof HTMLElement)) return false;
+    const row = box.querySelector('.docuflex-textbox-rich-line');
+    const line = docuflexTextBoxLines(box)[0];
+    docuflexScheduleDirty(row instanceof HTMLElement ? row : line);
+    return true;
+  };
   window.__docuflexFormat = (command) => {
     document.execCommand(command, false);
     parent.postMessage({
@@ -2607,6 +2829,12 @@
     addEventListener('scroll', () => docuflexScheduleTextBoxBuild(null, 120), { passive: true });
     addEventListener('resize', () => docuflexScheduleTextBoxBuild(null, 160), { passive: true });
     document.addEventListener('pointerdown', (event) => {
+      if (!docuflexTextBoxNode(event.target)) {
+        document.querySelectorAll('.docuflex-textbox.docuflex-active').forEach((box) => {
+          box.classList.remove('docuflex-active', 'docuflex-editor-open');
+        });
+        parent.postMessage({ source: 'docuflex-html-editor', type: 'deactivate' }, '*');
+      }
       const node = docuflexActivate(event.target);
       if (node) node.focus({ preventScroll: true });
     }, true);
@@ -2634,6 +2862,34 @@
 </scr` + `ipt>`;
     const injection = `
 <style>
+  @font-face {
+    font-family: 'Inter';
+    src: url('/fonts/inter-variable-normal.woff2') format('woff2');
+    font-style: normal;
+    font-weight: 100 900;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: 'Inter';
+    src: url('/fonts/inter-variable-italic.woff2') format('woff2');
+    font-style: italic;
+    font-weight: 100 900;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: 'Geist';
+    src: url('/fonts/geist-variable-normal.woff2') format('woff2');
+    font-style: normal;
+    font-weight: 100 900;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: 'Geist';
+    src: url('/fonts/geist-variable-italic.woff2') format('woff2');
+    font-style: italic;
+    font-weight: 100 900;
+    font-display: swap;
+  }
   html {
     width: 100%;
     height: 100%;
@@ -2664,17 +2920,23 @@
     top: auto !important;
     right: auto !important;
     bottom: auto !important;
-    left: 0 !important;
+    left: -50px !important;
     width: 100% !important;
     min-width: 100%;
     margin: 0;
-    padding: 0;
+    box-sizing: content-box;
+    padding: 0 var(--docuflex-horizontal-pan-gutter, 0px);
+    display: flex !important;
+    flex-direction: column;
+    align-items: center;
+    align-items: safe center;
     overflow: visible !important;
     background: transparent !important;
     background-image: none !important;
   }
   .pf {
-    margin: 0 auto var(--docuflex-page-margin, 22.222px) !important;
+    flex: 0 0 auto;
+    margin: 0 0 var(--docuflex-page-margin, 22.222px) !important;
     box-shadow: 0 5px 22px rgba(0, 0, 0, 0.13);
   }
   html.docuflex-pan-tool, html.docuflex-pan-tool * {
@@ -2696,13 +2958,13 @@
     z-index: 4 !important;
     pointer-events: auto !important;
     cursor: text;
-    outline: 1px dashed rgba(45, 87, 128, 0.34);
-    outline-offset: 2px;
+    outline: 1px solid rgba(22, 132, 248, 0.22);
+    outline-offset: 1px;
   }
-  .t:hover { outline-color: rgba(45, 87, 128, 0.7); }
+  .t:hover { outline-color: rgba(22, 132, 248, 0.48); }
   .t:focus, .t.docuflex-live-edit {
-    outline: 2px solid rgba(47, 137, 255, 0.9);
-    box-shadow: 0 0 0 2px rgba(13,90,167,.16);
+    outline: 1.5px solid #1684f8;
+    box-shadow: none;
   }
   .t:focus, .t.docuflex-live-edit {
     font-synthesis-weight: auto;
@@ -2725,17 +2987,18 @@
     min-width: 24px;
     min-height: 12px;
     pointer-events: none !important;
-    outline: 1px dashed rgba(45, 87, 128, 0.22);
-    outline-offset: 2px;
+    outline: 1px solid rgba(22, 132, 248, 0.2);
+    outline-offset: 1px;
     background: transparent;
   }
   .docuflex-textbox:hover {
-    outline-color: rgba(45, 87, 128, 0.58);
+    outline-color: rgba(22, 132, 248, 0.48);
   }
   .docuflex-textbox.docuflex-active,
   .docuflex-textbox.docuflex-live-edit {
-    outline: 2px solid rgba(47, 137, 255, 0.9);
-    box-shadow: 0 0 0 2px rgba(13,90,167,.16);
+    outline: 2px solid #0d99ff;
+    outline-offset: 0;
+    box-shadow: none;
   }
   .docuflex-textbox-editor {
     position: absolute;
@@ -2748,6 +3011,7 @@
     outline: none;
     caret-color: #0d5aa7;
     pointer-events: auto !important;
+    z-index: 1;
   }
   .docuflex-textbox-rich-line {
     display: block;
@@ -2769,40 +3033,81 @@
     -webkit-text-fill-color: transparent !important;
     text-shadow: none !important;
   }
-  .docuflex-textbox-handle {
+  .docuflex-textbox-hit-area {
     position: absolute;
-    top: -9px;
-    left: -9px;
-    width: 10px;
-    height: 10px;
-    border: 1px solid rgba(47, 137, 255, 0.85);
-    background: rgba(255, 255, 255, 0.95);
+    z-index: 3;
+    inset: 0;
     cursor: move;
-    opacity: 0;
     pointer-events: auto !important;
+    background: transparent;
   }
-  .docuflex-textbox:hover .docuflex-textbox-handle,
-  .docuflex-textbox.docuflex-active .docuflex-textbox-handle,
-  .docuflex-textbox.docuflex-live-edit .docuflex-textbox-handle {
-    opacity: 1;
+  .docuflex-textbox.docuflex-editor-open .docuflex-textbox-hit-area {
+    pointer-events: none !important;
   }
-  .docuflex-textbox-resize {
+  .docuflex-selection-controls {
     position: absolute;
-    right: -7px;
-    bottom: -7px;
-    width: 12px;
-    height: 12px;
-    border-right: 2px solid rgba(47, 137, 255, 0.9);
-    border-bottom: 2px solid rgba(47, 137, 255, 0.9);
-    cursor: nwse-resize;
-    opacity: 0;
+    z-index: 4;
+    inset: 0;
+    display: none;
+    pointer-events: none !important;
+  }
+  .docuflex-textbox.docuflex-active .docuflex-selection-controls {
+    display: block;
+  }
+  .docuflex-selection-handle {
+    position: absolute;
+    z-index: 5;
+    display: none;
+    box-sizing: border-box;
+    width: 8px;
+    height: 8px;
+    border: 2px solid #0d99ff;
+    border-radius: 0;
+    background: #fff;
+    transform: translate(-50%, -50%);
+    pointer-events: none !important;
+  }
+  .docuflex-textbox.docuflex-active > .docuflex-selection-handle,
+  .docuflex-textbox.docuflex-active .docuflex-selection-handle {
+    display: block;
     pointer-events: auto !important;
   }
-  .docuflex-textbox:hover .docuflex-textbox-resize,
-  .docuflex-textbox.docuflex-active .docuflex-textbox-resize,
-  .docuflex-textbox.docuflex-live-edit .docuflex-textbox-resize {
-    opacity: 1;
+  .docuflex-selection-edge {
+    position: absolute;
+    z-index: 4;
+    display: none;
+    background: transparent;
+    pointer-events: none !important;
   }
+  .docuflex-textbox.docuflex-active .docuflex-selection-edge {
+    display: block;
+    pointer-events: auto !important;
+  }
+  .docuflex-selection-edge-n,
+  .docuflex-selection-edge-s { left: 0; right: 0; height: 14px; cursor: ns-resize; }
+  .docuflex-selection-edge-n { top: -7px; }
+  .docuflex-selection-edge-s { bottom: -7px; }
+  .docuflex-selection-edge-e,
+  .docuflex-selection-edge-w { top: 0; bottom: 0; width: 14px; cursor: ew-resize; }
+  .docuflex-selection-edge-e { right: -7px; }
+  .docuflex-selection-edge-w { left: -7px; }
+  .docuflex-selection-handle-nw { left: 0; top: 0; }
+  .docuflex-selection-handle-n { left: 50%; top: 0; }
+  .docuflex-selection-handle-ne { left: 100%; top: 0; }
+  .docuflex-selection-handle-e { left: 100%; top: 50%; }
+  .docuflex-selection-handle-se {
+    right: 0;
+    bottom: 0;
+    transform: translate(50%, 50%);
+    cursor: nwse-resize;
+  }
+  .docuflex-selection-handle-s { left: 50%; top: 100%; }
+  .docuflex-selection-handle-sw { left: 0; top: 100%; }
+  .docuflex-selection-handle-w { left: 0; top: 50%; }
+  .docuflex-selection-handle-nw,
+  .docuflex-selection-handle-se { cursor: nwse-resize; }
+  .docuflex-selection-handle-ne,
+  .docuflex-selection-handle-sw { cursor: nesw-resize; }
   .t[contenteditable="true"] { caret-color: #0d5aa7; }
   .t * { cursor: text; }
   .t ._ {
@@ -2871,15 +3176,24 @@ ${setupScript}`;
     const doc = htmlFrame?.contentDocument;
     if (!doc || !htmlFrame) return;
     const frameScale = scale * zoomLevel;
+    // The viewport and its padding must never change with zoom. Scale only the
+    // converted PDF pages so centering is based on one stable scroll viewport.
     htmlFrame.style.zoom = '';
-    htmlFrame.style.width = `${100 / frameScale}%`;
-    htmlFrame.style.height = `${100 / frameScale}%`;
-    htmlFrame.style.transform = `translateX(-50%) scale(${frameScale})`;
+    htmlFrame.style.left = '50%';
+    htmlFrame.style.width = '100%';
+    htmlFrame.style.height = '100%';
+    htmlFrame.style.transform = 'translateX(-50%)';
     htmlFrame.style.transformOrigin = 'top center';
-    doc.documentElement.style.setProperty('--docuflex-viewer-padding-top', `${36 / frameScale}px`);
-    doc.documentElement.style.setProperty('--docuflex-viewer-padding-right', `${48 / frameScale}px`);
-    doc.documentElement.style.setProperty('--docuflex-viewer-padding-bottom', `${80 / frameScale}px`);
+    doc.body.style.zoom = '';
+    doc.body.style.width = '100%';
+    doc.documentElement.style.setProperty('--docuflex-viewer-padding-top', '36px');
+    doc.documentElement.style.setProperty('--docuflex-viewer-padding-right', '48px');
+    doc.documentElement.style.setProperty('--docuflex-viewer-padding-bottom', '80px');
     doc.documentElement.style.setProperty('--docuflex-page-margin', `${30 / scale}px`);
+    doc.documentElement.style.setProperty('--docuflex-horizontal-pan-gutter', `${horizontalPanGutter}px`);
+    doc.querySelectorAll('.pf').forEach((page) => {
+      if (page.nodeType === 1) /** @type {HTMLElement} */ (page).style.zoom = String(frameScale);
+    });
     scheduleHtmlGeometrySync();
   }
 
@@ -3189,23 +3503,53 @@ ${setupScript}`;
     const doc = htmlFrame?.contentDocument;
     if (!doc) return;
     const pageContainer = doc.querySelector('#page-container');
-    const pageElements = [...doc.querySelectorAll('.pf')].filter((page) => page.nodeType === 1);
-    const lastPage = pageElements.at(-1);
-    if (!pageContainer || pageContainer.nodeType !== 1 || !lastPage || lastPage.nodeType !== 1) return;
+    if (!pageContainer || pageContainer.nodeType !== 1) return;
     const htmlPageContainer = /** @type {HTMLElement} */ (pageContainer);
-    const htmlLastPage = /** @type {HTMLElement} */ (lastPage);
-    const requiredHeight = htmlLastPage.offsetTop + htmlLastPage.offsetHeight + 60 / (scale * zoomLevel);
-    htmlPageContainer.style.minHeight = `${Math.ceil(requiredHeight)}px`;
-    let scrollTail = doc.getElementById('docuflex-html-scroll-tail');
-    if (!scrollTail || scrollTail.nodeType !== 1) {
-      scrollTail = doc.createElement('div');
-      scrollTail.id = 'docuflex-html-scroll-tail';
-      scrollTail.setAttribute('aria-hidden', 'true');
-      htmlPageContainer.insertAdjacentElement('afterend', scrollTail);
+    htmlPageContainer.style.minHeight = '';
+
+    // WebKit does not reliably include trailing flex padding in scrollWidth
+    // when a zoomed child is wider than its container. Pin an invisible extent
+    // after the actual rightmost rendered page edge so both pan limits match.
+    const containerRect = htmlPageContainer.getBoundingClientRect();
+    const rightmostPageEdge = [...htmlPageContainer.querySelectorAll('.pf')].reduce((right, page) => {
+      if (page.nodeType !== 1) return right;
+      return Math.max(right, /** @type {HTMLElement} */ (page).getBoundingClientRect().right);
+    }, containerRect.left);
+    let horizontalExtent = doc.getElementById('docuflex-html-horizontal-extent');
+    if (!horizontalExtent) {
+      horizontalExtent = doc.createElement('span');
+      horizontalExtent.id = 'docuflex-html-horizontal-extent';
+      htmlPageContainer.append(horizontalExtent);
     }
-    const htmlScrollTail = /** @type {HTMLElement} */ (scrollTail);
-    htmlScrollTail.style.height = `${Math.max(80 / (scale * zoomLevel), (htmlFrame?.contentWindow?.innerHeight ?? 0) * 0.55)}px`;
-    htmlScrollTail.style.pointerEvents = 'none';
+    horizontalExtent.style.cssText = [
+      'position:absolute',
+      'top:0',
+      `left:${Math.ceil(rightmostPageEdge - containerRect.left + horizontalPanGutter)}px`,
+      'width:1px',
+      'height:1px',
+      'pointer-events:none',
+      'visibility:hidden'
+    ].join(';');
+
+    const bottommostPageEdge = [...htmlPageContainer.querySelectorAll('.pf')].reduce((bottom, page) => {
+      if (page.nodeType !== 1) return bottom;
+      return Math.max(bottom, /** @type {HTMLElement} */ (page).getBoundingClientRect().bottom);
+    }, containerRect.top);
+    let verticalExtent = doc.getElementById('docuflex-html-scroll-tail');
+    if (!verticalExtent) {
+      verticalExtent = doc.createElement('span');
+      verticalExtent.id = 'docuflex-html-scroll-tail';
+      htmlPageContainer.append(verticalExtent);
+    }
+    verticalExtent.style.cssText = [
+      'position:absolute',
+      `top:${Math.ceil(bottommostPageEdge - containerRect.top + verticalPanGutter)}px`,
+      'left:0',
+      'width:1px',
+      'height:1px',
+      'pointer-events:none',
+      'visibility:hidden'
+    ].join(';');
   }
 
   function syncOverlayPageFrames() {
@@ -3214,7 +3558,6 @@ ${setupScript}`;
       overlayPageFrames = [];
       return;
     }
-    const frameScale = scale * zoomLevel;
     overlayPageFrames = [...doc.querySelectorAll('.pf')].flatMap((page, index) => {
       if (page.nodeType !== 1) return [];
       const htmlPage = /** @type {HTMLElement} */ (page);
@@ -3222,10 +3565,10 @@ ${setupScript}`;
       const pageNumber = Number(htmlPage.dataset.pageNo || index + 1);
       return [{
         page: Math.max(0, pageNumber - 1),
-        left: rect.left * frameScale,
-        top: rect.top * frameScale,
-        width: rect.width * frameScale,
-        height: rect.height * frameScale
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height
       }];
     });
   }
@@ -3242,17 +3585,43 @@ ${setupScript}`;
   /** @param {number} requestedZoom @param {number} clientX @param {number} clientY */
   function zoomHtmlAt(requestedZoom, clientX, clientY) {
     const scroller = htmlScroller();
-    if (!scroller) return;
+    const frameDocument = htmlFrame?.contentDocument;
+    const frameWindow = htmlFrame?.contentWindow;
+    const pageElements = frameDocument ? [...frameDocument.querySelectorAll('.pf')] : [];
+    if (!scroller || !frameWindow || !pageElements.length) return;
     const nextZoom = Math.min(maxZoom, Math.max(minZoom, requestedZoom));
     if (Math.abs(nextZoom - zoomLevel) < 0.001) return;
-    const oldScale = scale * zoomLevel;
-    const nextScale = scale * nextZoom;
-    const contentX = scroller.scrollLeft + clientX;
-    const contentY = scroller.scrollTop + clientY;
+
+    let anchorPage = pageElements[0];
+    let closestDistance = Number.POSITIVE_INFINITY;
+    for (const page of pageElements) {
+      const rect = page.getBoundingClientRect();
+      const distance = clientY < rect.top
+        ? rect.top - clientY
+        : clientY > rect.bottom ? clientY - rect.bottom : 0;
+      if (distance < closestDistance) {
+        anchorPage = page;
+        closestDistance = distance;
+      }
+    }
+    if (!anchorPage) return;
+
+    const before = anchorPage.getBoundingClientRect();
+    const anchorRatioX = before.width ? (clientX - before.left) / before.width : 0.5;
+    const anchorRatioY = before.height ? (clientY - before.top) / before.height : 0.5;
     zoomLevel = nextZoom;
     applyHtmlViewportStyles();
-    scroller.scrollLeft = contentX - clientX * oldScale / nextScale;
-    scroller.scrollTop = contentY - clientY * oldScale / nextScale;
+    const after = anchorPage.getBoundingClientRect();
+    const availableWidth = Math.max(0, frameWindow.innerWidth - 96);
+
+    if (after.width <= availableWidth + 0.5) {
+      // A fitting page must remain perfectly centered; cursor anchoring only
+      // begins after horizontal overflow exists.
+      scroller.scrollLeft = horizontalPanGutter;
+    } else {
+      scroller.scrollLeft += after.left + anchorRatioX * after.width - clientX;
+    }
+    scroller.scrollTop += after.top + anchorRatioY * after.height - clientY;
   }
 
   /** @param {WheelEvent} event */
@@ -3263,7 +3632,10 @@ ${setupScript}`;
     const deltaScale = event.deltaMode === WheelEvent.DOM_DELTA_LINE
       ? 16
       : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? 100 : 1;
-    zoomHtmlAt(zoomLevel * Math.exp(-event.deltaY * deltaScale * 0.002), event.clientX, event.clientY);
+    // Native pinch deltas inside the converted-document iframe are smaller
+    // than the same gesture on the main viewer, so compensate at this boundary.
+    const sensitivity = event.metaKey ? 0.002 : 0.015;
+    zoomHtmlAt(zoomLevel * Math.exp(-event.deltaY * deltaScale * sensitivity), event.clientX, event.clientY);
   }
 
   /** @param {PointerEvent} event */
@@ -3365,6 +3737,12 @@ ${setupScript}`;
       doc.body.spellcheck = false;
     }
     applyHtmlViewportStyles();
+    const scroller = htmlScroller();
+    if (scroller) scroller.scrollLeft = horizontalPanGutter;
+    requestAnimationFrame(() => {
+      const readyScroller = htmlScroller();
+      if (readyScroller) readyScroller.scrollLeft = horizontalPanGutter;
+    });
     updateHtmlToolMode();
     const frameWindow = htmlFrame?.contentWindow;
     frameWindow?.addEventListener('wheel', handleHtmlWheel, { passive: false, capture: true });
@@ -3438,7 +3816,7 @@ ${setupScript}`;
     const wrapper = node.parentElement?.matches('.c') && node.parentElement.querySelectorAll('.t').length === 1
       ? node.parentElement
       : null;
-    if (wrapper instanceof HTMLElement) {
+    if (isIframeHtmlElement(wrapper)) {
       wrapper.dataset.docuflexEditId = node.dataset.docuflexEditId ?? '';
       wrapper.dataset.docuflexOriginalText = node.dataset.docuflexOriginalText ?? '';
       wrapper.dataset.docuflexOriginalHtmlText = node.dataset.docuflexOriginalHtmlText ?? '';
@@ -3449,7 +3827,7 @@ ${setupScript}`;
 
   /** @param {EventTarget | null} target */
   function activateConvertedHtmlFromTarget(target) {
-    if (!(target instanceof Element)) return null;
+    if (!isIframeHtmlElement(target)) return null;
     const node = findConvertedHtmlNode(target);
     if (!node) return null;
     activeHtmlTextId = node.dataset.docuflexEditId ?? '';
@@ -3460,21 +3838,26 @@ ${setupScript}`;
     return node;
   }
 
+  /** @param {unknown} value @returns {value is HTMLElement} */
+  function isIframeHtmlElement(value) {
+    return Boolean(value && typeof value === 'object' && /** @type {{ nodeType?: number }} */ (value).nodeType === 1);
+  }
+
   /** @param {Element} target */
   function findConvertedHtmlNode(target) {
     const direct = target.closest('.t');
-    if (direct instanceof HTMLElement) return direct;
+    if (isIframeHtmlElement(direct)) return direct;
     const wrapper = target.closest('[data-docuflex-edit-id]');
-    if (wrapper instanceof HTMLElement) {
+    if (isIframeHtmlElement(wrapper)) {
       const child = wrapper.matches('.t') ? wrapper : wrapper.querySelector('.t');
-      if (child instanceof HTMLElement) return child;
+      if (isIframeHtmlElement(child)) return child;
     }
     const clip = target.closest('.c');
     const clipText = clip?.querySelector('.t');
-    return clipText instanceof HTMLElement ? clipText : null;
+    return isIframeHtmlElement(clipText) ? clipText : null;
   }
 
-  /** @param {'bold' | 'italic'} command */
+  /** @param {'bold' | 'italic' | 'underline' | 'strikeThrough'} command */
   function formatHtmlSelection(command) {
     const doc = htmlFrame?.contentDocument;
     if (!doc) return;
@@ -3496,46 +3879,48 @@ ${setupScript}`;
     const activeNode = activeHtmlTextId
       ? doc.querySelector(`[data-docuflex-edit-id="${CSS.escape(activeHtmlTextId)}"]`)
       : null;
-    if (activeNode instanceof HTMLElement) {
+    if (isIframeHtmlElement(activeNode)) {
       activeNode.classList.add('docuflex-live-edit');
     }
   }
 
   function toggleHtmlBoldSelection() {
     const nextBold = !htmlBoldActive;
-    const weight = nextBold ? '700' : '400';
-    const doc = htmlFrame?.contentDocument;
-    if (!doc) return;
-    htmlFrame?.contentWindow?.focus();
+    htmlBoldActive = nextBold;
+    htmlFontWeight = nextBold ? 700 : 400;
+    updateHtmlTextStyle('fontWeight', String(htmlFontWeight));
+  }
 
-    try {
-      const setBold = htmlFrame?.contentWindow
-        ? /** @type {{ __docuflexSetBold?: (bold: boolean) => void }} */ (htmlFrame.contentWindow).__docuflexSetBold
-        : null;
-      if (typeof setBold === 'function') {
-        restoreHtmlSelection();
-        setBold(nextBold);
-        htmlBoldActive = nextBold;
-        return;
-      }
-    } catch {
-      // Fall back to direct node styling below.
-    }
+  function toggleHtmlItalicSelection() {
+    htmlItalicActive = !htmlItalicActive;
+    updateHtmlTextStyle('fontStyle', htmlItalicActive ? 'italic' : 'normal');
+  }
 
-    const activeNode = activeHtmlTextId
-      ? doc.querySelector(`[data-docuflex-edit-id="${CSS.escape(activeHtmlTextId)}"]`)
-      : null;
-    if (activeNode instanceof HTMLElement) {
-      activeNode.style.fontWeight = weight;
-      activeNode.classList.add('docuflex-live-edit');
-      htmlBoldActive = nextBold;
-      detectedFont = detectedFontForConvertedNode(activeNode);
-    }
+  function applyHtmlTextDecoration() {
+    const decorations = [htmlUnderlineActive ? 'underline' : '', htmlStrikethroughActive ? 'line-through' : ''].filter(Boolean);
+    updateHtmlTextStyle('textDecorationLine', decorations.length ? decorations.join(' ') : 'none');
   }
 
   function selectedHtmlTextboxRows() {
     const doc = htmlFrame?.contentDocument;
     if (!doc) return [];
+    const activeBox = activeHtmlTextBoxId
+      ? Array.from(doc.querySelectorAll('.docuflex-textbox')).find((candidate) => {
+          return isIframeHtmlElement(candidate) && candidate.dataset.docuflexTextBoxId === activeHtmlTextBoxId;
+        })
+      : activeHtmlTextId
+        ? Array.from(doc.querySelectorAll('.docuflex-textbox')).find((candidate) => {
+          try {
+            return JSON.parse(candidate.getAttribute('data-docuflex-line-ids') || '[]').includes(activeHtmlTextId);
+          } catch {
+            return false;
+          }
+        })
+        : null;
+    if (htmlBoxSelectionActive && activeBox) {
+      return Array.from(activeBox.querySelectorAll('.docuflex-textbox-rich-line'))
+        .filter(isIframeHtmlElement);
+    }
     restoreHtmlSelection();
     const selection = doc.getSelection();
     const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
@@ -3545,7 +3930,11 @@ ${setupScript}`;
       : doc.activeElement;
     const editor = element?.closest?.('.docuflex-textbox-editor')
       || doc.activeElement?.closest?.('.docuflex-textbox-editor');
-    if (!editor || editor.nodeType !== Node.ELEMENT_NODE) return [];
+    if (!editor || editor.nodeType !== Node.ELEMENT_NODE || (activeBox && !activeBox.contains(editor))) {
+      return activeBox
+        ? Array.from(activeBox.querySelectorAll('.docuflex-textbox-rich-line')).filter(isIframeHtmlElement)
+        : [];
+    }
     const rows = Array.from(editor.querySelectorAll('.docuflex-textbox-rich-line'))
       .filter((row) => row.nodeType === Node.ELEMENT_NODE)
       .map((row) => /** @type {HTMLElement} */ (row));
@@ -3568,12 +3957,61 @@ ${setupScript}`;
     const box = rows[0].closest('.docuflex-textbox');
     if (box && box.nodeType === Node.ELEMENT_NODE) {
       const htmlBox = /** @type {HTMLElement} */ (box);
-      htmlBox.classList.add('docuflex-live-edit', 'docuflex-editor-open');
+      htmlBox.classList.add('docuflex-live-edit');
       htmlBox.dataset.docuflexVisualEditing = 'true';
+      htmlBox.dataset.docuflexFormattingDirty = 'true';
     }
-    const EventCtor = doc.defaultView?.Event || Event;
-    editor?.dispatchEvent(new EventCtor('input', { bubbles: true }));
-    syncHtmlFormatState();
+    rows.forEach((row) => {
+      row.dataset.docuflexStyleDirty = 'true';
+    });
+    if (isIframeHtmlElement(box)) {
+      const allRows = Array.from(box.querySelectorAll('.docuflex-textbox-rich-line')).filter(isIframeHtmlElement);
+      box.dataset.docuflexStyleSnapshot = JSON.stringify(allRows.map((row) => ({
+        'font-family': row.style.fontFamily,
+        'font-weight': row.style.fontWeight,
+        'font-style': row.style.fontStyle,
+        'font-size': row.style.fontSize,
+        color: row.style.color,
+        'letter-spacing': row.style.letterSpacing,
+        'line-height': row.style.lineHeight,
+        'text-decoration-line': row.style.textDecorationLine || 'none',
+        'text-align': row.style.textAlign
+      })));
+    }
+    let notified = false;
+    try {
+      const notifyFormatting = htmlFrame?.contentWindow
+        ? /** @type {{ __docuflexNotifyTextBoxFormatting?: (boxId: string) => boolean }} */ (htmlFrame.contentWindow).__docuflexNotifyTextBoxFormatting
+        : null;
+      if (typeof notifyFormatting === 'function' && isIframeHtmlElement(box)) {
+        notified = notifyFormatting(box.dataset.docuflexTextBoxId || '');
+      }
+    } catch {
+      // Fall back to the input event for older converted frames.
+    }
+    if (!notified) {
+      const EventCtor = doc.defaultView?.Event || Event;
+      editor?.dispatchEvent(new EventCtor('input', { bubbles: true }));
+    }
+  }
+
+  /** @param {HTMLElement[]} rows */
+  function restoreHtmlTextboxStyleSnapshot(rows) {
+    const box = rows[0]?.closest('.docuflex-textbox');
+    if (!isIframeHtmlElement(box) || !box.dataset.docuflexStyleSnapshot) return;
+    try {
+      const snapshots = JSON.parse(box.dataset.docuflexStyleSnapshot);
+      if (!Array.isArray(snapshots)) return;
+      rows.forEach((row, index) => {
+        const snapshot = snapshots[index];
+        if (!snapshot || typeof snapshot !== 'object') return;
+        Object.entries(snapshot).forEach(([property, value]) => {
+          if (typeof value === 'string') row.style.setProperty(property, value);
+        });
+      });
+    } catch {
+      // Ignore an invalid stale snapshot and use the live row styles.
+    }
   }
 
   /** @param {'left' | 'center' | 'right'} alignment */
@@ -3583,8 +4021,9 @@ ${setupScript}`;
     htmlFrame?.contentWindow?.focus();
     const rows = selectedHtmlTextboxRows();
     if (rows.length) {
+      restoreHtmlTextboxStyleSnapshot(rows);
       const editor = rows[0].closest('.docuflex-textbox-editor');
-      if (editor instanceof HTMLElement) {
+      if (isIframeHtmlElement(editor)) {
         editor.style.textAlign = alignment;
         editor.dataset.docuflexAlign = alignment;
       }
@@ -3597,6 +4036,70 @@ ${setupScript}`;
     }
     restoreHtmlSelection();
     doc.execCommand(alignment === 'center' ? 'justifyCenter' : alignment === 'right' ? 'justifyRight' : 'justifyLeft', false);
+    htmlTextAlign = alignment;
+  }
+
+  /** @param {'fontWeight' | 'fontFamily' | 'fontSize' | 'fontStyle' | 'color' | 'letterSpacing' | 'lineHeight' | 'textDecorationLine'} property @param {string} value */
+  function updateHtmlTextStyle(property, value) {
+    const doc = htmlFrame?.contentDocument;
+    if (!doc || !activeHtmlTextId) return;
+    htmlFrame?.contentWindow?.focus();
+    const rows = selectedHtmlTextboxRows();
+    if (rows.length) {
+      restoreHtmlTextboxStyleSnapshot(rows);
+      const cssProperty = property.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`);
+      const editor = rows[0].closest('.docuflex-textbox-editor');
+      if (isIframeHtmlElement(editor)) editor.style.setProperty(cssProperty, value);
+      rows.forEach((row) => {
+        row.style.setProperty(cssProperty, value);
+      });
+      notifyHtmlTextboxRowsChanged(rows);
+      return;
+    }
+    const activeNode = doc.querySelector(`[data-docuflex-edit-id="${CSS.escape(activeHtmlTextId)}"]`);
+    if (!isIframeHtmlElement(activeNode)) return;
+    activeNode.style.setProperty(property.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`), value);
+    activeNode.classList.add('docuflex-live-edit');
+    const EventCtor = doc.defaultView?.Event || Event;
+    activeNode.dispatchEvent(new EventCtor('input', { bubbles: true }));
+    detectedFont = detectedFontForConvertedNode(activeNode);
+  }
+
+  /** @param {number} weight */
+  function setHtmlFontWeight(weight) {
+    htmlFontWeight = weight;
+    htmlBoldActive = weight >= 600;
+    updateHtmlTextStyle('fontWeight', String(weight));
+  }
+
+  /** @param {string} value */
+  function setHtmlFontFamily(value) {
+    htmlFontFamily = value;
+    updateHtmlTextStyle('fontFamily', value);
+  }
+
+  /** @param {number} value */
+  function setHtmlFontSize(value) {
+    htmlFontSize = Math.max(1, value || 1);
+    updateHtmlTextStyle('fontSize', `${htmlFontSize}px`);
+  }
+
+  /** @param {string} value */
+  function setHtmlTextColor(value) {
+    const normalized = normalizeHexColor(value);
+    if (!normalized) return;
+    htmlTextColor = normalized;
+    updateHtmlTextStyle('color', normalized);
+  }
+
+  function toggleHtmlUnderlineSelection() {
+    htmlUnderlineActive = !htmlUnderlineActive;
+    applyHtmlTextDecoration();
+  }
+
+  function toggleHtmlStrikethroughSelection() {
+    htmlStrikethroughActive = !htmlStrikethroughActive;
+    applyHtmlTextDecoration();
   }
 
   /** @param {HTMLElement} row */
@@ -3666,9 +4169,13 @@ ${setupScript}`;
       ? doc.querySelector(`[data-docuflex-edit-id="${CSS.escape(activeHtmlTextId)}"]`)
       : null;
     htmlBoldActive = doc.queryCommandState('bold')
-      || (activeNode instanceof HTMLElement && isConvertedNodeBold(activeNode));
+      || (isIframeHtmlElement(activeNode) && isConvertedNodeBold(activeNode));
     htmlItalicActive = doc.queryCommandState('italic')
-      || (activeNode instanceof HTMLElement && isConvertedNodeItalic(activeNode));
+      || (isIframeHtmlElement(activeNode) && isConvertedNodeItalic(activeNode));
+    htmlUnderlineActive = doc.queryCommandState('underline')
+      || (isIframeHtmlElement(activeNode) && /underline/i.test(htmlFrame?.contentWindow?.getComputedStyle(activeNode).textDecorationLine || ''));
+    htmlStrikethroughActive = doc.queryCommandState('strikeThrough')
+      || (isIframeHtmlElement(activeNode) && /line-through/i.test(htmlFrame?.contentWindow?.getComputedStyle(activeNode).textDecorationLine || ''));
   }
 
   function saveHtmlSelection() {
@@ -3677,7 +4184,7 @@ ${setupScript}`;
     if (!selection || selection.rangeCount === 0) return;
     const range = selection.getRangeAt(0);
     const container = range.commonAncestorContainer;
-    const element = container instanceof HTMLElement ? container : container.parentElement;
+    const element = isIframeHtmlElement(container) ? container : container.parentElement;
     if (!element?.closest('.t, .docuflex-textbox-editor')) return;
     savedHtmlSelection = range.cloneRange();
   }
@@ -3745,10 +4252,35 @@ ${setupScript}`;
 
     if ((data.type === 'activate' || data.type === 'dirty') && data.font) {
       const font = data.font;
-      activeHtmlTextId = typeof font.id === 'string' ? font.id : '';
-      detectedFont = detectedFontFromFrameInfo(font);
-      htmlBoldActive = Boolean(font.bold);
-      htmlItalicActive = Boolean(font.italic);
+      const nextTextId = typeof font.id === 'string' ? font.id : '';
+      if (data.type === 'activate' && nextTextId && !htmlOriginalFonts[nextTextId]) {
+        const originalValue = typeof font.fontFamily === 'string' ? font.fontFamily : '';
+        const originalLabel = detectedFontFromFrameInfo(font).split(' · ')[0] || cleanFontFamilyLabel(originalValue);
+        htmlOriginalFonts = { ...htmlOriginalFonts, [nextTextId]: { value: originalValue, label: originalLabel } };
+      }
+      if (nextTextId) activeHtmlTextId = nextTextId;
+      if (data.type === 'activate') {
+        activeHtmlTextBoxId = typeof font.textBoxId === 'string' ? font.textBoxId : '';
+        htmlBoxSelectionActive = Boolean(font.boxSelection);
+        if (htmlBoxSelectionActive) savedHtmlSelection = null;
+      }
+      // Dirty messages may be delayed and can describe the editor container's
+      // inherited style. Only a deliberate selection activation is allowed to
+      // replace the panel's current control values.
+      if (data.type === 'activate') {
+        detectedFont = detectedFontFromFrameInfo(font);
+        htmlBoldActive = Boolean(font.bold);
+        htmlItalicActive = Boolean(font.italic);
+        syncHtmlFormattingFromFrameInfo(font);
+      }
+    }
+
+    if (data.type === 'deactivate') {
+      activeHtmlTextId = '';
+      activeHtmlTextBoxId = '';
+      htmlBoxSelectionActive = false;
+      htmlColorPicker = null;
+      savedHtmlSelection = null;
     }
 
     if (data.type === 'geometry') {
@@ -3776,6 +4308,140 @@ ${setupScript}`;
     return [mapped || family || fontClass || 'PDF font', size, weight ? `weight ${weight}` : '']
       .filter(Boolean)
       .join(' · ');
+  }
+
+  function resetHtmlFormattingState() {
+    htmlColorPicker = null;
+    htmlUnderlineActive = false;
+    htmlStrikethroughActive = false;
+    htmlFontFamily = '';
+    htmlFontSize = 16;
+    htmlFontWeight = 400;
+    htmlTextColor = '#171717';
+    htmlLetterSpacing = 0;
+    htmlLineHeight = 19.2;
+    htmlTextAlign = 'left';
+  }
+
+  /** @param {Record<string, unknown>} font */
+  function syncHtmlFormattingFromFrameInfo(font) {
+    htmlFontFamily = typeof font.fontFamily === 'string' ? font.fontFamily : '';
+    htmlFontSize = Number.parseFloat(typeof font.fontSize === 'string' ? font.fontSize : '') || 16;
+    htmlFontWeight = Number.parseFloat(typeof font.fontWeight === 'string' ? font.fontWeight : '') || (font.bold ? 700 : 400);
+    htmlLetterSpacing = Number.parseFloat(typeof font.letterSpacing === 'string' ? font.letterSpacing : '') || 0;
+    htmlLineHeight = Number.parseFloat(typeof font.lineHeight === 'string' ? font.lineHeight : '') || htmlFontSize * 1.2;
+    htmlTextAlign = typeof font.textAlign === 'string' && ['left', 'center', 'right'].includes(font.textAlign)
+      ? font.textAlign
+      : 'left';
+    htmlUnderlineActive = Boolean(font.underline);
+    htmlStrikethroughActive = Boolean(font.strikethrough);
+    if (Array.isArray(font.color) && font.color.length >= 3) {
+      htmlTextColor = `#${font.color.slice(0, 3).map((component) => Math.round(Math.max(0, Math.min(1, Number(component) || 0)) * 255).toString(16).padStart(2, '0')).join('')}`.toUpperCase();
+    }
+  }
+
+  /** @param {string} value */
+  function normalizeHexColor(value) {
+    const compact = String(value || '').trim().replace(/^#/, '');
+    if (/^[0-9a-f]{3}$/i.test(compact)) return `#${compact.split('').map((part) => part + part).join('')}`.toUpperCase();
+    if (/^[0-9a-f]{6}$/i.test(compact)) return `#${compact}`.toUpperCase();
+    return '';
+  }
+
+  /** @param {string} color */
+  function htmlHexToHsv(color) {
+    const hex = normalizeHexColor(color) || '#000000';
+    const red = Number.parseInt(hex.slice(1, 3), 16) / 255;
+    const green = Number.parseInt(hex.slice(3, 5), 16) / 255;
+    const blue = Number.parseInt(hex.slice(5, 7), 16) / 255;
+    const maximum = Math.max(red, green, blue);
+    const minimum = Math.min(red, green, blue);
+    const delta = maximum - minimum;
+    let hue = 0;
+    if (delta) {
+      if (maximum === red) hue = 60 * (((green - blue) / delta) % 6);
+      else if (maximum === green) hue = 60 * ((blue - red) / delta + 2);
+      else hue = 60 * ((red - green) / delta + 4);
+    }
+    if (hue < 0) hue += 360;
+    return { hue, saturation: maximum ? delta / maximum : 0, value: maximum };
+  }
+
+  /** @param {number} hue @param {number} saturation @param {number} value */
+  function htmlHsvToHex(hue, saturation, value) {
+    const chroma = value * saturation;
+    const section = ((hue % 360) + 360) % 360 / 60;
+    const secondary = chroma * (1 - Math.abs(section % 2 - 1));
+    const [red, green, blue] = section < 1 ? [chroma, secondary, 0]
+      : section < 2 ? [secondary, chroma, 0]
+        : section < 3 ? [0, chroma, secondary]
+          : section < 4 ? [0, secondary, chroma]
+            : section < 5 ? [secondary, 0, chroma]
+              : [chroma, 0, secondary];
+    const match = value - chroma;
+    return `#${[red, green, blue].map((channel) => Math.round((channel + match) * 255).toString(16).padStart(2, '0')).join('').toUpperCase()}`;
+  }
+
+  function toggleHtmlColorPicker() {
+    htmlColorPicker = htmlColorPicker ? null : htmlHexToHsv(htmlTextColor);
+  }
+
+  /** @param {PointerEvent} event @param {'saturation' | 'hue'} control */
+  function updateHtmlColorControl(event, control) {
+    if (!htmlColorPicker) return;
+    const element = /** @type {HTMLElement} */ (event.currentTarget);
+    const rect = element.getBoundingClientRect();
+    element.setPointerCapture?.(event.pointerId);
+    if (control === 'saturation') {
+      htmlColorPicker = {
+        ...htmlColorPicker,
+        saturation: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
+        value: 1 - Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height))
+      };
+    } else {
+      htmlColorPicker = {
+        ...htmlColorPicker,
+        hue: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)) * 360
+      };
+    }
+    setHtmlTextColor(htmlHsvToHex(htmlColorPicker.hue, htmlColorPicker.saturation, htmlColorPicker.value));
+  }
+
+  /**
+   * @param {PointerEvent} event
+   * @param {number} initialValue
+   * @param {(value: number) => void} update
+   * @param {{ step?: number; min?: number; max?: number }} [options]
+   */
+  function startHtmlNumberScrub(event, initialValue, update, options = {}) {
+    if (event.button !== 0) return;
+    const target = /** @type {HTMLElement} */ (event.currentTarget);
+    const startX = event.clientX;
+    const step = options.step ?? 1;
+    const minimum = options.min ?? -Infinity;
+    const maximum = options.max ?? Infinity;
+    let dragging = false;
+    target.setPointerCapture?.(event.pointerId);
+    /** @param {PointerEvent} moveEvent */
+    const move = (moveEvent) => {
+      const delta = moveEvent.clientX - startX;
+      if (!dragging && Math.abs(delta) < 2) return;
+      dragging = true;
+      const raw = Math.max(minimum, Math.min(maximum, initialValue + delta * step));
+      const precision = step < 0.1 ? 100 : step < 1 ? 10 : 1;
+      update(Math.round(raw * precision) / precision);
+      moveEvent.preventDefault();
+    };
+    /** @param {PointerEvent} endEvent */
+    const end = (endEvent) => {
+      target.removeEventListener('pointermove', move);
+      target.removeEventListener('pointerup', end);
+      target.removeEventListener('pointercancel', end);
+      if (target.hasPointerCapture?.(endEvent.pointerId)) target.releasePointerCapture(endEvent.pointerId);
+    };
+    target.addEventListener('pointermove', move);
+    target.addEventListener('pointerup', end);
+    target.addEventListener('pointercancel', end);
   }
 
   /** @param {Blob} blob @param {string} downloadName */
@@ -3840,33 +4506,83 @@ ${setupScript}`;
     </div>
   {/if}
 
-  {#if convertedHtml && activeTool === 'edit'}
-    <div class="html-format-toolbar" role="toolbar" aria-label="Text formatting">
-      <button
-        class:active={htmlBoldActive}
-        type="button"
-        onclick={toggleHtmlBoldSelection}
-        disabled={!activeHtmlTextId}
-        title="Bold"
-        aria-label="Bold"
-        aria-pressed={htmlBoldActive}
-      >B</button>
-      <button
-        class:active={htmlItalicActive}
-        type="button"
-        onclick={() => formatHtmlSelection('italic')}
-        disabled={!activeHtmlTextId}
-        title="Italic"
-        aria-label="Italic"
-        aria-pressed={htmlItalicActive}
-      ><em>I</em></button>
-      <span class="toolbar-divider"></span>
-      <button type="button" onclick={() => alignHtmlSelection('left')} disabled={!activeHtmlTextId} title="Align left" aria-label="Align left">≡</button>
-      <button type="button" onclick={() => alignHtmlSelection('center')} disabled={!activeHtmlTextId} title="Align center" aria-label="Align center">☰</button>
-      <button type="button" onclick={() => alignHtmlSelection('right')} disabled={!activeHtmlTextId} title="Align right" aria-label="Align right">≣</button>
-      <button type="button" onclick={toggleHtmlListSelection} disabled={!activeHtmlTextId} title="Bulleted list" aria-label="Bulleted list">•</button>
-      <span class="font-status">{detectedFont || 'Click text to edit'}</span>
+  {#if convertedHtml && activeTool === 'edit' && activeHtmlTextId}
+    <div class="text-properties-panel" role="dialog" aria-label="Selected text properties">
+      <header class="text-properties-header">
+        <img src="/toolbar/small/edit.svg" alt="" />
+        <h2>Edit text</h2>
+        <button class="text-properties-close" type="button" aria-label="Close properties" onclick={() => activeHtmlTextId = ''}>
+          <span></span><span></span>
+        </button>
+      </header>
+      <div class="text-properties-scroll">
+        <section class="typography-section" aria-label="Typography">
+          <div class="typography-color-row">
+            <span>Color</span>
+            <input aria-label="Text color hex" value={htmlTextColor.replace('#', '')} oninput={(event) => setHtmlTextColor(event.currentTarget.value)} />
+            <button class:active={Boolean(htmlColorPicker)} class="property-color" type="button" style:--property-color={htmlTextColor} aria-label="Open text color picker" onclick={toggleHtmlColorPicker}></button>
+          </div>
+          <label class="typography-select-row">
+            <span>Font</span>
+            <select value={htmlFontFamily} onchange={(event) => setHtmlFontFamily(event.currentTarget.value)}>
+              {#if htmlOriginalFonts[activeHtmlTextId]?.value}
+                <option value={htmlOriginalFonts[activeHtmlTextId].value}>{htmlOriginalFonts[activeHtmlTextId].label}</option>
+              {/if}
+              <option value="Open Sans">Open Sans</option>
+              <option value="Helvetica">Helvetica</option>
+              <option value="Arial">Arial</option>
+              <option value="Times New Roman">Times New Roman</option>
+              <option value="Georgia">Georgia</option>
+              <option value="Courier New">Courier New</option>
+              <option value="Inter">Inter</option>
+              <option value="Geist">Geist</option>
+            </select>
+          </label>
+          <div class="typography-weight-size-grid">
+            <label class="typography-select-row compact-weight-row">
+              <span>Weight</span>
+              <select value={String(htmlFontWeight)} onchange={(event) => setHtmlFontWeight(Number(event.currentTarget.value))}>
+                <option value="300">Light</option>
+                <option value="400">Regular</option>
+                <option value="500">Medium</option>
+                <option value="600">Semibold</option>
+                <option value="700">Bold</option>
+                <option value="800">Extra Bold</option>
+              </select>
+            </label>
+            <label class="inspector-field typography-size-field"><span class="scrub-label" role="presentation" onpointerdown={(event) => startHtmlNumberScrub(event, htmlFontSize, setHtmlFontSize, { step: 0.1, min: 1, max: 400 })}>Size</span><input class="scrubbable-number" type="number" min="1" max="400" step="0.5" value={htmlFontSize} onpointerdown={(event) => startHtmlNumberScrub(event, htmlFontSize, setHtmlFontSize, { step: 0.1, min: 1, max: 400 })} oninput={(event) => setHtmlFontSize(Number(event.currentTarget.value))} /></label>
+          </div>
+          <div class="typography-spacing-grid">
+            <label class="inspector-field"><span class="scrub-label" role="presentation" onpointerdown={(event) => startHtmlNumberScrub(event, htmlLetterSpacing, (value) => { htmlLetterSpacing = value; updateHtmlTextStyle('letterSpacing', `${value}px`); }, { step: 0.05, min: -20, max: 100 })}>Letter</span><input class="scrubbable-number" type="number" min="-20" max="100" step="0.1" value={htmlLetterSpacing} onpointerdown={(event) => startHtmlNumberScrub(event, htmlLetterSpacing, (value) => { htmlLetterSpacing = value; updateHtmlTextStyle('letterSpacing', `${value}px`); }, { step: 0.05, min: -20, max: 100 })} oninput={(event) => { htmlLetterSpacing = Number(event.currentTarget.value); updateHtmlTextStyle('letterSpacing', `${htmlLetterSpacing}px`); }} /></label>
+            <label class="inspector-field"><span class="scrub-label" role="presentation" onpointerdown={(event) => startHtmlNumberScrub(event, htmlLineHeight, (value) => { htmlLineHeight = value; updateHtmlTextStyle('lineHeight', `${value}px`); }, { step: 0.1, min: 1, max: 500 })}>Line</span><input class="scrubbable-number" type="number" min="1" max="500" step="0.5" value={htmlLineHeight} onpointerdown={(event) => startHtmlNumberScrub(event, htmlLineHeight, (value) => { htmlLineHeight = value; updateHtmlTextStyle('lineHeight', `${value}px`); }, { step: 0.1, min: 1, max: 500 })} oninput={(event) => { htmlLineHeight = Number(event.currentTarget.value); updateHtmlTextStyle('lineHeight', `${htmlLineHeight}px`); }} /></label>
+          </div>
+          <div class="typography-alignment-row full-width-alignment">
+            <div class="typography-segments" aria-label="Horizontal text alignment">
+              <button class:active={htmlTextAlign === 'left'} type="button" title="Align left" onclick={() => { htmlTextAlign = 'left'; alignHtmlSelection('left'); }}><img src="/align/align-left.svg" alt="" /></button>
+              <button class:active={htmlTextAlign === 'center'} type="button" title="Align center" onclick={() => { htmlTextAlign = 'center'; alignHtmlSelection('center'); }}><img src="/align/align-center.svg" alt="" /></button>
+              <button class:active={htmlTextAlign === 'right'} type="button" title="Align right" onclick={() => { htmlTextAlign = 'right'; alignHtmlSelection('right'); }}><img src="/align/align-right.svg" alt="" /></button>
+            </div>
+          </div>
+          <div class="typography-style-row" aria-label="Text styles">
+            <button class:active={htmlBoldActive} type="button" title="Bold" onclick={toggleHtmlBoldSelection}><b>B</b></button>
+            <button class:active={htmlItalicActive} type="button" title="Italic" onclick={toggleHtmlItalicSelection}><i>I</i></button>
+            <button class:active={htmlUnderlineActive} type="button" title="Underline" onclick={toggleHtmlUnderlineSelection}><u>U</u></button>
+            <button class:active={htmlStrikethroughActive} type="button" title="Strikethrough" onclick={toggleHtmlStrikethroughSelection}><s>S</s></button>
+          </div>
+        </section>
+      </div>
     </div>
+    {#if htmlColorPicker}
+      {@const pickerHex = htmlHsvToHex(htmlColorPicker.hue, htmlColorPicker.saturation, htmlColorPicker.value)}
+      <div class="figma-color-picker html-text-color-picker" role="dialog" aria-label="Color picker">
+        <div class="color-saturation" style:--picker-hue={`hsl(${htmlColorPicker.hue} 100% 50%)`} role="slider" aria-label="Color saturation and brightness" aria-valuenow={Math.round(htmlColorPicker.saturation * 100)} tabindex="0" onpointerdown={(event) => updateHtmlColorControl(event, 'saturation')} onpointermove={(event) => { if (event.buttons) updateHtmlColorControl(event, 'saturation'); }}>
+          <span style:left={`${htmlColorPicker.saturation * 100}%`} style:top={`${(1 - htmlColorPicker.value) * 100}%`} style:--thumb-color={pickerHex}></span>
+        </div>
+        <div class="picker-slider hue-slider" role="slider" aria-label="Hue" aria-valuenow={Math.round(htmlColorPicker.hue)} tabindex="0" onpointerdown={(event) => updateHtmlColorControl(event, 'hue')} onpointermove={(event) => { if (event.buttons) updateHtmlColorControl(event, 'hue'); }}>
+          <span style:left={`${htmlColorPicker.hue / 360 * 100}%`} style:--thumb-color={pickerHex}></span>
+        </div>
+      </div>
+    {/if}
   {/if}
 </div>
 
@@ -3935,64 +4651,294 @@ ${setupScript}`;
     cursor: pointer;
   }
 
-  .html-format-toolbar {
+  .text-properties-panel {
     position: absolute;
-    z-index: 5;
-    top: 14px;
-    left: 50%;
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    max-width: calc(100% - 28px);
-    min-height: 38px;
-    padding: 5px;
-    border: 1px solid rgba(0, 0, 0, 0.1);
-    border-radius: 11px;
-    background: rgba(255, 255, 255, 0.96);
-    box-shadow: 0 5px 18px rgba(0, 0, 0, 0.13);
-    transform: translateX(-50%);
-    backdrop-filter: blur(16px);
+    z-index: 40;
+    top: 20px;
+    /* The editor layer compensates for the app shell's 0.85 UI zoom. Keep
+       this panel inside the portion of that enlarged layer that is visible. */
+    right: calc(15% + 18px);
+    display: grid;
+    grid-template-rows: 50px 1fr;
+    box-sizing: border-box;
+    width: min(320px, calc(100% - 36px));
+    max-height: calc(100% - 40px);
+    overflow: hidden;
+    border: 1.5px solid #c5c5c5;
+    border-radius: 13px;
+    background: #fafafa;
+    box-shadow: 0 9px 24px rgba(0, 0, 0, 0.07);
+    color: #000;
+    font-family: "Inter Variable", Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 16px;
+    -webkit-font-smoothing: antialiased;
   }
 
-  .html-format-toolbar button {
+  .text-properties-header {
     display: grid;
-    place-items: center;
+    grid-template-columns: 26px minmax(0, 1fr) 28px;
+    align-items: center;
+    box-sizing: border-box;
+    min-width: 0;
+    height: 50px;
+    padding: 0 12px;
+    border-bottom: 1px solid #cacaca;
+    background: #eeeeee;
+  }
+
+  .text-properties-header > img {
+    width: 23px;
+    height: 23px;
+    opacity: 0.72;
+    filter: brightness(0);
+  }
+
+  .text-properties-header h2 {
+    margin: 0 0 1px 7px;
+    overflow: hidden;
+    color: #000;
+    font-size: 18px;
+    font-weight: 400;
+    line-height: 1;
+    letter-spacing: -0.25px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .text-properties-close {
+    position: relative;
     width: 28px;
     height: 28px;
     padding: 0;
     border: 0;
-    border-radius: 7px;
+    border-radius: 9px;
     background: transparent;
-    color: #333;
-    font: 600 14px/1 system-ui, sans-serif;
+    cursor: pointer;
+    transition: transform 160ms ease;
+  }
+
+  .text-properties-close:active { transform: scale(0.94); }
+
+  .text-properties-close span {
+    position: absolute;
+    top: 13px;
+    left: 6px;
+    width: 16px;
+    height: 1.5px;
+    border-radius: 999px;
+    background: #929292;
+    transform: rotate(45deg);
+    transition: background-color 160ms ease;
+  }
+
+  .text-properties-close span + span { transform: rotate(-45deg); }
+  .text-properties-close:hover span { background: #000; }
+
+  .text-properties-scroll {
+    min-height: 0;
+    overflow: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+  }
+
+  .typography-section {
+    display: grid;
+    gap: 9px;
+    padding: 16px 18px;
+  }
+
+  .typography-color-row,
+  .typography-select-row {
+    display: grid;
+    grid-template-columns: 74px minmax(0, 1fr) 38px;
+    align-items: center;
+    box-sizing: border-box;
+    min-width: 0;
+    height: 39px;
+    overflow: hidden;
+    border: 1px solid #d7d7d7;
+    border-radius: 8px;
+    background: #f3f3f3;
+    font-size: 18px;
+  }
+
+  .typography-color-row > span,
+  .typography-select-row > span { padding-left: 10px; color: #7a7a7a; }
+
+  .typography-color-row > input,
+  .typography-select-row select {
+    box-sizing: border-box;
+    min-width: 0;
+    width: 100%;
+    height: 100%;
+    padding: 0 8px;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: #111;
+    font: inherit;
+    text-align: right;
+  }
+
+  .typography-select-row { grid-template-columns: 74px minmax(0, 1fr); }
+  .typography-select-row select { cursor: pointer; text-align-last: right; appearance: none; }
+
+  .property-color {
+    display: block;
+    box-sizing: border-box;
+    width: 24px;
+    height: 24px;
+    margin: 0 7px;
+    padding: 0;
+    border: 1px solid rgba(0, 0, 0, 0.16);
+    border-radius: 8px;
+    background: var(--property-color);
+    cursor: pointer;
+    transition: box-shadow 150ms ease, transform 150ms ease;
+  }
+
+  .property-color:hover,
+  .property-color.active { box-shadow: 0 0 0 2px #fff, 0 0 0 3.5px #1684f8; }
+
+  .figma-color-picker {
+    position: absolute;
+    z-index: 41;
+    top: 88px;
+    right: calc(15% + 356px);
+    display: grid;
+    gap: 11px;
+    box-sizing: border-box;
+    width: 260px;
+    padding: 13px;
+    border: 1.5px solid #c5c5c5;
+    border-radius: 13px;
+    background: #fafafa;
+    box-shadow: 0 9px 24px rgba(0, 0, 0, 0.07);
+  }
+
+  .color-saturation {
+    position: relative;
+    height: 172px;
+    overflow: hidden;
+    border: 1px solid #cacaca;
+    border-radius: 8px;
+    background: linear-gradient(to top, #000, transparent), linear-gradient(to right, #fff, var(--picker-hue));
+    cursor: crosshair;
+    touch-action: none;
+  }
+
+  .color-saturation > span,
+  .picker-slider > span {
+    position: absolute;
+    z-index: 2;
+    display: block;
+    box-sizing: border-box;
+    width: 18px;
+    height: 18px;
+    border: 3px solid #fff;
+    border-radius: 50%;
+    background: var(--thumb-color, transparent);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.55);
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+  }
+
+  .picker-slider { position: relative; height: 18px; border-radius: 999px; cursor: ew-resize; touch-action: none; }
+  .picker-slider > span { top: 50%; }
+  .hue-slider { background: linear-gradient(90deg, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00); }
+
+  .typography-weight-size-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.45fr) minmax(0, 0.9fr);
+    gap: 9px;
+  }
+
+  .compact-weight-row { grid-template-columns: 67px minmax(0, 1fr); }
+
+  .inspector-field {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    box-sizing: border-box;
+    min-width: 0;
+    height: 39px;
+    padding: 0 10px;
+    border: 1px solid #d7d7d7;
+    border-radius: 8px;
+    background: #f3f3f3;
+    color: #7a7a7a;
+    font-size: 18px;
+  }
+
+  .inspector-field:focus-within { border-color: #1684f8; background: #fff; box-shadow: 0 0 0 1px rgba(22, 132, 248, 0.13); }
+  .inspector-field input { min-width: 0; width: 100%; padding-left: 7px; border: 0; outline: 0; background: transparent; color: #111; font: inherit; appearance: textfield; text-align: right; }
+  .inspector-field input::-webkit-inner-spin-button,
+  .inspector-field input::-webkit-outer-spin-button { margin: 0; -webkit-appearance: none; }
+  .scrub-label,
+  .scrubbable-number { cursor: ew-resize; }
+  .scrub-label { user-select: none; }
+  .typography-size-field { padding-inline: 9px; }
+
+  .typography-spacing-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 9px;
+  }
+
+  .typography-alignment-row {
+    display: grid;
+    grid-template-columns: 82px minmax(0, 1fr);
+    align-items: center;
+    min-width: 0;
+    color: #7a7a7a;
+    font-size: 16px;
+  }
+
+  .typography-alignment-row.full-width-alignment { display: block; }
+  .full-width-alignment .typography-segments { width: 100%; }
+
+  .typography-segments,
+  .typography-style-row {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    height: 39px;
+    overflow: hidden;
+    border: 1px solid #d7d7d7;
+    border-radius: 8px;
+    background: #f3f3f3;
+  }
+
+  .typography-segments button,
+  .typography-style-row button {
+    display: grid;
+    place-items: center;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    border-left: 1px solid #d7d7d7;
+    background: transparent;
+    color: #656565;
+    font: inherit;
+    font-size: 17px;
     cursor: pointer;
   }
 
-  .html-format-toolbar button:hover:not(:disabled),
-  .html-format-toolbar button.active {
-    background: #e7f3ff;
-    color: #078aec;
+  .typography-segments button:first-child,
+  .typography-style-row button:first-child { border-left: 0; }
+  .typography-segments button:hover,
+  .typography-style-row button:hover { color: #111; background: #ededed; }
+  .typography-segments button.active,
+  .typography-style-row button.active { color: #fff; background: #111; }
+  .typography-segments img { display: block; width: 21px; height: 21px; object-fit: contain; }
+  .typography-segments button.active img { filter: brightness(0) invert(1); }
+  .typography-style-row { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 2px; }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .text-properties-panel { animation: text-properties-in 240ms cubic-bezier(0.22, 1, 0.36, 1); }
   }
 
-  .html-format-toolbar button:disabled {
-    color: #aaa;
-    cursor: default;
-  }
-
-  .toolbar-divider {
-    width: 1px;
-    height: 20px;
-    margin: 0 2px;
-    background: #dedede;
-  }
-
-  .font-status {
-    max-width: 270px;
-    padding: 0 7px;
-    overflow: hidden;
-    color: #666;
-    font: 500 11px/1.2 system-ui, sans-serif;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  @keyframes text-properties-in {
+    from { opacity: 0; transform: translateX(18px); }
+    to { opacity: 1; transform: translateX(0); }
   }
 </style>

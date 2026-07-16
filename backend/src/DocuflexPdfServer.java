@@ -1752,7 +1752,14 @@ public class DocuflexPdfServer {
         edit.bold,
         edit.moved,
         edit.overlay,
-        edit.alignment);
+        edit.alignment,
+        edit.fontChanged,
+        edit.boldChanged,
+        edit.italic,
+        edit.italicChanged,
+        edit.underline,
+        edit.strikethrough,
+        edit.letterSpacing);
   }
 
   private static List<String> stripLeadingListMarkerCandidates(List<String> candidates) {
@@ -1831,7 +1838,14 @@ public class DocuflexPdfServer {
         false,
         false,
         false,
-        ""));
+        "",
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        0));
 
     float pageWidth = page.getMediaBox().getWidth();
     float pageHeight = page.getMediaBox().getHeight();
@@ -1848,21 +1862,49 @@ public class DocuflexPdfServer {
     }
 
     Standard14Fonts.FontName fontName = edit.bold
-        ? Standard14Fonts.FontName.HELVETICA_BOLD
-        : Standard14Fonts.FontName.HELVETICA;
-    PDFont font = originalStyle.font != null && canEncodeWithFont(text, originalStyle.font)
+        ? (edit.italic ? Standard14Fonts.FontName.HELVETICA_BOLD_OBLIQUE : Standard14Fonts.FontName.HELVETICA_BOLD)
+        : (edit.italic ? Standard14Fonts.FontName.HELVETICA_OBLIQUE : Standard14Fonts.FontName.HELVETICA);
+    PDFont font = !edit.fontChanged && originalStyle.font != null && canEncodeWithFont(text, originalStyle.font)
         ? originalStyle.font
-        : overlayFont(document, edit, fontName);
+        : findPageFont(page, edit.fontName, text, edit.bold, edit.italic);
+    if (font == null) {
+      font = overlayFont(document, edit, fontName);
+    }
     left = overlayAlignedLeft(edit, font, fontSize, pageWidth, left, right, text);
+    float baseline = bottom + Math.max(1f, (height - fontSize) * 0.5f);
+    float characterSpacing = edit.pageSize.size() >= 2 && edit.pageSize.get(1) > 0
+        ? (float) (edit.letterSpacing * pageHeight / edit.pageSize.get(1))
+        : (float) edit.letterSpacing;
 
     try (PDPageContentStream stream = new PDPageContentStream(
         document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
       stream.beginText();
       setOverlayColor(stream, edit.color);
       stream.setFont(font, fontSize);
-      stream.newLineAtOffset(left, bottom + Math.max(1f, (height - fontSize) * 0.5f));
+      stream.setCharacterSpacing(characterSpacing);
+      if (edit.italic && !fontIsItalic(font)) {
+        stream.setTextMatrix(new Matrix(1, 0, 0.22f, 1, left, baseline));
+      } else {
+        stream.newLineAtOffset(left, baseline);
+      }
       stream.showText(text);
       stream.endText();
+      if (edit.underline || edit.strikethrough) {
+        setOverlayStrokeColor(stream, edit.color);
+        stream.setLineWidth(Math.max(0.6f, fontSize * 0.055f));
+        float textWidth = pdfTextWidth(font, text, fontSize)
+            + Math.max(0, text.length() - 1) * characterSpacing;
+        if (edit.underline) {
+          stream.moveTo(left, baseline - fontSize * 0.12f);
+          stream.lineTo(left + textWidth, baseline - fontSize * 0.12f);
+          stream.stroke();
+        }
+        if (edit.strikethrough) {
+          stream.moveTo(left, baseline + fontSize * 0.3f);
+          stream.lineTo(left + textWidth, baseline + fontSize * 0.3f);
+          stream.stroke();
+        }
+      }
     }
     return true;
   }
@@ -1958,6 +2000,21 @@ public class DocuflexPdfServer {
     stream.setNonStrokingColor(0f);
   }
 
+  private static void setOverlayStrokeColor(PDPageContentStream stream, List<Double> color) throws IOException {
+    if (color.size() >= 3) {
+      if (isNearWhite(color)) {
+        stream.setStrokingColor(0f);
+        return;
+      }
+      stream.setStrokingColor(
+          clampColor(color.get(0)),
+          clampColor(color.get(1)),
+          clampColor(color.get(2)));
+      return;
+    }
+    stream.setStrokingColor(0f);
+  }
+
   private static boolean isNearWhite(List<Double> color) {
     return color.get(0) > 0.92 && color.get(1) > 0.92 && color.get(2) > 0.92;
   }
@@ -1970,7 +2027,7 @@ public class DocuflexPdfServer {
       PDDocument document,
       TextEdit edit,
       Standard14Fonts.FontName fallback) throws IOException {
-    File fontFile = findSystemFont(edit.fontName, edit.bold);
+    File fontFile = findSystemFont(edit.fontName, edit.bold, edit.italic);
     if (fontFile != null) {
       try {
         return PDType0Font.load(document, fontFile);
@@ -1981,17 +2038,76 @@ public class DocuflexPdfServer {
     return new PDType1Font(fallback);
   }
 
-  private static File findSystemFont(String requestedName, boolean bold) {
+  private static PDFont findPageFont(
+      PDPage page,
+      String requestedName,
+      String text,
+      boolean bold,
+      boolean italic) throws IOException {
+    String requested = normalizeFontName(requestedName);
+    if (requested.isEmpty() || requested.startsWith("docuflexpdffont")) {
+      return null;
+    }
+    PDFont best = null;
+    int bestScore = Integer.MIN_VALUE;
+    PDResources resources = page.getResources();
+    if (resources == null) {
+      return null;
+    }
+    for (COSName resourceName : resources.getFontNames()) {
+      PDFont candidate = resources.getFont(resourceName);
+      if (candidate == null || !canEncodeWithFont(text, candidate)) {
+        continue;
+      }
+      String candidateName = normalizeFontName(candidate.getName());
+      if (!candidateName.contains(requested) && !requested.contains(candidateName)) {
+        continue;
+      }
+      boolean candidateBold = looksLikeBoldName(candidate.getName());
+      boolean candidateItalic = fontIsItalic(candidate);
+      int score = 10 + (candidateBold == bold ? 2 : 0) + (candidateItalic == italic ? 2 : 0);
+      if (score > bestScore) {
+        best = candidate;
+        bestScore = score;
+      }
+    }
+    return best;
+  }
+
+  private static boolean fontIsItalic(PDFont font) {
+    if (font == null) {
+      return false;
+    }
+    PDFontDescriptor descriptor = font.getFontDescriptor();
+    return descriptor != null && descriptor.isItalic()
+        || font.getName() != null && font.getName().toLowerCase(Locale.ROOT).matches(".*(italic|oblique).*");
+  }
+
+  private static File findSystemFont(String requestedName, boolean bold, boolean italic) {
     String normalized = normalizeFontName(requestedName);
     if (normalized.isEmpty()) {
       return null;
     }
 
     List<String> candidates = new ArrayList<>();
+    if (normalized.contains("inter")) {
+      candidates.add(italic
+          ? "backend/fonts/inter-variable-italic.ttf"
+          : "backend/fonts/inter-variable-normal.ttf");
+    }
+    if (normalized.contains("geist")) {
+      candidates.add(italic
+          ? "backend/fonts/geist-variable-italic.ttf"
+          : "backend/fonts/geist-variable-normal.ttf");
+    }
     if (normalized.contains("arial")) {
-      candidates.add(bold
-          ? "/System/Library/Fonts/Supplemental/Arial Bold.ttf"
-          : "/System/Library/Fonts/Supplemental/Arial.ttf");
+      candidates.add(bold && italic
+          ? "/System/Library/Fonts/Supplemental/Arial Bold Italic.ttf"
+          : bold
+              ? "/System/Library/Fonts/Supplemental/Arial Bold.ttf"
+              : italic
+                  ? "/System/Library/Fonts/Supplemental/Arial Italic.ttf"
+                  : "/System/Library/Fonts/Supplemental/Arial.ttf");
       candidates.add("/Library/Fonts/Arial Unicode.ttf");
     }
     if (normalized.contains("helvetica")) {
@@ -1999,8 +2115,14 @@ public class DocuflexPdfServer {
       candidates.add("/System/Library/Fonts/Supplemental/Arial.ttf");
     }
     if (normalized.contains("times")) {
+      candidates.add(bold && italic
+          ? "/System/Library/Fonts/Supplemental/Times New Roman Bold Italic.ttf"
+          : bold
+              ? "/System/Library/Fonts/Supplemental/Times New Roman Bold.ttf"
+              : italic
+                  ? "/System/Library/Fonts/Supplemental/Times New Roman Italic.ttf"
+                  : "/System/Library/Fonts/Supplemental/Times New Roman.ttf");
       candidates.add("/System/Library/Fonts/Times.ttc");
-      candidates.add("/System/Library/Fonts/Supplemental/Times New Roman.ttf");
     }
 
     for (String candidate : candidates) {
@@ -2078,7 +2200,14 @@ public class DocuflexPdfServer {
           edit.bold,
           edit.moved,
           edit.overlay,
-          edit.alignment))) {
+          edit.alignment,
+          edit.fontChanged,
+          edit.boldChanged,
+          edit.italic,
+          edit.italicChanged,
+          edit.underline,
+          edit.strikethrough,
+          edit.letterSpacing))) {
         return true;
       }
     }
@@ -2103,7 +2232,14 @@ public class DocuflexPdfServer {
         edit.bold,
         true,
         false,
-        "");
+        "",
+        edit.fontChanged,
+        edit.boldChanged,
+        edit.italic,
+        edit.italicChanged,
+        edit.underline,
+        edit.strikethrough,
+        edit.letterSpacing);
     if (!movePageTextWithCandidates(document, page, moveOnlyEdit)) {
       return false;
     }
@@ -2125,7 +2261,14 @@ public class DocuflexPdfServer {
         edit.bold,
         false,
         false,
-        "");
+        "",
+        edit.fontChanged,
+        edit.boldChanged,
+        edit.italic,
+        edit.italicChanged,
+        edit.underline,
+        edit.strikethrough,
+        edit.letterSpacing);
     return rewritePageWithCandidates(document, page, rewriteOnlyEdit);
   }
 
@@ -2154,7 +2297,14 @@ public class DocuflexPdfServer {
           edit.bold,
           edit.moved,
           edit.overlay,
-          edit.alignment))) {
+          edit.alignment,
+          edit.fontChanged,
+          edit.boldChanged,
+          edit.italic,
+          edit.italicChanged,
+          edit.underline,
+          edit.strikethrough,
+          edit.letterSpacing))) {
         return true;
       }
     }
@@ -3642,7 +3792,14 @@ public class DocuflexPdfServer {
           optionalBoolean(edit.get("bold")),
           optionalBoolean(edit.get("moved")),
           optionalBoolean(edit.get("overlay")),
-          optionalString(edit.get("alignment"))));
+          optionalString(edit.get("alignment")),
+          optionalBoolean(edit.get("fontChanged")),
+          optionalBoolean(edit.get("boldChanged")),
+          optionalBoolean(edit.get("italic")),
+          optionalBoolean(edit.get("italicChanged")),
+          optionalBoolean(edit.get("underline")),
+          optionalBoolean(edit.get("strikethrough")),
+          optionalDouble(edit.get("letterSpacing"))));
     }
     return edits;
   }
@@ -3919,7 +4076,14 @@ public class DocuflexPdfServer {
       boolean bold,
       boolean moved,
       boolean overlay,
-      String alignment) {}
+      String alignment,
+      boolean fontChanged,
+      boolean boldChanged,
+      boolean italic,
+      boolean italicChanged,
+      boolean underline,
+      boolean strikethrough,
+      double letterSpacing) {}
 
   private record AnnotationStroke(
       int page,
