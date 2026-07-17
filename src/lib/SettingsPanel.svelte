@@ -66,6 +66,7 @@
 
         <section>
           <h3>Privacy</h3>
+          <p><strong>Controller.</strong> Maximilian Bayer, Lehmgrubenstraße 11, 86932 Pürgen, Germany. Email: <a href="mailto:max06.bayer@gmail.com">max06.bayer@gmail.com</a>.</p>
           <p><strong>Files you open.</strong> Recent documents are stored in your browser using IndexedDB so they can appear on the home screen. Saved signatures are stored in your browser using local storage. They remain on that browser until you delete them in Docuflex, clear the browser’s site data, or the browser removes them.</p>
           <p><strong>Document processing.</strong> When you use conversion, compression, translation, OCR, protection, flattening, text editing, or export, the document is sent to the Docuflex server serving this app. Processing files are intended to be temporary and are not used for advertising, profiling, or model training.</p>
           <p><strong>Remote OCR.</strong> A deployment may optionally forward OCR files to a separate OCR service. If enabled, that service receives the uploaded PDF solely to perform OCR. A public-site operator must identify that provider and its retention rules before enabling it.</p>
@@ -76,7 +77,7 @@
         <section>
           <h3>Your choices and rights</h3>
           <p>You can remove recent files from the home screen, remove saved signatures in the signature tool, or clear all locally stored Docuflex data through your browser’s site-data settings.</p>
-          <p>Depending on where you live, you may have rights to request access, correction, deletion, restriction, portability, or objection regarding personal data processed by the public-site operator, and to complain to your local data-protection authority. Requests can be started through the project’s GitHub repository until a dedicated contact address is published.</p>
+          <p>Depending on where you live, you may have rights to request access, correction, deletion, restriction, portability, or objection regarding personal data processed by the public-site operator, and to complain to your local data-protection authority. Send privacy requests to <a href="mailto:max06.bayer@gmail.com">max06.bayer@gmail.com</a>.</p>
         </section>
 
         <section>
@@ -94,8 +95,8 @@
 
         <section class="operator-notice">
           <h3>Operator information</h3>
-          <p>Project: Docuflex · Copyright holder: max06bayer · Contact and notices: the <a href="https://github.com/max06bayer/docuflex" target="_blank" rel="noreferrer">Docuflex GitHub repository</a>.</p>
-          <p>Before a public deployment launches, its operator must add its legal identity, service address, direct email contact, hosting provider, log-retention period, and any remote processors required by the laws that apply to that operator.</p>
+          <p><strong>Service provider and person responsible for Docuflex</strong><br />Maximilian Bayer<br />Lehmgrubenstraße 11<br />86932 Pürgen<br />Germany</p>
+          <p>Email: <a href="mailto:max06.bayer@gmail.com">max06.bayer@gmail.com</a><br />GitHub: <a href="https://github.com/max06bayer/docuflex" target="_blank" rel="noreferrer">max06bayer/docuflex</a></p>
         </section>
       </div>
 
