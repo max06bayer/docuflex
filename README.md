@@ -40,7 +40,6 @@ See the in-app **Settings → Legal & Privacy** panel for current operator and p
 - [PDF.js](https://mozilla.github.io/pdf.js/) for PDF rendering and text layers
 - Java and [Apache PDFBox](https://pdfbox.apache.org/) for native PDF operations
 - Local document utilities for conversion, OCR, compression, and translation workflows
-- Self-hosted Geist typography
 
 ## Development
 
