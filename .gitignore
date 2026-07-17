@@ -30,3 +30,7 @@ tmp/
 coverage/
 playwright-report/
 test-results/
+
+# Local design prototypes are intentionally not published
+prototype/
+backend/prototype/
