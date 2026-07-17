@@ -19,6 +19,7 @@ download_url="https://github.com/pdf2htmlEX/pdf2htmlEX/releases/download/v0.18.8
 expected_sha256="11de2583a3abce5f141fd7fafb1fea2c67b15886e546d6b7675c600012e6ab8c"
 
 if [[ -x "$app_dir/AppRun" ]]; then
+  chmod -R a+rX "$app_dir"
   echo "pdf2htmlEX is already installed in the application image."
   exit 0
 fi
@@ -34,5 +35,6 @@ chmod +x "$app_image"
 )
 
 test -x "$app_dir/AppRun"
+chmod -R a+rX "$app_dir"
 rm -f "$app_image"
 "$app_dir/AppRun" --version

@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 
 const javaEnvironment = {
   ...process.env,
@@ -19,6 +19,7 @@ const frontendEnvironment = {
   XFF_DEPTH: process.env.XFF_DEPTH ?? '1',
   PROTOCOL_HEADER: process.env.PROTOCOL_HEADER ?? 'x-forwarded-proto',
   HOST_HEADER: process.env.HOST_HEADER ?? 'x-forwarded-host',
+  PYTHONPATH: [join(process.cwd(), '.document-python'), process.env.PYTHONPATH].filter(Boolean).join(delimiter),
   TESSDATA_PREFIX: process.env.TESSDATA_PREFIX ?? join(process.cwd(), '.ocr', 'tessdata')
 };
 
