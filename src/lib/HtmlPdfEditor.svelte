@@ -2032,6 +2032,7 @@
   };
   const docuflexCollectTextBoxEdits = () => Array.from(document.querySelectorAll('.docuflex-textbox')).flatMap((box) => {
     const moved = docuflexTextBoxMoved(box);
+    const layoutDirty = box.dataset.docuflexLayoutDirty === 'true';
     const original = docuflexTextBoxOriginalLines(box);
     const dirty = docuflexTextBoxDirty(box);
     const rows = Array.from(box.querySelectorAll('.docuflex-textbox-rich-line'));
@@ -2051,8 +2052,8 @@
       || rows.some((row) => row instanceof HTMLElement && row.dataset.docuflexStyleDirty === 'true')
       || box.dataset.docuflexFormattingDirty === 'true';
     const formattedRows = docuflexFormattedTextBoxRows(rows);
-    if (!moved && !dirty && !formattingDirty && !box.classList.contains('docuflex-editor-open') && !formattedRows) return [];
-    const wrapped = dirty || formattedRows
+    if (!moved && !layoutDirty && !dirty && !formattingDirty && !box.classList.contains('docuflex-editor-open') && !formattedRows) return [];
+    const wrapped = dirty || layoutDirty || formattedRows
       ? (formattedRows ? docuflexTextBoxRowTexts(rows, original) : docuflexWrappedTextBoxLines(box))
       : original.map((line) => docuflexNormalizeText(line.text || ''));
     const edits = [];
@@ -2062,7 +2063,11 @@
         replacement = [replacement, ...wrapped.slice(original.length)].filter(Boolean).join(' ');
       }
       const row = rows[index] instanceof HTMLElement ? rows[index] : null;
-      const edit = docuflexTextBoxLineEdit(box, line, replacement, index, moved, row, formattingDirty);
+      // A width/height resize changes line flow even when the characters and
+      // font controls are untouched. Export it through the same exact-style
+      // overlay path as a typography edit so the first mode switch preserves
+      // the resized layout instead of silently rebasing it as unchanged.
+      const edit = docuflexTextBoxLineEdit(box, line, replacement, index, moved, row, formattingDirty || layoutDirty);
       if (edit) edits.push(edit);
     });
     return edits;
@@ -2456,6 +2461,7 @@
         box.style.minHeight = nextHeight + 'px';
         docuflexClampTextBoxToPage(box);
         box.dataset.docuflexMoved = 'true';
+        box.dataset.docuflexLayoutDirty = 'true';
         docuflexBeginTextBoxVisualEditing(box);
         docuflexGrowTextBoxToEditor(box);
         parent.postMessage({ source: 'docuflex-html-editor', type: 'geometry' }, '*');
@@ -3001,6 +3007,7 @@
       box.dataset.docuflexOriginalTop = box.style.top || '0';
       delete box.dataset.docuflexMoved;
       delete box.dataset.docuflexFormattingDirty;
+      delete box.dataset.docuflexLayoutDirty;
       box.classList.remove('docuflex-live-edit');
     });
 
