@@ -20,6 +20,8 @@
   export let onProtectionChange = () => {};
   /** @type {() => void} */
   export let onRequestClose = () => {};
+  /** @type {string} */
+  export let initialTool = 'select';
   let workingFile = file;
 
   /** @type {HTMLDivElement | undefined} */
@@ -58,7 +60,7 @@
   let textLayerBuilders = [];
   /** @type {AbortController | null} */
   let textLayerAbortController = null;
-  let activeTool = 'select';
+  let activeTool = initialTool;
   let markerColor = '#FFE43B';
   let markerThickness = 16;
   let markerOpacity = 0.34;

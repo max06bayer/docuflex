@@ -3,7 +3,12 @@
   import { cubicOut } from 'svelte/easing';
   import { scale } from 'svelte/transition';
   import PdfEditor from '$lib/PdfEditor.svelte';
+  import CompressFilesPanel from '$lib/CompressFilesPanel.svelte';
+  import ConvertFilesPanel from '$lib/ConvertFilesPanel.svelte';
+  import FlattenFilesPanel from '$lib/FlattenFilesPanel.svelte';
+  import HomeProtectPanel from '$lib/HomeProtectPanel.svelte';
   import QuickToolPagesPanel from '$lib/QuickToolPagesPanel.svelte';
+  import TranslateFilesPanel from '$lib/TranslateFilesPanel.svelte';
   // @ts-ignore Fontsource exposes CSS through package exports without JS type declarations.
   import '@fontsource-variable/geist/wght.css';
   // @ts-ignore Fontsource exposes CSS through package exports without JS type declarations.
@@ -40,7 +45,7 @@
     { name: 'OCR', shortcut: 'O', icon: ocrIcon }
   ];
 
-  /** @type {{ id: number; name: string; type: 'pdf'; file: File; protection: { enabled: boolean; password: string } }[]} */
+  /** @type {{ id: number; name: string; type: 'pdf'; file: File; protection: { enabled: boolean; password: string }; initialTool?: string }[]} */
   let tabs = [];
   /** @type {RecentDocument[]} */
   let recentDocuments = [];
@@ -60,7 +65,7 @@
   let activeShortcut = '';
   /** @type {ReturnType<typeof setTimeout> | undefined} */
   let shortcutTimer;
-  /** @type {{ id: number; name: string; type: 'pdf'; file: File; protection: { enabled: boolean; password: string } } | undefined} */
+  /** @type {{ id: number; name: string; type: 'pdf'; file: File; protection: { enabled: boolean; password: string }; initialTool?: string } | undefined} */
   let activeDocument;
   $: activeDocument = tabs.find((tab) => tab.id === activeTab);
   $: visibleRecentDocuments = recentDocuments
@@ -78,12 +83,74 @@
   let isDownloading = false;
   /** @type {'merge' | 'split' | null} */
   let activePagesQuickTool = null;
+  let convertPanelOpen = false;
+  let compressPanelOpen = false;
+  let protectHomePanelOpen = false;
+  let translatePanelOpen = false;
+  let flattenPanelOpen = false;
+  let pendingInitialTool = 'select';
 
   /** @param {{ name: string }} tool */
   function openQuickTool(tool) {
     const toolName = tool.name.toLowerCase();
     if (toolName === 'merge' || toolName === 'split') {
       activePagesQuickTool = /** @type {'merge' | 'split'} */ (toolName);
+      convertPanelOpen = false;
+      compressPanelOpen = false;
+      protectHomePanelOpen = false;
+      translatePanelOpen = false;
+      flattenPanelOpen = false;
+    } else if (toolName === 'convert') {
+      activePagesQuickTool = null;
+      convertPanelOpen = true;
+      compressPanelOpen = false;
+      protectHomePanelOpen = false;
+      translatePanelOpen = false;
+      flattenPanelOpen = false;
+    } else if (toolName === 'compress') {
+      activePagesQuickTool = null;
+      convertPanelOpen = false;
+      compressPanelOpen = true;
+      protectHomePanelOpen = false;
+      translatePanelOpen = false;
+      flattenPanelOpen = false;
+    } else if (toolName === 'sign') {
+      activePagesQuickTool = null;
+      convertPanelOpen = false;
+      compressPanelOpen = false;
+      protectHomePanelOpen = false;
+      translatePanelOpen = false;
+      flattenPanelOpen = false;
+      openFilePicker('sign');
+    } else if (toolName === 'protect') {
+      activePagesQuickTool = null;
+      convertPanelOpen = false;
+      compressPanelOpen = false;
+      protectHomePanelOpen = true;
+      translatePanelOpen = false;
+      flattenPanelOpen = false;
+    } else if (toolName === 'translate') {
+      activePagesQuickTool = null;
+      convertPanelOpen = false;
+      compressPanelOpen = false;
+      protectHomePanelOpen = false;
+      translatePanelOpen = true;
+      flattenPanelOpen = false;
+    } else if (toolName === 'flatten') {
+      activePagesQuickTool = null;
+      convertPanelOpen = false;
+      compressPanelOpen = false;
+      protectHomePanelOpen = false;
+      translatePanelOpen = false;
+      flattenPanelOpen = true;
+    } else if (toolName === 'ocr') {
+      activePagesQuickTool = null;
+      convertPanelOpen = false;
+      compressPanelOpen = false;
+      protectHomePanelOpen = false;
+      translatePanelOpen = false;
+      flattenPanelOpen = false;
+      openFilePicker('ocr');
     }
   }
 
@@ -214,7 +281,9 @@
     });
   }
 
-  function openFilePicker() {
+  /** @param {string} [initialTool] */
+  function openFilePicker(initialTool = 'select') {
+    pendingInitialTool = initialTool;
     fileInput?.click();
   }
 
@@ -236,7 +305,8 @@
     const input = /** @type {HTMLInputElement} */ (event.currentTarget);
     const file = input.files?.[0];
     if (!file || (!file.name.toLowerCase().endsWith('.pdf') && file.type !== 'application/pdf')) return;
-    addFileTab(file);
+    addFileTab(file, { enabled: false, password: '' }, undefined, pendingInitialTool);
+    pendingInitialTool = 'select';
     input.value = '';
   }
 
@@ -294,10 +364,10 @@
     }
   }
 
-  /** @param {File} file @param {{ enabled: boolean; password: string }} [protection] @param {string} [thumbnailUrl] */
-  function addFileTab(file, protection = { enabled: false, password: '' }, thumbnailUrl) {
+  /** @param {File} file @param {{ enabled: boolean; password: string }} [protection] @param {string} [thumbnailUrl] @param {string} [initialTool] */
+  function addFileTab(file, protection = { enabled: false, password: '' }, thumbnailUrl, initialTool = 'select') {
     const id = nextTabId++;
-    tabs = [...tabs, { id, name: file.name, type: 'pdf', file, protection }];
+    tabs = [...tabs, { id, name: file.name, type: 'pdf', file, protection, initialTool }];
     const recent = { name: file.name, file, protection, thumbnailUrl, openedAt: Date.now() };
     recentDocuments = [recent, ...recentDocuments.filter((document) => document.name !== file.name)].slice(0, MAX_RECENT_DOCUMENTS);
     void persistRecentDocument(recent);
@@ -383,6 +453,9 @@
       sortExpanded = false;
       recentContextMenu = null;
       activePagesQuickTool = null;
+      convertPanelOpen = false;
+      compressPanelOpen = false;
+      protectHomePanelOpen = false;
       return;
     }
     const target = event.target;
@@ -470,7 +543,7 @@
         </button>
       {/each}
 
-      <button class="add-tab" data-tab-motion="add" aria-label="Open another document" title="Open document" onclick={openFilePicker}>
+      <button class="add-tab" data-tab-motion="add" aria-label="Open another document" title="Open document" onclick={() => openFilePicker()}>
         <img src="/plus.svg" alt="" />
       </button>
     </div>
@@ -521,7 +594,7 @@
     </div>
   </aside>
   <section class="workspace" aria-label="Document workspace">
-    <button class="drop-zone" aria-label="Open or drop a document" onclick={openFilePicker} ondragover={(event) => event.preventDefault()} ondrop={handleFileDrop}>
+    <button class="drop-zone" aria-label="Open or drop a document" onclick={() => openFilePicker()} ondragover={(event) => event.preventDefault()} ondrop={handleFileDrop}>
       <span class="drop-zone-content">
         <img src="/bigplus.svg" alt="" />
         <span>Drop any Document to edit</span>
@@ -593,7 +666,7 @@
         </button>
       {/each}
 
-      <button class="recent-document open-document" aria-label="Open document" onclick={openFilePicker}>
+      <button class="recent-document open-document" aria-label="Open document" onclick={() => openFilePicker()}>
         <span class="document-preview">
           <span class="open-document-plus" aria-hidden="true">{@html bigPlusIcon}</span>
         </span>
@@ -631,12 +704,28 @@
         <QuickToolPagesPanel tool={activePagesQuickTool} onClose={() => (activePagesQuickTool = null)} />
       {/key}
     {/if}
+    {#if convertPanelOpen}
+      <ConvertFilesPanel onClose={() => (convertPanelOpen = false)} />
+    {/if}
+    {#if compressPanelOpen}
+      <CompressFilesPanel onClose={() => (compressPanelOpen = false)} />
+    {/if}
+    {#if protectHomePanelOpen}
+      <HomeProtectPanel onClose={() => (protectHomePanelOpen = false)} />
+    {/if}
+    {#if translatePanelOpen}
+      <TranslateFilesPanel onClose={() => (translatePanelOpen = false)} />
+    {/if}
+    {#if flattenPanelOpen}
+      <FlattenFilesPanel onClose={() => (flattenPanelOpen = false)} />
+    {/if}
   </section>
   {:else}
     {#key activeDocument.id}
       <PdfEditor
         file={activeDocument.file}
         protection={activeDocument.protection}
+        initialTool={activeDocument.initialTool ?? 'select'}
         onProtectionChange={(protection) => updateDocumentProtection(activeDocument.id, protection)}
         onRequestClose={() => requestCloseTab(activeDocument.id)}
         bind:this={pdfEditor}
