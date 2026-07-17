@@ -1,5 +1,5 @@
 [phases.setup]
-nixPkgs = ["...", "jdk21_headless", "curl", "util-linux", "ocrmypdf", "tesseract", "poppler-utils", "qpdf", "ghostscript"]
+nixPkgs = ["...", "jdk21_headless", "python313", "python313Packages.pip", "curl", "util-linux", "ocrmypdf", "tesseract", "poppler-utils", "qpdf", "ghostscript"]
 nixLibs = ["...", "fontconfig", "freetype", "glib", "libxcb", "xorg.libX11"]
 
 [phases.build]
