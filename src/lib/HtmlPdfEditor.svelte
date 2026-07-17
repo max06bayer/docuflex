@@ -2045,14 +2045,11 @@
       });
       row.dataset.docuflexStyleDirty = 'true';
     });
-    // Formatting controls also put the box into visual-edit mode. Treat that
-    // live state as authoritative even if a blur/tool transition races the
-    // dataset marker, otherwise the collector falls back to a text-only edit.
+    // Plain typing also puts the box into visual-edit mode, so only the
+    // dedicated formatting markers may select the overlay export path.
     const formattingDirty = savedStyles.length > 0
       || rows.some((row) => row instanceof HTMLElement && row.dataset.docuflexStyleDirty === 'true')
-      || box.dataset.docuflexFormattingDirty === 'true'
-      || box.dataset.docuflexVisualEditing === 'true'
-      || box.classList.contains('docuflex-live-edit');
+      || box.dataset.docuflexFormattingDirty === 'true';
     const formattedRows = docuflexFormattedTextBoxRows(rows);
     if (!moved && !dirty && !formattingDirty && !box.classList.contains('docuflex-editor-open') && !formattedRows) return [];
     const wrapped = dirty || formattedRows
@@ -2308,9 +2305,9 @@
     const padRight = boxPad;
     const padBottom = boxPad * 0.7;
     const padLeft = boxPad;
-    const contentSlack = lines.length > 1
-      ? Math.max(boxPad * 3, Math.min(180, (right - left) * 0.18))
-      : Math.max(boxPad * 1.2, Math.min(28, (right - left) * 0.04));
+    // Keep the editable flow at the same width as the original PDF lines.
+    // A large multi-line allowance changed wrapping as soon as the user typed.
+    const contentSlack = Math.max(boxPad * 1.2, Math.min(28, (right - left) * 0.04));
     const pageWidth = page.getBoundingClientRect().width || 0;
     const rightLimit = pageWidth > 0 ? pageWidth * 0.97 : 0;
     const boxLeft = Math.max(0, left - padLeft);
@@ -3475,8 +3472,8 @@ ${setupScript}`;
   function stampConvertedHtmlForEditing(html) {
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, 'text/html');
+    const originals = extractConvertedHtmlOriginalTexts(html);
     sanitizeConvertedDocument(doc);
-    const originals = extractConvertedHtmlOriginalTexts(`<!DOCTYPE html>\n${doc.documentElement.outerHTML}`);
 
     doc.querySelectorAll('.t').forEach((node, index) => {
       if (!(node instanceof HTMLElement)) return;

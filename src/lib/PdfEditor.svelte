@@ -524,6 +524,7 @@
         type: 'application/pdf',
         lastModified: Date.now()
       });
+      await htmlEditor?.commitAppliedTextEdits?.(editedBytes);
       htmlViewportMode = false;
       await loadPdf(false);
       // Keep the iframe's changes cumulative against the clean baseline. This

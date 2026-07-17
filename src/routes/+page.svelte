@@ -631,7 +631,7 @@
         { id: 'search', icon: '/search.svg', label: 'Search', description: 'Find text in the current PDF.' },
         { id: 'assistant', icon: '/brain.svg', label: 'AI Chat', description: 'Chat with AI about your document.' },
         { id: 'settings', icon: '/settings.svg', label: 'Settings', description: 'Open Docuflex settings.' }
-      ].filter((utility) => utility.id !== 'search' || activeTab !== null) as utility}
+      ].filter((utility) => utility.id !== 'search' || activeTab !== null) as utility (utility.id)}
         <button
           class="utility-button"
           class:ai-disabled={utility.id === 'assistant'}

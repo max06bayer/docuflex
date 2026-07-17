@@ -2096,7 +2096,7 @@ public class DocuflexPdfServer {
     }
     OverlayStyle originalStyle = findOverlayStyle(page, edit);
 
-    rewritePageWithCandidates(document, page, new TextEdit(
+    boolean removedOriginal = rewritePageWithCandidates(document, page, new TextEdit(
         edit.page,
         edit.oldText,
         "",
@@ -2121,6 +2121,9 @@ public class DocuflexPdfServer {
         false,
         false,
         0));
+    if (!removedOriginal) {
+      return false;
+    }
 
     float pageWidth = page.getMediaBox().getWidth();
     float pageHeight = page.getMediaBox().getHeight();
