@@ -22,7 +22,17 @@ else
   exit 1
 fi
 
-"${pip_command[@]}" install \
+if [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]]; then
+  "${pip_command[@]}" install \
+    --disable-pip-version-check \
+    --no-input \
+    --only-binary=:all: \
+    --index-url 'https://download.pytorch.org/whl/cpu' \
+    --target "$runtime_dir" \
+    'torch==2.13.0'
+fi
+
+PYTHONPATH="$runtime_dir${PYTHONPATH:+:$PYTHONPATH}" "${pip_command[@]}" install \
   --disable-pip-version-check \
   --no-input \
   --only-binary=:all: \
