@@ -8,6 +8,7 @@
   import FlattenFilesPanel from '$lib/FlattenFilesPanel.svelte';
   import HomeProtectPanel from '$lib/HomeProtectPanel.svelte';
   import QuickToolPagesPanel from '$lib/QuickToolPagesPanel.svelte';
+  import SettingsPanel from '$lib/SettingsPanel.svelte';
   import TranslateFilesPanel from '$lib/TranslateFilesPanel.svelte';
   // @ts-ignore Fontsource exposes CSS through package exports without JS type declarations.
   import '@fontsource-variable/geist/wght.css';
@@ -34,15 +35,15 @@
   let recentDatabasePromise = null;
 
   const quickTools = [
-    { name: 'Merge', shortcut: 'M', icon: mergeIcon },
-    { name: 'Split', shortcut: 'L', icon: splitIcon },
-    { name: 'Convert', shortcut: 'C', icon: convertIcon, wide: true },
-    { name: 'Compress', shortcut: 'R', icon: compressIcon },
-    { name: 'Sign', shortcut: 'S', icon: signIcon },
-    { name: 'Protect', shortcut: 'P', icon: protectIcon },
-    { name: 'Translate', shortcut: 'T', icon: translateIcon },
-    { name: 'Flatten', shortcut: 'F', icon: flattenIcon },
-    { name: 'OCR', shortcut: 'O', icon: ocrIcon }
+    { name: 'Merge', shortcut: 'M', icon: mergeIcon, description: 'Combine multiple PDFs into one document.' },
+    { name: 'Split', shortcut: 'L', icon: splitIcon, description: 'Separate PDF pages into individual files.' },
+    { name: 'Convert', shortcut: 'C', icon: convertIcon, wide: true, description: 'Convert PDFs and Office files to another format.' },
+    { name: 'Compress', shortcut: 'R', icon: compressIcon, description: 'Reduce a PDF’s file size.' },
+    { name: 'Sign', shortcut: 'S', icon: signIcon, description: 'Open a PDF and add your signature.' },
+    { name: 'Protect', shortcut: 'P', icon: protectIcon, description: 'Encrypt a PDF with a password.' },
+    { name: 'Translate', shortcut: 'T', icon: translateIcon, description: 'Translate PDF text into another language.' },
+    { name: 'Flatten', shortcut: 'F', icon: flattenIcon, description: 'Remove editable layers or rasterize the PDF.' },
+    { name: 'OCR', shortcut: 'O', icon: ocrIcon, description: 'Recognize text in scanned PDF pages.' }
   ];
 
   /** @type {{ id: number; name: string; type: 'pdf'; file: File; protection: { enabled: boolean; password: string }; initialTool?: string }[]} */
@@ -63,6 +64,14 @@
   /** @type {RecentDocument[]} */
   let visibleRecentDocuments = [];
   let activeShortcut = '';
+  /** @type {{ name: string; description: string; x: number; y: number } | null} */
+  let quickTooltip = null;
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let quickTooltipTimer;
+  /** @type {{ label: string; description: string; x: number; y: number } | null} */
+  let utilityTooltip = null;
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let utilityTooltipTimer;
   /** @type {ReturnType<typeof setTimeout> | undefined} */
   let shortcutTimer;
   /** @type {{ id: number; name: string; type: 'pdf'; file: File; protection: { enabled: boolean; password: string }; initialTool?: string } | undefined} */
@@ -88,7 +97,59 @@
   let protectHomePanelOpen = false;
   let translatePanelOpen = false;
   let flattenPanelOpen = false;
+  let settingsPanelOpen = false;
   let pendingInitialTool = 'select';
+
+  /** @param {{ name: string; description: string }} tool @param {HTMLElement} element */
+  function scheduleQuickTooltip(tool, element) {
+    clearTimeout(quickTooltipTimer);
+    quickTooltip = null;
+    quickTooltipTimer = setTimeout(() => {
+      const rect = element.getBoundingClientRect();
+      const uiScale = rect.width / Math.max(1, element.offsetWidth);
+      const scale = Number.isFinite(uiScale) && uiScale > 0 ? uiScale : 1;
+      const tooltipWidth = 270 * scale;
+      const rightX = rect.right + 8;
+      const x = rightX + tooltipWidth <= window.innerWidth - 10
+        ? rightX
+        : Math.max(10, rect.left - tooltipWidth - 8);
+      quickTooltip = {
+        name: tool.name,
+        description: tool.description,
+        x: x / scale,
+        y: Math.max(50, Math.min(window.innerHeight - 50, rect.top + rect.height / 2)) / scale
+      };
+    }, 680);
+  }
+
+  function hideQuickTooltip() {
+    clearTimeout(quickTooltipTimer);
+    quickTooltip = null;
+  }
+
+  /** @param {{ label: string; description: string }} utility @param {HTMLElement} element */
+  function scheduleUtilityTooltip(utility, element) {
+    clearTimeout(utilityTooltipTimer);
+    utilityTooltip = null;
+    utilityTooltipTimer = setTimeout(() => {
+      const rect = element.getBoundingClientRect();
+      const uiScale = rect.width / Math.max(1, element.offsetWidth);
+      const scale = Number.isFinite(uiScale) && uiScale > 0 ? uiScale : 1;
+      const tooltipWidth = 220 * scale;
+      const centeredX = rect.left + rect.width / 2 - tooltipWidth / 2;
+      utilityTooltip = {
+        label: utility.label,
+        description: utility.description,
+        x: Math.max(10, Math.min(window.innerWidth - tooltipWidth - 10, centeredX)) / scale,
+        y: (rect.bottom + 8) / scale
+      };
+    }, 680);
+  }
+
+  function hideUtilityTooltip() {
+    clearTimeout(utilityTooltipTimer);
+    utilityTooltip = null;
+  }
 
   /** @param {{ name: string }} tool */
   function openQuickTool(tool) {
@@ -482,14 +543,19 @@
     };
     window.addEventListener('pointerdown', closeHomepageMenus);
     window.addEventListener('keydown', handleQuickToolShortcut);
+    window.addEventListener('scroll', hideQuickTooltip, true);
+    window.addEventListener('resize', hideQuickTooltip);
     return () => {
       window.removeEventListener('pointerdown', closeHomepageMenus);
       window.removeEventListener('keydown', handleQuickToolShortcut);
+      window.removeEventListener('scroll', hideQuickTooltip, true);
+      window.removeEventListener('resize', hideQuickTooltip);
     };
   });
 
   onDestroy(() => {
     if (shortcutTimer) clearTimeout(shortcutTimer);
+    if (quickTooltipTimer) clearTimeout(quickTooltipTimer);
   });
 </script>
 
@@ -561,18 +627,26 @@
         </button>
       {/if}
       {#each [
-        { id: 'home', icon: '/home.svg', label: 'Home' },
-        { id: 'search', icon: '/search.svg', label: 'Search' },
-        { id: 'assistant', icon: '/brain.svg', label: 'AI assistant' },
-        { id: 'settings', icon: '/settings.svg', label: 'Settings' }
-      ] as utility}
+        { id: 'home', icon: '/home.svg', label: 'Home', description: 'Return to the document overview.' },
+        { id: 'search', icon: '/search.svg', label: 'Search', description: 'Find text in the current PDF.' },
+        { id: 'assistant', icon: '/brain.svg', label: 'AI Chat', description: 'Chat with AI about your document.' },
+        { id: 'settings', icon: '/settings.svg', label: 'Settings', description: 'Open Docuflex settings.' }
+      ].filter((utility) => utility.id !== 'search' || activeTab !== null) as utility}
         <button
           class="utility-button"
+          class:ai-disabled={utility.id === 'assistant'}
           aria-label={utility.label}
-          title={utility.label}
+          disabled={utility.id === 'assistant'}
+          aria-describedby={utilityTooltip?.label === utility.label ? 'utility-tooltip' : undefined}
+          onmouseenter={(event) => scheduleUtilityTooltip(utility, event.currentTarget)}
+          onmouseleave={hideUtilityTooltip}
+          onfocus={(event) => scheduleUtilityTooltip(utility, event.currentTarget)}
+          onblur={hideUtilityTooltip}
           onclick={() => {
+            hideUtilityTooltip();
             if (utility.id === 'home') activeTab = null;
             else if (utility.id === 'search') pdfEditor?.openSearchPanel();
+            else if (utility.id === 'settings') settingsPanelOpen = !settingsPanelOpen;
           }}
         >
           <img src={utility.icon} alt="" />
@@ -581,11 +655,37 @@
     </nav>
   </header>
 
+  {#if utilityTooltip}
+    <div
+      id="utility-tooltip"
+      class="utility-tooltip"
+      role="tooltip"
+      style:left={`${utilityTooltip.x}px`}
+      style:top={`${utilityTooltip.y}px`}
+    >
+      <strong>{utilityTooltip.label}</strong>
+      <span>{utilityTooltip.description}</span>
+    </div>
+  {/if}
+
   {#if activeTab === null || !activeDocument}
   <aside class="sidebar" aria-label="Document tools">
     <div class="quick-tools">
       {#each quickTools as tool}
-        <button class="quick-tool" class:wide-icon={tool.wide} class:keyboard-active={activeShortcut === tool.shortcut} data-tool={tool.name.toLowerCase()} data-shortcut={tool.shortcut.toLowerCase()} aria-label={tool.name} title={tool.name} onclick={() => openQuickTool(tool)}>
+        <button
+          class="quick-tool"
+          class:wide-icon={tool.wide}
+          class:keyboard-active={activeShortcut === tool.shortcut}
+          data-tool={tool.name.toLowerCase()}
+          data-shortcut={tool.shortcut.toLowerCase()}
+          aria-label={tool.name}
+          aria-describedby={quickTooltip?.name === tool.name ? 'quick-tool-tooltip' : undefined}
+          onmouseenter={(event) => scheduleQuickTooltip(tool, event.currentTarget)}
+          onmouseleave={hideQuickTooltip}
+          onfocus={(event) => scheduleQuickTooltip(tool, event.currentTarget)}
+          onblur={hideQuickTooltip}
+          onclick={() => { hideQuickTooltip(); openQuickTool(tool); }}
+        >
           <span class="quick-tool-icon" aria-hidden="true">{@html tool.icon}</span>
           <span class="quick-tool-name">{tool.name}</span>
           <kbd>{tool.shortcut}</kbd>
@@ -593,6 +693,18 @@
       {/each}
     </div>
   </aside>
+  {#if quickTooltip}
+    <div
+      id="quick-tool-tooltip"
+      class="quick-tool-tooltip"
+      role="tooltip"
+      style:left={`${quickTooltip.x}px`}
+      style:top={`${quickTooltip.y}px`}
+    >
+      <strong>{quickTooltip.name} Tool</strong>
+      <span>{quickTooltip.description}</span>
+    </div>
+  {/if}
   <section class="workspace" aria-label="Document workspace">
     <button class="drop-zone" aria-label="Open or drop a document" onclick={() => openFilePicker()} ondragover={(event) => event.preventDefault()} ondrop={handleFileDrop}>
       <span class="drop-zone-content">
@@ -731,6 +843,10 @@
         bind:this={pdfEditor}
       />
     {/key}
+  {/if}
+
+  {#if settingsPanelOpen}
+    <SettingsPanel onClose={() => (settingsPanelOpen = false)} />
   {/if}
 
   <input bind:this={fileInput} class="file-input" type="file" accept="application/pdf,.pdf" onchange={handleFileSelection} />
@@ -1003,6 +1119,19 @@
     opacity: 0.55;
   }
 
+  .utility-button.ai-disabled:disabled {
+    cursor: default;
+  }
+
+  .utility-button:disabled:hover {
+    border-color: #dedede;
+    background: #f8f8f8;
+  }
+
+  .utility-button:disabled:hover img {
+    filter: none;
+  }
+
   .utility-button img {
     width: 24px;
     height: 24px;
@@ -1054,6 +1183,43 @@
     height: 26px;
   }
 
+  .utility-tooltip {
+    position: fixed;
+    z-index: 1300;
+    display: grid;
+    gap: 3px;
+    width: 220px;
+    padding: 9px 11px 10px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 9px;
+    background: #222222;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.2), 0 2px 7px rgba(0, 0, 0, 0.12);
+    color: #ffffff;
+    font-family: Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 17px;
+    font-weight: 400;
+    line-height: 1.2;
+    letter-spacing: -0.15px;
+    transform-origin: top center;
+    pointer-events: none;
+    animation: utility-tooltip-in 150ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .utility-tooltip strong {
+    font: inherit;
+    color: #ffffff;
+  }
+
+  .utility-tooltip span {
+    color: #aaaaaa;
+  }
+
+  @keyframes utility-tooltip-in {
+    from { opacity: 0; transform: scale(0.96); }
+    to { opacity: 1; transform: scale(1); }
+  }
+
   .sidebar {
     grid-column: 1;
     grid-row: 2;
@@ -1091,6 +1257,45 @@
     color: rgba(0, 0, 0, 0.7);
     cursor: pointer;
     transition: background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease, transform 160ms ease;
+  }
+
+  .quick-tool-tooltip {
+    position: fixed;
+    z-index: 1200;
+    display: grid;
+    gap: 3px;
+    box-sizing: border-box;
+    width: 270px;
+    padding: 10px 12px 12px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 9px;
+    background: #222222;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.2), 0 2px 7px rgba(0, 0, 0, 0.12);
+    color: #ffffff;
+    font-family: Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 17px;
+    font-weight: 400;
+    line-height: 1.2;
+    letter-spacing: -0.15px;
+    transform: translateY(-50%);
+    transform-origin: left center;
+    pointer-events: none;
+    animation: quick-tool-tooltip-in 150ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .quick-tool-tooltip strong {
+    font: inherit;
+    color: #ffffff;
+  }
+
+  .quick-tool-tooltip span {
+    color: #aaaaaa;
+  }
+
+  @keyframes quick-tool-tooltip-in {
+    from { opacity: 0; transform: translateY(-50%) scale(0.96); }
+    to { opacity: 1; transform: translateY(-50%) scale(1); }
   }
 
   .quick-tool-icon {

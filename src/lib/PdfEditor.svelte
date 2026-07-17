@@ -8409,12 +8409,12 @@
   }
 
   .protect-panel-header h2 {
-    margin: 0 0 1px 7px;
+    margin: 0 0 0 7px;
     overflow: hidden;
     color: #000;
     font-size: 18px;
     font-weight: 400;
-    line-height: 1;
+    line-height: 1.22;
     letter-spacing: -0.25px;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -9313,10 +9313,10 @@
 
   .preparation-text {
     position: absolute;
-    top: 23px;
+    top: 21px;
     left: 60px;
     width: 350px;
-    height: 20px;
+    height: 25px;
     padding-left: 2px;
     background: linear-gradient(90deg, #474747 0%, #9e9e9e 31.877%, #474747 72.516%);
     background-position: 140% 50%;
@@ -9325,7 +9325,7 @@
     font-family: Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-size: 20px;
     font-weight: 400;
-    line-height: 1;
+    line-height: 1.22;
     letter-spacing: -0.2px;
     white-space: nowrap;
     -webkit-background-clip: text;

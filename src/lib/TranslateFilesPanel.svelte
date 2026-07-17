@@ -166,7 +166,7 @@
   .translate-panel { position: absolute; z-index: 45; top: 20px; left: 14px; display: grid; grid-template-rows: 50px 118px 132px; box-sizing: border-box; width: min(320px, calc(100% - 28px)); height: 300px; overflow: visible; border: 1.5px solid #c5c5c5; border-radius: 13px; background: #fafafa; box-shadow: 0 9px 24px rgba(0,0,0,.07); color: #000; font-family: "Inter Variable", Inter, sans-serif; font-size: 16px; }
   .panel-header { display: grid; grid-template-columns: 26px 1fr 28px; align-items: center; box-sizing: border-box; height: 50px; padding: 0 12px; border-bottom: 1px solid #cacaca; border-radius: 12px 12px 0 0; background: #eee; }
   .panel-header > img { width: 24px; height: 24px; }
-  .panel-header h2 { margin: 0 0 1px 7px; font-size: 18px; font-weight: 400; line-height: 1; letter-spacing: -.25px; }
+  .panel-header h2 { margin: 0 0 0 7px; font-size: 18px; font-weight: 400; line-height: 1.22; letter-spacing: -.25px; }
   .panel-close { position: relative; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 9px; background: transparent; cursor: pointer; transition: transform 160ms ease; }
   .panel-close:active { transform: scale(.94); }
   .panel-close span { position: absolute; top: 13px; left: 6px; width: 16px; height: 1.5px; border-radius: 99px; background: #929292; transform: rotate(45deg); transition: background-color 160ms ease; }

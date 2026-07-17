@@ -134,7 +134,7 @@
   .protect-panel.has-error { height: 508px; }
   .panel-header { display: grid; grid-template-columns: 26px 1fr 28px; align-items: center; box-sizing: border-box; height: 50px; padding: 0 12px; border-bottom: 1px solid #cacaca; background: #eee; }
   .panel-header > img { width: 24px; height: 24px; }
-  .panel-header h2 { margin: 0 0 1px 7px; font-size: 18px; font-weight: 400; line-height: 1; letter-spacing: -.25px; }
+  .panel-header h2 { margin: 0 0 0 7px; font-size: 18px; font-weight: 400; line-height: 1.22; letter-spacing: -.25px; }
   .panel-close { position: relative; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 9px; background: transparent; cursor: pointer; transition: transform 160ms ease; }
   .panel-close:active { transform: scale(.94); }
   .panel-close span { position: absolute; top: 13px; left: 6px; width: 16px; height: 1.5px; border-radius: 99px; background: #929292; transform: rotate(45deg); }

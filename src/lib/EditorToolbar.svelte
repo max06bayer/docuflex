@@ -86,12 +86,27 @@
 
   const nonInvertedTools = new Set(['select', 'image', 'blackout', 'whiteout', 'measure', 'highlight']);
   const lightSelectionTools = new Set(['blackout', 'whiteout']);
+  /** @type {Record<string, string>} */
+  const toolDescriptions = {
+    select: 'Select and inspect objects or text.', pan: 'Move around the document canvas.', zoom: 'Zoom into an area of the document.',
+    marker: 'Draw a translucent marker stroke.', pen: 'Draw a freehand pen stroke.', eraser: 'Erase drawings and annotations.',
+    triangle: 'Add a triangle shape.', rectangle: 'Add a rectangle shape.', circle: 'Add a circle shape.', check: 'Add a check mark.', cross: 'Add a cross mark.', arrow: 'Add an arrow.', line: 'Add a straight line.',
+    textfield: 'Add a new text field.', edit: 'Edit existing PDF text.', highlight: 'Highlight selected text.', crossout: 'Strike through selected text.', underline: 'Underline selected text.', image: 'Place an image in the PDF.',
+    protect: 'Protect the PDF with a password.', blackout: 'Permanently cover content in black.', whiteout: 'Permanently cover content in white.',
+    sign: 'Add a saved or new signature.', checkbox: 'Add a checkbox field.', input: 'Add a fillable input field.',
+    measure: 'Measure a distance on the page.', crop: 'Crop the visible page area.',
+    ocr: 'Recognize text in scanned pages.', search: 'Find text in the document.', watermark: 'Add a watermark to every page.'
+  };
 
   /** @type {string} */
   export let activeTool = 'select';
   let groupSelections = Object.fromEntries(groups.map((group) => [group.id, group.primary]));
   /** @type {string | null} */
   let expandedGroup = null;
+  /** @type {{ label: string; description: string; x: number; y: number; placement: 'above' | 'right' | 'left' } | null} */
+  let toolbarTooltip = null;
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let toolbarTooltipTimer;
 
   $: {
     const activeGroup = groups.find((group) => group.tools.some((tool) => tool.id === activeTool));
@@ -102,6 +117,7 @@
 
   /** @param {string} groupId @param {string} tool */
   function selectTool(groupId, tool) {
+    hideToolbarTooltip();
     activeTool = tool;
     groupSelections = { ...groupSelections, [groupId]: tool };
     expandedGroup = null;
@@ -114,8 +130,40 @@
 
   /** @param {MouseEvent} event @param {string} groupId */
   function toggleGroup(event, groupId) {
+    hideToolbarTooltip();
     event.stopPropagation();
     expandedGroup = expandedGroup === groupId ? null : groupId;
+  }
+
+  /** @param {{ id: string; label: string }} tool @param {HTMLElement} element @param {'above' | 'side'} [placement] */
+  function scheduleToolbarTooltip(tool, element, placement = 'above') {
+    clearTimeout(toolbarTooltipTimer);
+    toolbarTooltip = null;
+    toolbarTooltipTimer = setTimeout(() => {
+      const rect = element.getBoundingClientRect();
+      const uiScale = rect.width / Math.max(1, element.offsetWidth);
+      const scale = Number.isFinite(uiScale) && uiScale > 0 ? uiScale : 1;
+      const tooltipWidth = 250 * scale;
+      const center = Math.max(tooltipWidth / 2 + 10, Math.min(window.innerWidth - tooltipWidth / 2 - 10, rect.left + rect.width / 2));
+      const showRight = rect.right + 8 + tooltipWidth <= window.innerWidth - 10;
+      toolbarTooltip = {
+        label: tool.label,
+        description: tool.id === 'menu' ? 'Show the other tools in this group.' : (toolDescriptions[tool.id] ?? `Use the ${tool.label} tool.`),
+        x: (placement === 'side' ? (showRight ? rect.right + 8 : rect.left - 8) : center) / scale,
+        y: (placement === 'side' ? rect.top + rect.height / 2 : rect.top - 7) / scale,
+        placement: placement === 'side' ? (showRight ? 'right' : 'left') : 'above'
+      };
+    }, 680);
+  }
+
+  function hideToolbarTooltip() {
+    clearTimeout(toolbarTooltipTimer);
+    toolbarTooltip = null;
+  }
+
+  /** @param {{ id: string; tools: { id: string; label: string }[] }} group @param {HTMLElement} element */
+  function scheduleSelectedToolTooltip(group, element) {
+    scheduleToolbarTooltip(selectedTool(group), element);
   }
 
   /** @param {KeyboardEvent} event */
@@ -136,13 +184,19 @@
   onMount(() => {
     function closeMenus() {
       expandedGroup = null;
+      hideToolbarTooltip();
     }
 
     document.addEventListener('click', closeMenus);
     window.addEventListener('keydown', handleToolShortcut);
+    window.addEventListener('scroll', hideToolbarTooltip, true);
+    window.addEventListener('resize', hideToolbarTooltip);
     return () => {
       document.removeEventListener('click', closeMenus);
       window.removeEventListener('keydown', handleToolShortcut);
+      window.removeEventListener('scroll', hideToolbarTooltip, true);
+      window.removeEventListener('resize', hideToolbarTooltip);
+      clearTimeout(toolbarTooltipTimer);
     };
   });
 </script>
@@ -162,6 +216,11 @@
                 class="tool-menu-item"
                 data-tool={tool.id}
                 aria-pressed={activeTool === tool.id}
+                aria-describedby={toolbarTooltip?.label === tool.label ? 'editor-toolbar-tooltip' : undefined}
+                onmouseenter={(event) => scheduleToolbarTooltip(tool, event.currentTarget, 'side')}
+                onmouseleave={hideToolbarTooltip}
+                onfocus={(event) => scheduleToolbarTooltip(tool, event.currentTarget, 'side')}
+                onblur={hideToolbarTooltip}
                 onclick={() => selectTool(group.id, tool.id)}
               >
                 <img src={`/toolbar/small/${tool.smallIcon ?? tool.id}.svg`} alt="" />
@@ -179,7 +238,11 @@
           style="corner-shape: squircle;"
           aria-label={selectedTool(group).label}
           aria-pressed={activeTool === groupSelections[group.id]}
-          title={selectedTool(group).label}
+          aria-describedby={toolbarTooltip?.label === selectedTool(group).label ? 'editor-toolbar-tooltip' : undefined}
+          onmouseenter={(event) => scheduleSelectedToolTooltip(group, event.currentTarget)}
+          onmouseleave={hideToolbarTooltip}
+          onfocus={(event) => scheduleSelectedToolTooltip(group, event.currentTarget)}
+          onblur={hideToolbarTooltip}
           onclick={() => selectTool(group.id, groupSelections[group.id])}
         >
           <img
@@ -194,6 +257,10 @@
           style="corner-shape: squircle;"
           aria-label={`Show ${group.tools[0].label} tools`}
           aria-expanded={expandedGroup === group.id}
+          onmouseenter={(event) => scheduleToolbarTooltip({ id: 'menu', label: 'More Tools' }, event.currentTarget)}
+          onmouseleave={hideToolbarTooltip}
+          onfocus={(event) => scheduleToolbarTooltip({ id: 'menu', label: 'More Tools' }, event.currentTarget)}
+          onblur={hideToolbarTooltip}
           onclick={(event) => toggleGroup(event, group.id)}
         >
           <img src="/toolbar/expand.svg" alt="" />
@@ -202,6 +269,20 @@
     {/each}
   </div>
 </div>
+{#if toolbarTooltip}
+  <div
+    id="editor-toolbar-tooltip"
+    class="toolbar-tooltip"
+    class:side={toolbarTooltip.placement === 'right'}
+    class:side-left={toolbarTooltip.placement === 'left'}
+    role="tooltip"
+    style:left={`${toolbarTooltip.x}px`}
+    style:top={`${toolbarTooltip.y}px`}
+  >
+    <strong>{toolbarTooltip.label} Tool</strong>
+    <span>{toolbarTooltip.description}</span>
+  </div>
+{/if}
 
 <style>
   .editor-toolbar-wrap {
@@ -222,6 +303,59 @@
     border-radius: 20px;
     background: #fff;
     box-shadow: 0 13px 28px rgba(0, 0, 0, 0.22), 0 3px 8px rgba(0, 0, 0, 0.1);
+  }
+
+  .toolbar-tooltip {
+    position: fixed;
+    z-index: 1200;
+    display: grid;
+    gap: 3px;
+    box-sizing: border-box;
+    width: 250px;
+    padding: 10px 12px 12px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 9px;
+    background: #222222;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.2), 0 2px 7px rgba(0, 0, 0, 0.12);
+    color: #ffffff;
+    font-family: Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 17px;
+    font-weight: 400;
+    line-height: 1.2;
+    letter-spacing: -0.15px;
+    transform: translate(-50%, -100%);
+    transform-origin: center bottom;
+    pointer-events: none;
+    animation: toolbar-tooltip-in 150ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .toolbar-tooltip strong { color: #ffffff; font: inherit; }
+  .toolbar-tooltip span { color: #aaaaaa; }
+
+  .toolbar-tooltip.side {
+    transform: translateY(-50%);
+    transform-origin: left center;
+  }
+
+  .toolbar-tooltip.side-left {
+    transform: translate(-100%, -50%);
+    transform-origin: right center;
+  }
+
+  @keyframes toolbar-tooltip-in {
+    from { opacity: 0; transform: translate(-50%, -100%) scale(0.96); }
+    to { opacity: 1; transform: translate(-50%, -100%) scale(1); }
+  }
+
+  .toolbar-tooltip.side,
+  .toolbar-tooltip.side-left {
+    animation-name: toolbar-side-tooltip-in;
+  }
+
+  @keyframes toolbar-side-tooltip-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
   }
 
   .tool-group {

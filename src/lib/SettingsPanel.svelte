@@ -1,0 +1,148 @@
+<script>
+  import { onDestroy } from 'svelte';
+  import { cubicOut } from 'svelte/easing';
+  import { fade, fly, scale } from 'svelte/transition';
+
+  /** @type {() => void} */
+  export let onClose = () => {};
+  let legalOpen = false;
+
+  /** @param {MouseEvent} event */
+  function handleBackdropClick(event) {
+    if (event.target === event.currentTarget) legalOpen = false;
+  }
+
+  /** @param {KeyboardEvent} event */
+  function handleKeydown(event) {
+    if (event.key !== 'Escape') return;
+    if (legalOpen) legalOpen = false;
+    else onClose();
+  }
+
+  if (typeof window !== 'undefined') window.addEventListener('keydown', handleKeydown);
+  onDestroy(() => window.removeEventListener('keydown', handleKeydown));
+</script>
+
+<div class="settings-panel" role="dialog" aria-label="Settings" transition:fly={{ x: 18, duration: 240, easing: cubicOut }}>
+  <header class="panel-header">
+    <img src="/settings.svg" alt="" />
+    <h2>Settings</h2>
+    <button class="panel-close" type="button" aria-label="Close Settings" onclick={onClose}><span></span><span></span></button>
+  </header>
+
+  <div class="settings-content">
+    <a class="settings-row" href="https://github.com/max06bayer/docuflex" target="_blank" rel="noreferrer">
+      <span>GitHub</span>
+    </a>
+    <span class="settings-row disabled" aria-disabled="true">
+      <span>Homepage</span>
+    </span>
+    <button class="settings-row" type="button" onclick={() => (legalOpen = true)}>
+      <span>Legal &amp; Privacy</span>
+    </button>
+  </div>
+</div>
+
+{#if legalOpen}
+  <div class="legal-backdrop" role="presentation" onclick={handleBackdropClick} transition:fade={{ duration: 170 }}>
+    <dialog
+      open
+      class="legal-panel"
+      aria-modal="true"
+      aria-labelledby="legal-title"
+      transition:scale={{ duration: 190, easing: cubicOut, start: 0.97, opacity: 0 }}
+    >
+      <header class="panel-header legal-header">
+        <img src="/settings.svg" alt="" />
+        <h2 id="legal-title">Legal &amp; Privacy</h2>
+        <button class="panel-close legal-close" type="button" aria-label="Close Legal and Privacy" onclick={() => (legalOpen = false)}><span></span><span></span></button>
+      </header>
+
+      <div class="legal-content">
+        <div class="legal-intro">
+          <p>Docuflex is a public beta of a source-available PDF app. It is offered for personal and other non-commercial use and has no user accounts, subscriptions, advertising, or built-in analytics.</p>
+          <p class="updated">Last updated: July 17, 2026</p>
+        </div>
+
+        <section>
+          <h3>Privacy</h3>
+          <p><strong>Files you open.</strong> Recent documents are stored in your browser using IndexedDB so they can appear on the home screen. Saved signatures are stored in your browser using local storage. They remain on that browser until you delete them in Docuflex, clear the browser’s site data, or the browser removes them.</p>
+          <p><strong>Document processing.</strong> When you use conversion, compression, translation, OCR, protection, flattening, text editing, or export, the document is sent to the Docuflex server serving this app. Processing files are intended to be temporary and are not used for advertising, profiling, or model training.</p>
+          <p><strong>Remote OCR.</strong> A deployment may optionally forward OCR files to a separate OCR service. If enabled, that service receives the uploaded PDF solely to perform OCR. A public-site operator must identify that provider and its retention rules before enabling it.</p>
+          <p><strong>Network records.</strong> The web host or reverse proxy may process ordinary security logs such as IP address, request time, path, browser information, and error details. Retention and hosting-provider details depend on the public deployment and must be supplied by its operator.</p>
+          <p><strong>No sale or advertising sharing.</strong> Docuflex does not sell personal information or share it for cross-context behavioral advertising.</p>
+        </section>
+
+        <section>
+          <h3>Your choices and rights</h3>
+          <p>You can remove recent files from the home screen, remove saved signatures in the signature tool, or clear all locally stored Docuflex data through your browser’s site-data settings.</p>
+          <p>Depending on where you live, you may have rights to request access, correction, deletion, restriction, portability, or objection regarding personal data processed by the public-site operator, and to complain to your local data-protection authority. Requests can be started through the project’s GitHub repository until a dedicated contact address is published.</p>
+        </section>
+
+        <section>
+          <h3>Software license</h3>
+          <p>Docuflex is source-available under the <strong>PolyForm Noncommercial License 1.0.0</strong>. Personal and other non-commercial use, modification, non-commercial forks, and non-commercial redistribution are permitted. Commercial use is not permitted without a separate license from the copyright holder.</p>
+          <p>The complete <code>LICENSE</code> file in the repository controls. This summary does not replace or modify it. Third-party dependencies remain governed by their own licenses.</p>
+        </section>
+
+        <section>
+          <h3>Terms of use</h3>
+          <p>You must have the right to use and process any document you upload. Do not use the service to violate law, privacy, confidentiality, intellectual-property rights, or the rights of others.</p>
+          <p>Docuflex is a development preview and may contain errors, alter document appearance, or produce incomplete results. Keep an original copy and independently verify important output. It is not legal, medical, financial, archival, or security advice and should not be the only system used for critical documents.</p>
+          <p>To the extent allowed by applicable law, the software and service are provided “as is,” without warranties, and the project operator is not liable for losses arising from their use. Rights that cannot legally be excluded remain unaffected.</p>
+        </section>
+
+        <section class="operator-notice">
+          <h3>Operator information</h3>
+          <p>Project: Docuflex · Copyright holder: max06bayer · Contact and notices: the <a href="https://github.com/max06bayer/docuflex" target="_blank" rel="noreferrer">Docuflex GitHub repository</a>.</p>
+          <p>Before a public deployment launches, its operator must add its legal identity, service address, direct email contact, hosting provider, log-retention period, and any remote processors required by the laws that apply to that operator.</p>
+        </section>
+      </div>
+
+      <footer class="legal-footer"><button type="button" onclick={() => (legalOpen = false)}>Done</button></footer>
+    </dialog>
+  </div>
+{/if}
+
+<style>
+  .settings-panel { position: fixed; z-index: 70; top: 70px; right: 14px; display: grid; grid-template-rows: 50px 1fr; width: min(260px, calc(100% - 28px)); height: 185px; border: 1.5px solid transparent; border-radius: 13px; background: #fafafa; box-shadow: 0 12px 32px rgba(0,0,0,.12); color: #000; font-family: "Inter Variable", Inter, sans-serif; }
+  .settings-panel::after { position: absolute; z-index: 100; inset: -1.5px; border: 1.5px solid #c5c5c5; border-radius: 13px; content: ''; pointer-events: none; }
+  .panel-header { display: grid; grid-template-columns: 26px 1fr 28px; align-items: center; height: 50px; padding: 0 12px; border-bottom: 1px solid #cacaca; border-radius: 12px 12px 0 0; background: #eee; }
+  .panel-header > img { width: 24px; height: 24px; }
+  .panel-header h2 { margin: 0 0 0 7px; font-size: 18px; font-weight: 400; line-height: 1.22; letter-spacing: -.25px; }
+  .panel-close { position: relative; z-index: 2; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 9px; background: transparent; cursor: pointer; transition: transform 160ms ease; }
+  .panel-close:active { transform: scale(.94); }
+  .panel-close span { position: absolute; top: 13px; left: 6px; width: 16px; height: 1.5px; border-radius: 99px; background: #929292; transform: rotate(45deg); transition: background-color 160ms ease; }
+  .panel-close span + span { transform: rotate(-45deg); }
+  .panel-close:hover span { background: #000; }
+  .settings-content { display: grid; align-content: start; gap: 0; padding: 7px; border-radius: 0 0 12px 12px; }
+  .settings-row { display: flex; align-items: center; width: 100%; height: 40px; min-height: 40px; padding: 0 12px; border: 1px solid transparent; border-radius: 10px; background: transparent; color: #3f3f3f; font-family: Geist, Inter, sans-serif; font-size: 18px; text-align: left; text-decoration: none; cursor: pointer; transition: color 180ms ease, background-color 180ms ease, border-color 180ms ease, transform 180ms ease; }
+  .settings-row:hover:not(.disabled), .settings-row:focus-visible { border-color: rgba(0,0,0,.07); background: rgba(234,234,234,.62); color: #111; outline: none; transform: translateX(1px); }
+  .settings-row:active { transform: translateX(1px) scale(.99); }
+  .settings-row.disabled { color: #999; cursor: default; opacity: .58; }
+  .legal-backdrop { position: fixed; z-index: 2000; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(235,235,235,.6); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); }
+  .legal-panel { position: relative; display: grid; grid-template-rows: 50px minmax(0,1fr) auto; width: min(850px, calc(100vw - 48px)); height: min(790px, calc(100dvh - 48px)); margin: 0; padding: 0; overflow: hidden; border: 1.5px solid #bdbdbd; border-radius: 13px; background: rgba(250,250,250,.97); box-shadow: 0 28px 85px rgba(0,0,0,.2), 0 5px 20px rgba(0,0,0,.1); color: #111; }
+  .legal-header { min-height: 50px; padding: 0 12px; border-radius: 12px 12px 0 0; }
+  .legal-content { overflow: auto; padding: 25px 30px 34px; overscroll-behavior: contain; }
+  .legal-intro { max-width: 760px; margin: 0 auto 25px; padding: 18px 20px; border: 1px solid #d7d7d7; border-radius: 12px; background: #f1f1f1; }
+  .legal-intro p { margin: 0; font-size: 17px; line-height: 1.45; }
+  .legal-intro .updated { margin-top: 8px; color: #777; font-size: 13px; }
+  .legal-content section { max-width: 760px; margin: 0 auto 27px; }
+  .legal-content h3 { margin: 0 0 10px; font-size: 21px; font-weight: 520; line-height: 1.2; letter-spacing: -.3px; }
+  .legal-content p { margin: 0 0 11px; color: #4e4e4e; font-size: 16px; line-height: 1.52; }
+  .legal-content strong { color: #151515; font-weight: 560; }
+  .legal-content code { padding: 1px 5px; border-radius: 5px; background: #e8e8e8; color: #222; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
+  .legal-content a { color: #0878f9; text-decoration: none; }
+  .legal-content a:hover { text-decoration: underline; }
+  .operator-notice { padding: 18px 20px; border: 1px solid #d4d4d4; border-radius: 12px; background: #f2f2f2; }
+  .operator-notice p:last-child { margin-bottom: 0; }
+  .legal-footer { display: flex; justify-content: flex-end; padding: 14px 22px; border-top: 1px solid #cecece; background: #f4f4f4; }
+  .legal-footer button { min-width: 120px; height: 42px; padding: 0 20px; border: 0; border-radius: 9px; background: #0878f9; color: #fff; font: inherit; font-size: 17px; cursor: pointer; box-shadow: 0 5px 15px rgba(8,120,249,.2); }
+  .legal-footer button:hover { background: #006ff0; }
+  @media (max-width: 680px) {
+    .legal-backdrop { padding: 10px; }
+    .legal-panel { width: calc(100vw - 20px); height: calc(100dvh - 20px); border-radius: 13px; }
+    .legal-content { padding: 18px 18px 28px; }
+    .legal-intro { padding: 15px; }
+  }
+</style>
