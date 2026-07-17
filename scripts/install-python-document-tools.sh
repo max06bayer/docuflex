@@ -22,21 +22,20 @@ else
   exit 1
 fi
 
+cpu_index=()
+torch_requirement=()
 if [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]]; then
-  "${pip_command[@]}" install \
-    --disable-pip-version-check \
-    --no-input \
-    --only-binary=:all: \
-    --index-url 'https://download.pytorch.org/whl/cpu' \
-    --target "$runtime_dir" \
-    'torch==2.13.0'
+  cpu_index=(--extra-index-url 'https://download.pytorch.org/whl/cpu')
+  torch_requirement=('torch==2.13.0')
 fi
 
-PYTHONPATH="$runtime_dir${PYTHONPATH:+:$PYTHONPATH}" "${pip_command[@]}" install \
+"${pip_command[@]}" install \
   --disable-pip-version-check \
   --no-input \
   --only-binary=:all: \
+  "${cpu_index[@]}" \
   --target "$runtime_dir" \
+  "${torch_requirement[@]}" \
   'argostranslate==1.11.0' \
   'PyMuPDF==1.26.7'
 
