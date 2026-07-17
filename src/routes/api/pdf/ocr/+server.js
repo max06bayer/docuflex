@@ -12,7 +12,7 @@ const OCR_TIMEOUT_MS = 10 * 60 * 1000;
 let ocrQueue = Promise.resolve();
 
 /** @type {import('./$types').RequestHandler} */
-export async function POST({ request, fetch }) {
+export async function POST({ request }) {
   const contentLength = Number(request.headers.get('content-length') ?? 0);
   if (contentLength > MAX_REQUEST_BYTES) {
     return Response.json({ error: 'The PDF is too large for OCR.' }, { status: 413 });
@@ -20,27 +20,6 @@ export async function POST({ request, fetch }) {
   const input = await request.arrayBuffer();
   if (!input.byteLength || input.byteLength > MAX_REQUEST_BYTES) {
     return Response.json({ error: input.byteLength ? 'The PDF is too large for OCR.' : 'The PDF is empty.' }, { status: input.byteLength ? 413 : 400 });
-  }
-
-  const remoteUrl = env.OCR_URL?.trim();
-  if (remoteUrl) {
-    try {
-      const response = await fetch(remoteUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/pdf',
-          'X-OCR-Languages': request.headers.get('x-ocr-languages') ?? ''
-        },
-        body: input
-      });
-      return new Response(response.body, {
-        status: response.status,
-        headers: { 'Content-Type': response.headers.get('content-type') ?? 'application/pdf', 'Cache-Control': 'no-store' }
-      });
-    } catch (error) {
-      console.error('Remote OCR service failed:', error);
-      return Response.json({ error: 'The configured OCR service is unavailable.' }, { status: 503 });
-    }
   }
 
   const requestedLanguages = sanitizeLanguages(
@@ -61,7 +40,7 @@ export async function POST({ request, fetch }) {
     const missing = /ENOENT|not found|could not be executed/i.test(detail);
     return Response.json({
       error: missing
-        ? 'OCR is not installed. Install OCRmyPDF, Tesseract, and Poppler or configure OCR_URL.'
+        ? 'OCR is not installed. Install OCRmyPDF, Tesseract, and Poppler.'
         : `OCR failed: ${detail}`
     }, { status: missing ? 503 : 400 });
   }
