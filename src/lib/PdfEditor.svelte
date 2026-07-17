@@ -516,6 +516,8 @@
       const pendingTextEdits = htmlEditor?.capturePendingTextEdits
         ? await htmlEditor.capturePendingTextEdits()
         : null;
+      const appliedImageEdits = Array.isArray(pendingTextEdits)
+        && pendingTextEdits.some((edit) => edit?.kind === 'image');
       const editedBytes = htmlEditor?.applyTextEdits
         ? await htmlEditor.applyTextEdits(sourceBytes, pendingTextEdits)
         : sourceBytes;
@@ -527,6 +529,14 @@
       await htmlEditor?.commitAppliedTextEdits?.(editedBytes);
       htmlViewportMode = false;
       await loadPdf(false);
+      if (appliedImageEdits) {
+        // The editable HTML page started from the pre-transform PDF. Rebuild it
+        // from the newly saved PDF next time instead of reusing stale image
+        // geometry and accidentally applying the same transform twice.
+        htmlEditorStarted = false;
+        htmlTextEditBaseFile = null;
+        htmlEditorReady = false;
+      }
       // Keep the iframe's changes cumulative against the clean baseline. This
       // avoids stacking old font, size, and decoration overlays on each pass.
     } catch (error) {

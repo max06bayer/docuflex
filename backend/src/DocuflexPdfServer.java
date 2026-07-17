@@ -1811,20 +1811,8 @@ public class DocuflexPdfServer {
     }
     PDFStreamParser parser = new PDFStreamParser(page);
     List<Object> tokens = parser.parse();
-    List<ImageMatrixCandidate> candidates = new ArrayList<>();
-    PDResources resources = page.getResources();
     float pageWidth = page.getMediaBox().getWidth();
     float pageHeight = page.getMediaBox().getHeight();
-    Set<COSBase> visitedForms = Collections.newSetFromMap(new IdentityHashMap<>());
-    collectImageMatrixCandidates(
-        resources,
-        tokens,
-        new Matrix(),
-        null,
-        candidates,
-        visitedForms);
-    if (candidates.isEmpty()) return false;
-
     double originalLeft = coordinate(edit.originalRect.get(0), pageWidth);
     double originalBottom = coordinate(edit.originalRect.get(1), pageHeight);
     double originalRight = coordinate(edit.originalRect.get(2), pageWidth);
@@ -1839,33 +1827,27 @@ public class DocuflexPdfServer {
     double scaleY = Math.max(0.01, targetTop - targetBottom) / originalHeight;
 
     if (edit.group) {
-      Set<PDFormXObject> changedForms = Collections.newSetFromMap(new IdentityHashMap<>());
-      boolean pageChanged = false;
-      for (ImageMatrixCandidate candidate : candidates) {
-        double[] global = candidate.globalMatrix.clone();
-        global[0] *= scaleX;
-        global[1] *= scaleY;
-        global[2] *= scaleX;
-        global[3] *= scaleY;
-        global[4] = targetLeft + (global[4] - originalLeft) * scaleX;
-        global[5] = targetBottom + (global[5] - originalBottom) * scaleY;
-        if (!setImageCandidateMatrix(candidate, global)) return false;
-        if (candidate.form != null) changedForms.add(candidate.form);
-        else pageChanged = true;
-      }
-      for (PDFormXObject form : changedForms) {
-        ImageMatrixCandidate owner = candidates.stream()
-            .filter(candidate -> candidate.form == form)
-            .findFirst()
-            .orElse(null);
-        if (owner == null) continue;
-        try (OutputStream out = form.getContentStream().createOutputStream()) {
-          new ContentStreamWriter(out).writeTokens(owner.tokens);
-        }
-      }
-      if (pageChanged) writePageTokens(document, page, tokens);
-      return pageChanged || !changedForms.isEmpty();
+      return rewritePageGraphicsGroup(
+          document,
+          page,
+          tokens,
+          scaleX,
+          scaleY,
+          targetLeft - originalLeft * scaleX,
+          targetBottom - originalBottom * scaleY);
     }
+
+    List<ImageMatrixCandidate> candidates = new ArrayList<>();
+    PDResources resources = page.getResources();
+    Set<COSBase> visitedForms = Collections.newSetFromMap(new IdentityHashMap<>());
+    collectImageMatrixCandidates(
+        resources,
+        tokens,
+        new Matrix(),
+        null,
+        candidates,
+        visitedForms);
+    if (candidates.isEmpty()) return false;
 
     ImageMatrixCandidate best = null;
     double bestScore = Double.POSITIVE_INFINITY;
@@ -1903,6 +1885,72 @@ public class DocuflexPdfServer {
       writePageTokens(document, page, best.tokens);
     }
     return true;
+  }
+
+  private static boolean rewritePageGraphicsGroup(
+      PDDocument document,
+      PDPage page,
+      List<Object> tokens,
+      double scaleX,
+      double scaleY,
+      double translateX,
+      double translateY) throws IOException {
+    if (!Double.isFinite(scaleX)
+        || !Double.isFinite(scaleY)
+        || !Double.isFinite(translateX)
+        || !Double.isFinite(translateY)
+        || scaleX <= 0.0
+        || scaleY <= 0.0) {
+      return false;
+    }
+
+    // pdf2htmlEX exposes a single full-page background box even when that
+    // background is made from a mixture of paths, shadings, forms, and images.
+    // Move every page graphic as one group, while cancelling the transform
+    // inside text objects so searchable/editable PDF text stays in place.
+    List<Object> transformed = new ArrayList<>(tokens.size() + 24);
+    transformed.add(Operator.getOperator("q"));
+    appendMatrix(transformed, scaleX, 0.0, 0.0, scaleY, translateX, translateY);
+
+    boolean inTextObject = false;
+    for (Object token : tokens) {
+      if (token instanceof Operator operator && "BT".equals(operator.getName()) && !inTextObject) {
+        appendMatrix(
+            transformed,
+            1.0 / scaleX,
+            0.0,
+            0.0,
+            1.0 / scaleY,
+            -translateX / scaleX,
+            -translateY / scaleY);
+        inTextObject = true;
+      }
+      transformed.add(token);
+      if (token instanceof Operator operator && "ET".equals(operator.getName()) && inTextObject) {
+        appendMatrix(transformed, scaleX, 0.0, 0.0, scaleY, translateX, translateY);
+        inTextObject = false;
+      }
+    }
+    transformed.add(Operator.getOperator("Q"));
+    writePageTokens(document, page, transformed);
+    return true;
+  }
+
+  private static void appendMatrix(
+      List<Object> tokens,
+      double a,
+      double b,
+      double c,
+      double d,
+      double e,
+      double f) {
+    tokens.add(new COSFloat((float) a));
+    tokens.add(new COSFloat((float) b));
+    tokens.add(new COSFloat((float) c));
+    tokens.add(new COSFloat((float) d));
+    tokens.add(new COSFloat((float) e));
+    tokens.add(new COSFloat((float) f));
+    tokens.add(Operator.getOperator("cm"));
   }
 
   private static boolean setImageCandidateMatrix(

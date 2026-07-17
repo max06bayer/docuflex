@@ -82,7 +82,7 @@ async function createSearchablePdf(input, requestedLanguages) {
         '--rotate-pages',
         '--deskew',
         '--optimize', '0',
-        '--jobs', String(Math.max(1, Math.min(4, Number(env.OCR_JOBS ?? 1) || 1))),
+        '--jobs', String(Math.max(1, Math.min(4, Number(env.OCR_JOBS ?? 2) || 2))),
         '--language', languages,
         '--tesseract-timeout', '180',
         inputPath,
