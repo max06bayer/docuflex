@@ -3,6 +3,7 @@
   import { cubicOut } from 'svelte/easing';
   import { scale } from 'svelte/transition';
   import PdfEditor from '$lib/PdfEditor.svelte';
+  import QuickToolPagesPanel from '$lib/QuickToolPagesPanel.svelte';
   // @ts-ignore Fontsource exposes CSS through package exports without JS type declarations.
   import '@fontsource-variable/geist/wght.css';
   // @ts-ignore Fontsource exposes CSS through package exports without JS type declarations.
@@ -75,6 +76,16 @@
   /** @type {{ downloadPdf: () => Promise<void>; openSearchPanel: () => void; undo: () => Promise<void>; redo: () => Promise<void> } | undefined} */
   let pdfEditor;
   let isDownloading = false;
+  /** @type {'merge' | 'split' | null} */
+  let activePagesQuickTool = null;
+
+  /** @param {{ name: string }} tool */
+  function openQuickTool(tool) {
+    const toolName = tool.name.toLowerCase();
+    if (toolName === 'merge' || toolName === 'split') {
+      activePagesQuickTool = /** @type {'merge' | 'split'} */ (toolName);
+    }
+  }
 
   function openRecentDatabase() {
     if (recentDatabasePromise) return recentDatabasePromise;
@@ -371,6 +382,7 @@
     if (event.key === 'Escape') {
       sortExpanded = false;
       recentContextMenu = null;
+      activePagesQuickTool = null;
       return;
     }
     const target = event.target;
@@ -500,7 +512,7 @@
   <aside class="sidebar" aria-label="Document tools">
     <div class="quick-tools">
       {#each quickTools as tool}
-        <button class="quick-tool" class:wide-icon={tool.wide} class:keyboard-active={activeShortcut === tool.shortcut} data-tool={tool.name.toLowerCase()} data-shortcut={tool.shortcut.toLowerCase()} aria-label={tool.name} title={tool.name}>
+        <button class="quick-tool" class:wide-icon={tool.wide} class:keyboard-active={activeShortcut === tool.shortcut} data-tool={tool.name.toLowerCase()} data-shortcut={tool.shortcut.toLowerCase()} aria-label={tool.name} title={tool.name} onclick={() => openQuickTool(tool)}>
           <span class="quick-tool-icon" aria-hidden="true">{@html tool.icon}</span>
           <span class="quick-tool-name">{tool.name}</span>
           <kbd>{tool.shortcut}</kbd>
@@ -612,6 +624,12 @@
           <kbd>D</kbd>
         </button>
       </div>
+    {/if}
+
+    {#if activePagesQuickTool}
+      {#key activePagesQuickTool}
+        <QuickToolPagesPanel tool={activePagesQuickTool} onClose={() => (activePagesQuickTool = null)} />
+      {/key}
     {/if}
   </section>
   {:else}
@@ -1136,6 +1154,7 @@
   }
 
   .workspace {
+    position: relative;
     grid-column: 2;
     grid-row: 2;
     display: grid;
