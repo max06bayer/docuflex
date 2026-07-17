@@ -752,7 +752,10 @@
   async function recognizeDocumentText() {
     editorTransition = 'Recognizing Text in Document';
     try {
-      const sourceBytes = await workingFile.arrayBuffer();
+      // Files restored from homepage recents can be backed by a temporary
+      // WebKit blob resource that is valid for the initial render but gone by
+      // the time OCR starts. Use the durable snapshot retained by loadPdf().
+      const sourceBytes = workingPdfBytes?.slice(0) ?? await workingFile.arrayBuffer();
       const languages = navigator.language.toLowerCase().startsWith('de') ? 'deu+eng' : 'eng';
       const response = await fetch('/api/pdf/ocr', {
         method: 'POST',
