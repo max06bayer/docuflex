@@ -1,16 +1,14 @@
 import { env } from '$env/dynamic/private';
-
-const MAX_REQUEST_BYTES = 150 * 1024 * 1024;
+import { MAX_PDF_JSON_REQUEST_BYTES, contentLengthExceeds } from '$lib/server/request-security.js';
 
 /** @type {import('./$types').RequestHandler} */
 export async function POST({ request, fetch }) {
-  const contentLength = Number(request.headers.get('content-length') ?? 0);
-  if (contentLength > MAX_REQUEST_BYTES) {
+  if (contentLengthExceeds(request, MAX_PDF_JSON_REQUEST_BYTES)) {
     return Response.json({ error: 'The page operation request is too large.' }, { status: 413 });
   }
 
   const body = await request.arrayBuffer();
-  if (body.byteLength > MAX_REQUEST_BYTES) {
+  if (body.byteLength > MAX_PDF_JSON_REQUEST_BYTES) {
     return Response.json({ error: 'The page operation request is too large.' }, { status: 413 });
   }
 
@@ -19,7 +17,8 @@ export async function POST({ request, fetch }) {
     const response = await fetch(`${backendUrl}/pages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body
+      body,
+      signal: AbortSignal.timeout(5 * 60_000)
     });
     return new Response(response.body, {
       status: response.status,

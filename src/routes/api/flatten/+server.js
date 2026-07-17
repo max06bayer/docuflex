@@ -1,25 +1,32 @@
 import { env } from '$env/dynamic/private';
 import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
-import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
+import {
+  MAX_DOCUMENT_BYTES,
+  MAX_GENERATED_BYTES,
+  contentLengthExceeds,
+  isPdf,
+  privateFailure,
+  safeFormData
+} from '$lib/server/request-security.js';
+import { boundedCommand } from '$lib/server/process-security.js';
 
-const MAX_REQUEST_BYTES = 150 * 1024 * 1024;
-const MAX_OUTPUT_BYTES = 300 * 1024 * 1024;
 const FLATTEN_TIMEOUT_MS = 10 * 60 * 1000;
 /** @type {Promise<string> | undefined} */
 let runtimePromise;
 
 /** @type {import('./$types').RequestHandler} */
 export async function POST({ request }) {
-  const contentLength = Number(request.headers.get('content-length') ?? 0);
-  if (contentLength > MAX_REQUEST_BYTES) return Response.json({ error: 'The uploaded PDF is too large.' }, { status: 413 });
-  const form = await request.formData();
+  if (contentLengthExceeds(request, MAX_DOCUMENT_BYTES + 1024 * 1024)) return Response.json({ error: 'The uploaded PDF is too large.' }, { status: 413 });
+  const form = await safeFormData(request);
+  if (!form) return Response.json({ error: 'The upload request is not valid multipart form data.' }, { status: 400 });
   const file = form.get('file');
   const method = String(form.get('method') ?? 'standard').toLowerCase();
   if (!(file instanceof File) || !file.size) return Response.json({ error: 'Choose a PDF to flatten.' }, { status: 400 });
-  if (file.size > MAX_REQUEST_BYTES) return Response.json({ error: 'The uploaded PDF is too large.' }, { status: 413 });
+  if (file.size > MAX_DOCUMENT_BYTES) return Response.json({ error: 'The uploaded PDF is too large.' }, { status: 413 });
   if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) return Response.json({ error: 'Only PDF files can be flattened.' }, { status: 400 });
   if (method !== 'standard' && method !== 'rasterize') return Response.json({ error: 'The selected flatten method is not supported.' }, { status: 400 });
 
@@ -27,7 +34,9 @@ export async function POST({ request }) {
   const inputPath = join(directory, 'document.pdf');
   const outputPath = join(directory, method === 'rasterize' ? 'document-rasterized.pdf' : 'document-flattened.pdf');
   try {
-    await writeFile(inputPath, Buffer.from(await file.arrayBuffer()));
+    const input = Buffer.from(await file.arrayBuffer());
+    if (!isPdf(input)) return Response.json({ error: 'The uploaded file is not a valid PDF.' }, { status: 400 });
+    await writeFile(inputPath, input);
     const python = await pythonBinary();
     const runtime = await ensurePdfRuntime(python);
     await runProcess(python, [
@@ -37,7 +46,7 @@ export async function POST({ request }) {
       PYTHONPATH: [runtime, process.env.PYTHONPATH].filter(Boolean).join(delimiter)
     });
     const outputStats = await stat(outputPath);
-    if (!outputStats.size || outputStats.size > MAX_OUTPUT_BYTES) throw new Error('The flattened PDF is too large.');
+    if (!outputStats.size || outputStats.size > MAX_GENERATED_BYTES) throw new Error('The flattened PDF is too large.');
     const output = await readFile(outputPath);
     return new Response(new Uint8Array(output), {
       headers: {
@@ -47,9 +56,7 @@ export async function POST({ request }) {
       }
     });
   } catch (error) {
-    console.error('PDF flattening failed:', error);
-    const detail = error instanceof Error ? error.message : String(error);
-    return Response.json({ error: detail }, { status: 503 });
+    return privateFailure(error, 'PDF flattening', 'Could not flatten this PDF.');
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -61,22 +68,17 @@ async function ensurePdfRuntime(python) {
   runtimePromise = (async () => {
     const configured = env.PDF_TOOLS_PYTHONPATH?.trim();
     if (configured) return configured;
+    const bundledRuntime = join(process.cwd(), '.document-python');
+    try {
+      await access(join(bundledRuntime, 'fitz', '__init__.py'), constants.R_OK);
+      return bundledRuntime;
+    } catch {}
     const translationRuntime = join(homedir(), '.cache', 'docuflex', 'translate-python');
     try {
       await access(join(translationRuntime, 'fitz', '__init__.py'), constants.R_OK);
       return translationRuntime;
     } catch {}
-    const runtime = join(homedir(), '.cache', 'docuflex', 'pdf-tools-python');
-    try {
-      await access(join(runtime, 'fitz', '__init__.py'), constants.R_OK);
-      return runtime;
-    } catch {}
-    await mkdir(runtime, { recursive: true });
-    await runProcess(python, [
-      '-m', 'pip', 'install', '--disable-pip-version-check', '--no-input', '--upgrade',
-      '--target', runtime, 'PyMuPDF>=1.26,<2'
-    ], process.env);
-    return runtime;
+    throw new Error('The bundled PDF tools runtime is not installed.');
   })().catch((error) => {
     runtimePromise = undefined;
     throw error;
@@ -99,7 +101,8 @@ async function pythonBinary() {
 /** @param {string} binary @param {string[]} args @param {NodeJS.ProcessEnv} processEnv */
 function runProcess(binary, args, processEnv) {
   return new Promise((resolve, reject) => {
-    const child = spawn(binary, args, { env: processEnv, stdio: ['ignore', 'ignore', 'pipe'] });
+    const command = boundedCommand(binary, args, 'native');
+    const child = spawn(command.binary, command.args, { env: processEnv, stdio: ['ignore', 'ignore', 'pipe'] });
     let errorLog = '';
     let settled = false;
     const finish = (/** @type {() => void} */ callback) => {

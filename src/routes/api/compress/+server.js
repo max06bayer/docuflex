@@ -4,8 +4,15 @@ import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import {
+  MAX_DOCUMENT_BYTES,
+  contentLengthExceeds,
+  isPdf,
+  privateFailure,
+  safeFormData
+} from '$lib/server/request-security.js';
+import { boundedCommand } from '$lib/server/process-security.js';
 
-const MAX_REQUEST_BYTES = 150 * 1024 * 1024;
 const COMPRESSION_TIMEOUT_MS = 180_000;
 /** @type {Record<string, { dpi: number; quality: number }>} */
 const LEVELS = {
@@ -16,17 +23,18 @@ const LEVELS = {
 
 /** @type {import('./$types').RequestHandler} */
 export async function POST({ request }) {
-  const contentLength = Number(request.headers.get('content-length') ?? 0);
-  if (contentLength > MAX_REQUEST_BYTES) return Response.json({ error: 'The uploaded PDF is too large.' }, { status: 413 });
-  const form = await request.formData();
+  if (contentLengthExceeds(request, MAX_DOCUMENT_BYTES + 1024 * 1024)) return Response.json({ error: 'The uploaded PDF is too large.' }, { status: 413 });
+  const form = await safeFormData(request);
+  if (!form) return Response.json({ error: 'The upload request is not valid multipart form data.' }, { status: 400 });
   const file = form.get('file');
   const levelName = String(form.get('compression') ?? 'large').toLowerCase();
   const level = LEVELS[levelName];
   if (!(file instanceof File) || !file.size) return Response.json({ error: 'Choose a PDF to compress.' }, { status: 400 });
-  if (file.size > MAX_REQUEST_BYTES) return Response.json({ error: 'The uploaded PDF is too large.' }, { status: 413 });
+  if (file.size > MAX_DOCUMENT_BYTES) return Response.json({ error: 'The uploaded PDF is too large.' }, { status: 413 });
   if (!level) return Response.json({ error: 'The selected compression level is not supported.' }, { status: 400 });
 
   const bytes = Buffer.from(await file.arrayBuffer());
+  if (!isPdf(bytes)) return Response.json({ error: 'The uploaded file is not a valid PDF.' }, { status: 400 });
   const directory = await mkdtemp(join(tmpdir(), 'docuflex-compress-'));
   const inputPath = join(directory, 'document.pdf');
   const outputPath = join(directory, 'document-compressed.pdf');
@@ -45,8 +53,7 @@ export async function POST({ request }) {
       headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': 'attachment; filename="document-compressed.pdf"', 'Cache-Control': 'no-store' }
     });
   } catch (error) {
-    console.error('PDF compression failed:', error);
-    return Response.json({ error: error instanceof Error ? error.message : 'Could not compress the PDF.' }, { status: 503 });
+    return privateFailure(error, 'PDF compression', 'Could not compress this PDF.');
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -81,7 +88,8 @@ async function firstExecutable(candidates, fallback) {
 /** @param {string} binary @param {string[]} args */
 function runProcess(binary, args) {
   return new Promise((resolve, reject) => {
-    const child = spawn(binary, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    const command = boundedCommand(binary, args, 'native');
+    const child = spawn(command.binary, command.args, { stdio: ['ignore', 'ignore', 'pipe'] });
     let errorLog = '';
     const timeout = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('PDF compression timed out.')); }, COMPRESSION_TIMEOUT_MS);
     child.stderr.setEncoding('utf8');

@@ -15,6 +15,7 @@ tmp/
 *.log
 .pdf2htmlex/
 .ocr/
+.document-python/
 
 # Environment files
 .env

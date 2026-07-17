@@ -1,11 +1,21 @@
 import { env } from '$env/dynamic/private';
 import { spawn } from 'node:child_process';
-import { access, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { extname, join } from 'node:path';
+import {
+  MAX_DOCUMENT_BYTES,
+  MAX_GENERATED_BYTES,
+  contentLengthExceeds,
+  isOleCompound,
+  isPdf,
+  isZip,
+  privateFailure,
+  safeFormData
+} from '$lib/server/request-security.js';
+import { boundedCommand } from '$lib/server/process-security.js';
 
-const MAX_REQUEST_BYTES = 150 * 1024 * 1024;
 const CONVERSION_TIMEOUT_MS = 180_000;
 const FORMATS = new Set(['docx', 'doc', 'xlsx', 'pdf', 'pptx']);
 /** @type {Record<string, string>} */
@@ -19,20 +29,26 @@ const CONTENT_TYPES = {
 
 /** @type {import('./$types').RequestHandler} */
 export async function POST({ request }) {
-  const contentLength = Number(request.headers.get('content-length') ?? 0);
-  if (contentLength > MAX_REQUEST_BYTES) return Response.json({ error: 'The uploaded file is too large.' }, { status: 413 });
+  if (contentLengthExceeds(request, MAX_DOCUMENT_BYTES + 1024 * 1024)) return Response.json({ error: 'The uploaded file is too large.' }, { status: 413 });
 
-  const form = await request.formData();
+  const form = await safeFormData(request);
+  if (!form) return Response.json({ error: 'The upload request is not valid multipart form data.' }, { status: 400 });
   const file = form.get('file');
   const outputFormat = String(form.get('outputFormat') ?? '').toLowerCase();
   if (!(file instanceof File) || !file.size) return Response.json({ error: 'Choose a file to convert.' }, { status: 400 });
-  if (file.size > MAX_REQUEST_BYTES) return Response.json({ error: 'The uploaded file is too large.' }, { status: 413 });
+  if (file.size > MAX_DOCUMENT_BYTES) return Response.json({ error: 'The uploaded file is too large.' }, { status: 413 });
   if (!FORMATS.has(outputFormat)) return Response.json({ error: 'The requested output format is not supported.' }, { status: 400 });
 
   const inputFormat = extname(file.name).slice(1).toLowerCase();
   if (!FORMATS.has(inputFormat)) return Response.json({ error: 'The input format is not supported.' }, { status: 400 });
   const baseName = safeBaseName(file.name);
   const bytes = Buffer.from(await file.arrayBuffer());
+  const validInput = inputFormat === 'pdf'
+    ? isPdf(bytes)
+    : inputFormat === 'doc'
+      ? isOleCompound(bytes) || isZip(bytes)
+      : isZip(bytes);
+  if (!validInput) return Response.json({ error: `The uploaded file is not a valid ${inputFormat.toUpperCase()} document.` }, { status: 400 });
   if (inputFormat === outputFormat) return downloadResponse(bytes, `${baseName}.${outputFormat}`, outputFormat);
 
   const directory = await mkdtemp(join(tmpdir(), 'docuflex-convert-'));
@@ -49,12 +65,17 @@ export async function POST({ request }) {
       }
     }
     outputPath ??= await convertViaPageImages({ directory, inputPath, inputFormat, outputFormat, baseName });
+    const outputStats = await stat(outputPath);
+    if (!outputStats.size || outputStats.size > MAX_GENERATED_BYTES) throw new Error('Generated document exceeded the safe output limit.');
     const output = await readFile(outputPath);
     return downloadResponse(output, `${baseName}.${outputFormat}`, outputFormat);
   } catch (error) {
-    console.error('Document conversion failed:', error);
     const detail = error instanceof Error ? error.message : String(error);
-    return Response.json({ error: detail.includes('ENOENT') ? 'The document conversion service is not installed.' : detail }, { status: 503 });
+    return privateFailure(
+      error,
+      'Document conversion',
+      detail.includes('ENOENT') ? 'The document conversion service is not installed.' : 'Could not convert this document.'
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -178,7 +199,8 @@ function downloadResponse(bytes, name, format) {
 /** @param {string} binary @param {string[]} args */
 function runConverter(binary, args) {
   return new Promise((resolve, reject) => {
-    const child = spawn(binary, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    const command = boundedCommand(binary, args, 'native');
+    const child = spawn(command.binary, command.args, { stdio: ['ignore', 'ignore', 'pipe'] });
     let errorLog = '';
     const timeout = setTimeout(() => {
       child.kill('SIGKILL');

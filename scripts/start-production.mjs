@@ -11,13 +11,20 @@ const javaEnvironment = {
 };
 const frontendEnvironment = {
   ...process.env,
-  BODY_SIZE_LIMIT: process.env.BODY_SIZE_LIMIT ?? String(150 * 1024 * 1024),
+  PDF_BACKEND_URL:
+    process.env.PDF_BACKEND_URL ??
+    `http://${javaEnvironment.PDF_BACKEND_HOST}:${javaEnvironment.PDF_BACKEND_PORT}`,
+  BODY_SIZE_LIMIT: process.env.BODY_SIZE_LIMIT ?? String(230 * 1024 * 1024),
+  ADDRESS_HEADER: process.env.ADDRESS_HEADER ?? 'x-forwarded-for',
+  XFF_DEPTH: process.env.XFF_DEPTH ?? '1',
+  PROTOCOL_HEADER: process.env.PROTOCOL_HEADER ?? 'x-forwarded-proto',
+  HOST_HEADER: process.env.HOST_HEADER ?? 'x-forwarded-host',
   TESSDATA_PREFIX: process.env.TESSDATA_PREFIX ?? join(process.cwd(), '.ocr', 'tessdata')
 };
 
 const backend = spawn(
   'java',
-  ['-cp', 'backend/out:backend/lib/pdfbox-app-3.0.3.jar', 'DocuflexPdfServer'],
+  ['-cp', 'backend/out:backend/lib/pdfbox-app-3.0.8.jar', 'DocuflexPdfServer'],
   { stdio: 'inherit', env: javaEnvironment }
 );
 const frontend = spawn(process.execPath, ['build'], { stdio: 'inherit', env: frontendEnvironment });

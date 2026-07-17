@@ -25,6 +25,10 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import org.apache.pdfbox.contentstream.operator.Operator;
 import org.apache.pdfbox.cos.COSArray;
 import org.apache.pdfbox.cos.COSBase;
@@ -76,7 +80,11 @@ import org.apache.pdfbox.Loader;
 public class DocuflexPdfServer {
   private static final int PORT = environmentInt("PDF_BACKEND_PORT", 8080);
   private static final String HOST = environmentString("PDF_BACKEND_HOST", "127.0.0.1");
-  private static final int MAX_REQUEST_BYTES = 150 * 1024 * 1024;
+  private static final int MAX_REQUEST_BYTES = 225 * 1024 * 1024;
+  private static final int MAX_PDF_BYTES = 150 * 1024 * 1024;
+  private static final int MAX_RESPONSE_BYTES = 300 * 1024 * 1024;
+  private static final int MAX_PDF_PAGES = 2000;
+  private static final int MAX_JSON_DEPTH = 64;
   private static final float EDITOR_PAGE_SCALE = 1.42f;
 
   public static void main(String[] args) throws IOException {
@@ -88,6 +96,13 @@ public class DocuflexPdfServer {
     server.createContext("/uncrop", DocuflexPdfServer::handleUncrop);
     server.createContext("/pages", DocuflexPdfServer::handlePages);
     server.createContext("/export", DocuflexPdfServer::handleExport);
+    server.setExecutor(new ThreadPoolExecutor(
+        2,
+        4,
+        60,
+        TimeUnit.SECONDS,
+        new ArrayBlockingQueue<>(8),
+        new ThreadPoolExecutor.AbortPolicy()));
     server.start();
     System.out.println("Docuflex PDFBox server listening on http://" + HOST + ":" + PORT);
   }
@@ -96,6 +111,10 @@ public class DocuflexPdfServer {
     addCors(exchange);
     if ("OPTIONS".equals(exchange.getRequestMethod())) {
       sendNoContent(exchange);
+      return;
+    }
+    if (!"GET".equals(exchange.getRequestMethod())) {
+      sendJson(exchange, 405, "{\"error\":\"GET required\"}");
       return;
     }
     sendJson(exchange, 200, "{\"ok\":true}");
@@ -113,14 +132,14 @@ public class DocuflexPdfServer {
     }
 
     try {
-      String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+      String body = readRequestBody(exchange);
       Map<String, Object> payload = asObject(new JsonParser(body).parse());
       String pdfBase64 = asString(payload.get("pdfBase64"));
       List<Object> rawEdits = asArray(payload.get("edits"));
       List<TextEdit> edits = parseEdits(rawEdits);
       List<ImageEdit> imageEdits = parseImageEdits(rawEdits);
 
-      EditResult result = applyEdits(Base64.getDecoder().decode(pdfBase64), edits, imageEdits);
+      EditResult result = applyEdits(decodePdf(pdfBase64), edits, imageEdits);
       String response = "{"
           + "\"pdfBase64\":\"" + escapeJson(Base64.getEncoder().encodeToString(result.pdfBytes)) + "\","
           + "\"applied\":" + result.applied + ","
@@ -128,8 +147,7 @@ public class DocuflexPdfServer {
           + "}";
       sendJson(exchange, 200, response);
     } catch (Exception error) {
-      error.printStackTrace();
-      sendJson(exchange, 400, "{\"error\":\"" + escapeJson(error.getMessage()) + "\"}");
+      sendFailure(exchange, error, "Could not apply the requested PDF edits.");
     }
   }
 
@@ -145,14 +163,13 @@ public class DocuflexPdfServer {
     }
 
     try {
-      String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+      String body = readRequestBody(exchange);
       Map<String, Object> payload = asObject(new JsonParser(body).parse());
       String pdfBase64 = asString(payload.get("pdfBase64"));
-      FontExtractResult result = extractFonts(Base64.getDecoder().decode(pdfBase64));
+      FontExtractResult result = extractFonts(decodePdf(pdfBase64));
       sendJson(exchange, 200, result.toJson());
     } catch (Exception error) {
-      error.printStackTrace();
-      sendJson(exchange, 400, "{\"error\":\"" + escapeJson(error.getMessage()) + "\"}");
+      sendFailure(exchange, error, "Could not extract fonts from this PDF.");
     }
   }
 
@@ -170,7 +187,7 @@ public class DocuflexPdfServer {
     try {
       String body = readRequestBody(exchange);
       Map<String, Object> payload = asObject(new JsonParser(body).parse());
-      byte[] pdfBytes = Base64.getDecoder().decode(asString(payload.get("pdfBase64")));
+      byte[] pdfBytes = decodePdf(asString(payload.get("pdfBase64")));
       List<AnnotationStroke> annotations = parseAnnotations(asArray(payload.get("annotations")));
       String sourcePassword = optionalString(payload.get("sourcePassword"));
       String encryptionPassword = optionalString(payload.get("encryptionPassword"));
@@ -182,8 +199,7 @@ public class DocuflexPdfServer {
           : applyAnnotations(pdfBytes, annotations, sourcePassword, encryptionPassword);
       sendPdf(exchange, exported);
     } catch (Exception error) {
-      error.printStackTrace();
-      sendJson(exchange, 400, "{\"error\":\"" + escapeJson(error.getMessage()) + "\"}");
+      sendFailure(exchange, error, "Could not export this PDF.");
     }
   }
 
@@ -201,9 +217,9 @@ public class DocuflexPdfServer {
     try {
       String body = readRequestBody(exchange);
       Map<String, Object> payload = asObject(new JsonParser(body).parse());
-      byte[] pdfBytes = Base64.getDecoder().decode(asString(payload.get("pdfBase64")));
+      byte[] pdfBytes = decodePdf(asString(payload.get("pdfBase64")));
       String password = asString(payload.get("password"));
-      try (PDDocument document = Loader.loadPDF(pdfBytes, password)) {
+      try (PDDocument document = loadPdf(pdfBytes, password)) {
         document.setAllSecurityToBeRemoved(true);
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         document.save(output);
@@ -228,12 +244,12 @@ public class DocuflexPdfServer {
     try {
       String body = readRequestBody(exchange);
       Map<String, Object> payload = asObject(new JsonParser(body).parse());
-      byte[] pdfBytes = Base64.getDecoder().decode(asString(payload.get("pdfBase64")));
+      byte[] pdfBytes = decodePdf(asString(payload.get("pdfBase64")));
       ByteArrayOutputStream output = new ByteArrayOutputStream();
       StringBuilder pagesJson = new StringBuilder("[");
       boolean changed = false;
 
-      try (PDDocument document = Loader.loadPDF(pdfBytes)) {
+      try (PDDocument document = loadPdf(pdfBytes)) {
         for (int pageIndex = 0; pageIndex < document.getNumberOfPages(); pageIndex += 1) {
           if (pageIndex > 0) pagesJson.append(',');
           PDPage page = document.getPage(pageIndex);
@@ -277,8 +293,7 @@ public class DocuflexPdfServer {
           + "}";
       sendJson(exchange, 200, response);
     } catch (Exception error) {
-      error.printStackTrace();
-      sendJson(exchange, 400, "{\"error\":\"" + escapeJson(error.getMessage()) + "\"}");
+      sendFailure(exchange, error, "Could not inspect the PDF page boxes.");
     }
   }
 
@@ -296,14 +311,14 @@ public class DocuflexPdfServer {
     try {
       String body = readRequestBody(exchange);
       Map<String, Object> payload = asObject(new JsonParser(body).parse());
-      byte[] pdfBytes = Base64.getDecoder().decode(asString(payload.get("pdfBase64")));
+      byte[] pdfBytes = decodePdf(asString(payload.get("pdfBase64")));
       String operation = asString(payload.get("operation"));
       byte[] result;
 
       if ("rotate".equals(operation)) {
         List<Integer> pages = integerList(asArray(payload.get("pages")));
         int rotation = ((int) asDouble(payload.get("rotation")) % 360 + 360) % 360;
-        try (PDDocument document = Loader.loadPDF(pdfBytes)) {
+        try (PDDocument document = loadPdf(pdfBytes)) {
           validatePageIndexes(pages, document.getNumberOfPages());
           for (int pageIndex : pages) {
             PDPage page = document.getPage(pageIndex);
@@ -314,10 +329,10 @@ public class DocuflexPdfServer {
           result = output.toByteArray();
         }
       } else if ("insert".equals(operation)) {
-        byte[] insertedBytes = Base64.getDecoder().decode(asString(payload.get("insertPdfBase64")));
+        byte[] insertedBytes = decodePdf(asString(payload.get("insertPdfBase64")));
         int insertAt = (int) asDouble(payload.get("insertAt"));
-        try (PDDocument source = Loader.loadPDF(pdfBytes);
-             PDDocument inserted = Loader.loadPDF(insertedBytes);
+        try (PDDocument source = loadPdf(pdfBytes);
+             PDDocument inserted = loadPdf(insertedBytes);
              PDDocument outputDocument = new PDDocument()) {
           if (insertAt < 0 || insertAt > source.getNumberOfPages()) {
             throw new IllegalArgumentException("Invalid page insertion position.");
@@ -336,7 +351,7 @@ public class DocuflexPdfServer {
         List<Integer> order = "reorder".equals(operation)
             ? integerList(asArray(payload.get("order")))
             : integerList(asArray(payload.get("pages")));
-        try (PDDocument source = Loader.loadPDF(pdfBytes);
+        try (PDDocument source = loadPdf(pdfBytes);
              PDDocument outputDocument = new PDDocument()) {
           validatePageIndexes(order, source.getNumberOfPages());
           if (order.isEmpty()) throw new IllegalArgumentException("At least one page is required.");
@@ -351,8 +366,7 @@ public class DocuflexPdfServer {
 
       sendPdf(exchange, result);
     } catch (Exception error) {
-      error.printStackTrace();
-      sendJson(exchange, 400, "{\"error\":\"" + escapeJson(error.getMessage()) + "\"}");
+      sendFailure(exchange, error, "Could not apply the requested page operation.");
     }
   }
 
@@ -388,7 +402,7 @@ public class DocuflexPdfServer {
       List<AnnotationStroke> annotations,
       String sourcePassword,
       String encryptionPassword) throws IOException {
-    try (PDDocument document = Loader.loadPDF(pdfBytes, sourcePassword)) {
+    try (PDDocument document = loadPdf(pdfBytes, sourcePassword)) {
       document.setAllSecurityToBeRemoved(true);
       List<Integer> redactedPages = new ArrayList<>();
       List<AnnotationStroke> formFields = new ArrayList<>();
@@ -1606,7 +1620,7 @@ public class DocuflexPdfServer {
     Set<COSBase> seenFonts = Collections.newSetFromMap(new IdentityHashMap<>());
     Set<COSBase> seenForms = Collections.newSetFromMap(new IdentityHashMap<>());
 
-    try (PDDocument document = Loader.loadPDF(pdfBytes)) {
+    try (PDDocument document = loadPdf(pdfBytes)) {
       for (int pageIndex = 0; pageIndex < document.getNumberOfPages(); pageIndex += 1) {
         collectEmbeddedFonts(document.getPage(pageIndex).getResources(), result, seenFonts, seenForms);
       }
@@ -1694,7 +1708,7 @@ public class DocuflexPdfServer {
       List<TextEdit> edits,
       List<ImageEdit> imageEdits) throws IOException {
     EditResult result = new EditResult();
-    try (PDDocument document = Loader.loadPDF(pdfBytes)) {
+    try (PDDocument document = loadPdf(pdfBytes)) {
       document.setAllSecurityToBeRemoved(true);
       for (TextEdit edit : edits) {
         if (edit.newText.equals(edit.oldText) && !edit.moved && !edit.overlay) {
@@ -4203,6 +4217,61 @@ public class DocuflexPdfServer {
     return value instanceof Boolean bool && bool;
   }
 
+  private static byte[] decodePdf(String encoded) {
+    if (encoded == null || encoded.isEmpty() || encoded.length() > ((MAX_PDF_BYTES + 2L) / 3L) * 4L + 4L) {
+      throw new IllegalArgumentException("The PDF payload is empty or too large.");
+    }
+    byte[] bytes;
+    try {
+      bytes = Base64.getDecoder().decode(encoded);
+    } catch (IllegalArgumentException error) {
+      throw new IllegalArgumentException("The PDF payload is not valid base64 data.");
+    }
+    if (bytes.length == 0 || bytes.length > MAX_PDF_BYTES || !hasPdfHeader(bytes)) {
+      throw new IllegalArgumentException("The PDF payload is not a valid PDF.");
+    }
+    return bytes;
+  }
+
+  private static boolean hasPdfHeader(byte[] bytes) {
+    int limit = Math.min(bytes.length - 4, 1024);
+    for (int index = 0; index < limit; index += 1) {
+      if (bytes[index] == '%' && bytes[index + 1] == 'P' && bytes[index + 2] == 'D'
+          && bytes[index + 3] == 'F' && bytes[index + 4] == '-') return true;
+    }
+    return false;
+  }
+
+  private static PDDocument loadPdf(byte[] bytes) throws IOException {
+    return validateLoadedPdf(Loader.loadPDF(bytes));
+  }
+
+  private static PDDocument loadPdf(byte[] bytes, String password) throws IOException {
+    return validateLoadedPdf(Loader.loadPDF(bytes, password));
+  }
+
+  private static PDDocument validateLoadedPdf(PDDocument document) throws IOException {
+    try {
+      int pages = document.getNumberOfPages();
+      if (pages <= 0 || pages > MAX_PDF_PAGES) {
+        throw new IOException("The PDF page count is outside the supported range.");
+      }
+      for (PDPage page : document.getPages()) {
+        PDRectangle box = page.getMediaBox();
+        if (box == null || !Float.isFinite(box.getWidth()) || !Float.isFinite(box.getHeight())
+            || box.getWidth() <= 0 || box.getHeight() <= 0
+            || box.getWidth() > 50_000 || box.getHeight() > 50_000) {
+          throw new IOException("The PDF contains an invalid page size.");
+        }
+      }
+      return document;
+    } catch (Exception error) {
+      document.close();
+      if (error instanceof IOException ioError) throw ioError;
+      throw new IOException("The PDF structure is invalid.", error);
+    }
+  }
+
   private static String optionalString(Object value) {
     return value instanceof String string ? string : "";
   }
@@ -4232,10 +4301,23 @@ public class DocuflexPdfServer {
 
   private static void sendJson(HttpExchange exchange, int status, String body) throws IOException {
     exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
+    exchange.getResponseHeaders().set("Cache-Control", "no-store");
+    exchange.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
     send(exchange, status, body);
   }
 
+  private static void sendFailure(HttpExchange exchange, Exception error, String publicMessage) throws IOException {
+    String reference = UUID.randomUUID().toString();
+    System.err.println("[PDF request " + reference + "] " + error.getClass().getSimpleName() + ": " + error.getMessage());
+    error.printStackTrace(System.err);
+    sendJson(exchange, 400, "{\"error\":\"" + escapeJson(publicMessage)
+        + "\",\"reference\":\"" + reference + "\"}");
+  }
+
   private static void sendPdf(HttpExchange exchange, byte[] bytes) throws IOException {
+    if (bytes.length == 0 || bytes.length > MAX_RESPONSE_BYTES) {
+      throw new IOException("Generated PDF exceeded the safe response limit.");
+    }
     exchange.getResponseHeaders().set("Content-Type", "application/pdf");
     exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=docuflex-export.pdf");
     exchange.getResponseHeaders().set("Cache-Control", "no-store");
@@ -4247,6 +4329,9 @@ public class DocuflexPdfServer {
 
   private static void send(HttpExchange exchange, int status, String body) throws IOException {
     byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+    if (bytes.length > MAX_RESPONSE_BYTES) {
+      throw new IOException("Generated response exceeded the safe response limit.");
+    }
     exchange.sendResponseHeaders(status, bytes.length);
     try (OutputStream response = exchange.getResponseBody()) {
       response.write(bytes);
@@ -4538,7 +4623,7 @@ public class DocuflexPdfServer {
     }
 
     Object parse() {
-      Object value = parseValue();
+      Object value = parseValue(0);
       skipWhitespace();
       if (index != source.length()) {
         throw new IllegalArgumentException("Unexpected JSON after position " + index);
@@ -4546,17 +4631,20 @@ public class DocuflexPdfServer {
       return value;
     }
 
-    private Object parseValue() {
+    private Object parseValue(int depth) {
+      if (depth > MAX_JSON_DEPTH) {
+        throw new IllegalArgumentException("JSON nesting is too deep.");
+      }
       skipWhitespace();
       if (index >= source.length()) {
         throw new IllegalArgumentException("Unexpected end of JSON.");
       }
       char ch = source.charAt(index);
       if (ch == '{') {
-        return parseObject();
+        return parseObject(depth + 1);
       }
       if (ch == '[') {
-        return parseArray();
+        return parseArray(depth + 1);
       }
       if (ch == '"') {
         return parseString();
@@ -4579,7 +4667,7 @@ public class DocuflexPdfServer {
       throw new IllegalArgumentException("Unexpected JSON token at position " + index);
     }
 
-    private Map<String, Object> parseObject() {
+    private Map<String, Object> parseObject(int depth) {
       expect('{');
       Map<String, Object> object = new LinkedHashMap<>();
       skipWhitespace();
@@ -4591,7 +4679,7 @@ public class DocuflexPdfServer {
         String key = parseString();
         skipWhitespace();
         expect(':');
-        object.put(key, parseValue());
+        object.put(key, parseValue(depth));
         skipWhitespace();
         if (peek('}')) {
           index += 1;
@@ -4601,7 +4689,7 @@ public class DocuflexPdfServer {
       }
     }
 
-    private List<Object> parseArray() {
+    private List<Object> parseArray(int depth) {
       expect('[');
       List<Object> array = new ArrayList<>();
       skipWhitespace();
@@ -4610,7 +4698,7 @@ public class DocuflexPdfServer {
         return array;
       }
       while (true) {
-        array.add(parseValue());
+        array.add(parseValue(depth));
         skipWhitespace();
         if (peek(']')) {
           index += 1;

@@ -3,9 +3,15 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import {
+  MAX_DOCUMENT_BYTES,
+  MAX_GENERATED_BYTES,
+  contentLengthExceeds,
+  isPdf,
+  privateFailure
+} from '$lib/server/request-security.js';
+import { boundedCommand } from '$lib/server/process-security.js';
 
-const MAX_REQUEST_BYTES = 150 * 1024 * 1024;
-const MAX_OUTPUT_BYTES = 300 * 1024 * 1024;
 const MAX_LOG_BYTES = 96 * 1024;
 const OCR_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -13,14 +19,14 @@ let ocrQueue = Promise.resolve();
 
 /** @type {import('./$types').RequestHandler} */
 export async function POST({ request }) {
-  const contentLength = Number(request.headers.get('content-length') ?? 0);
-  if (contentLength > MAX_REQUEST_BYTES) {
+  if (contentLengthExceeds(request, MAX_DOCUMENT_BYTES)) {
     return Response.json({ error: 'The PDF is too large for OCR.' }, { status: 413 });
   }
   const input = await request.arrayBuffer();
-  if (!input.byteLength || input.byteLength > MAX_REQUEST_BYTES) {
+  if (!input.byteLength || input.byteLength > MAX_DOCUMENT_BYTES) {
     return Response.json({ error: input.byteLength ? 'The PDF is too large for OCR.' : 'The PDF is empty.' }, { status: input.byteLength ? 413 : 400 });
   }
+  if (!isPdf(input)) return Response.json({ error: 'The uploaded file is not a valid PDF.' }, { status: 400 });
 
   const requestedLanguages = sanitizeLanguages(
     env.OCR_LANGUAGES?.trim() || request.headers.get('x-ocr-languages') || 'eng'
@@ -35,14 +41,14 @@ export async function POST({ request }) {
       }
     });
   } catch (error) {
-    console.error('PDF OCR failed:', error);
     const detail = error instanceof Error ? error.message : String(error);
     const missing = /ENOENT|not found|could not be executed/i.test(detail);
-    return Response.json({
-      error: missing
-        ? 'OCR is not installed. Install OCRmyPDF, Tesseract, and Poppler.'
-        : `OCR failed: ${detail}`
-    }, { status: missing ? 503 : 400 });
+    return privateFailure(
+      error,
+      'PDF OCR',
+      missing ? 'OCR is not installed on this server.' : 'Could not OCR this PDF.',
+      missing ? 503 : 400
+    );
   }
 }
 
@@ -87,8 +93,10 @@ async function createSearchablePdf(input, requestedLanguages) {
       await runTesseractFallback(directory, inputPath, outputPath, languages);
     }
     const outputStats = await stat(outputPath);
-    if (!outputStats.size || outputStats.size > MAX_OUTPUT_BYTES) throw new Error('OCR output is too large.');
-    return await readFile(outputPath);
+    if (!outputStats.size || outputStats.size > MAX_GENERATED_BYTES) throw new Error('OCR output is too large.');
+    const output = await readFile(outputPath);
+    if (!isPdf(output)) throw new Error('OCR output is not a valid PDF.');
+    return output;
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -135,7 +143,8 @@ function sanitizeLanguages(value) {
 /** @param {string} binary @param {string[]} args @param {number} timeoutMs @returns {Promise<void>} */
 function runCommand(binary, args, timeoutMs) {
   return new Promise((resolve, reject) => {
-    const child = spawn(binary, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    const command = boundedCommand(binary, args, 'ocr');
+    const child = spawn(command.binary, command.args, { stdio: ['ignore', 'ignore', 'pipe'] });
     let log = '';
     let settled = false;
     const finish = (/** @type {() => void} */ callback) => {
@@ -167,7 +176,8 @@ function runCommand(binary, args, timeoutMs) {
 /** @param {string} binary @param {string[]} args @param {number} timeoutMs @returns {Promise<string>} */
 function captureCommand(binary, args, timeoutMs) {
   return new Promise((resolve, reject) => {
-    const child = spawn(binary, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const command = boundedCommand(binary, args, 'ocr');
+    const child = spawn(command.binary, command.args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '';
     let log = '';
     let settled = false;

@@ -3475,7 +3475,8 @@ ${setupScript}`;
   function stampConvertedHtmlForEditing(html) {
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, 'text/html');
-    const originals = extractConvertedHtmlOriginalTexts(html);
+    sanitizeConvertedDocument(doc);
+    const originals = extractConvertedHtmlOriginalTexts(`<!DOCTYPE html>\n${doc.documentElement.outerHTML}`);
 
     doc.querySelectorAll('.t').forEach((node, index) => {
       if (!(node instanceof HTMLElement)) return;
@@ -3493,6 +3494,37 @@ ${setupScript}`;
       html: `<!DOCTYPE html>\n${doc.documentElement.outerHTML}`,
       originals
     };
+  }
+
+  /** @param {Document} doc */
+  function sanitizeConvertedDocument(doc) {
+    doc.querySelectorAll('script, iframe, frame, object, embed, applet, base, form, input, button, textarea, select, meta[http-equiv]').forEach((node) => node.remove());
+    doc.querySelectorAll('*').forEach((node) => {
+      for (const attribute of Array.from(node.attributes)) {
+        const name = attribute.name.toLowerCase();
+        if (name.startsWith('on') || ['srcdoc', 'action', 'formaction'].includes(name)) {
+          node.removeAttribute(attribute.name);
+          continue;
+        }
+        if (!['href', 'src', 'poster', 'xlink:href'].includes(name)) continue;
+        const value = attribute.value.trim();
+        if (/^(?:javascript|vbscript|file):/i.test(value) || /^data:(?!image\/|font\/|application\/(?:font|x-font))/i.test(value)) {
+          node.removeAttribute(attribute.name);
+          continue;
+        }
+        if (['src', 'poster', 'xlink:href'].includes(name) && value && !/^(?:data:image\/|data:font\/|data:application\/(?:font|x-font)|blob:|#)/i.test(value)) {
+          node.removeAttribute(attribute.name);
+        }
+      }
+    });
+    const policy = doc.createElement('meta');
+    policy.setAttribute('http-equiv', 'Content-Security-Policy');
+    policy.setAttribute(
+      'content',
+      "default-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; "
+        + "script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data: blob:; connect-src 'none'"
+    );
+    doc.head.prepend(policy);
   }
 
   /** @param {string} html */
