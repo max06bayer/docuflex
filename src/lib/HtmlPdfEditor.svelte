@@ -609,7 +609,7 @@
 
       // Retry only the members that failed against the PDF containing every
       // successful edit from this pass. Never silently rebase a partial batch.
-      if (!missedIndices.length || Number(result.applied || 0) <= 0) break;
+      if (!missedIndices.length) break;
       remainingEdits = missedIndices.map((/** @type {number} */ index) => remainingEdits[index]);
     }
 
