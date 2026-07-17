@@ -30,7 +30,7 @@
   "dependencies": {
     "@fontsource-variable/geist": "^5.2.9",
     "@fontsource-variable/inter": "^5.2.8",
-    "pdfjs-dist": "^5.3.31"
+    "pdfjs-dist": "^6.1.200"
   },
   "overrides": {
     "cookie": "0.7.2"
