@@ -572,21 +572,63 @@
     const htmlEdits = Array.isArray(capturedEdits) ? capturedEdits : await collectConvertedHtmlEdits();
     if (!htmlEdits.length) return sourceBytes.slice(0);
 
-    const response = await fetch(backendUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        pdfBase64: await arrayBufferToBase64(sourceBytes),
-        edits: htmlEdits
-      })
-    });
-    const result = await response.json().catch(() => null);
-    if (!response.ok || !result?.pdfBase64) {
-      throw new Error(result?.error || `PDF text export failed (${response.status}).`);
+    const imageEdits = htmlEdits.filter((/** @type {any} */ edit) => edit?.kind === 'image');
+    let editedBytes = sourceBytes.slice(0);
+    let remainingEdits = htmlEdits.filter((/** @type {any} */ edit) => edit?.kind !== 'image');
+    let lastMisses = [];
+    const maxAttempts = Math.min(4, remainingEdits.length + 1);
+
+    /** @param {ArrayBuffer} bytes @param {unknown[]} editsToSubmit */
+    const submitEdits = async (bytes, editsToSubmit) => {
+      const response = await fetch(backendUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pdfBase64: await arrayBufferToBase64(bytes),
+          edits: editsToSubmit
+        })
+      });
+      const result = await response.json().catch(() => null);
+      if (!response.ok || !result?.pdfBase64) {
+        throw new Error(result?.error || `PDF text export failed (${response.status}).`);
+      }
+      return result;
+    };
+
+    for (let attempt = 0; attempt < maxAttempts && remainingEdits.length; attempt += 1) {
+      const result = await submitEdits(editedBytes, remainingEdits);
+      editedBytes = base64ToArrayBuffer(result.pdfBase64);
+      lastMisses = Array.isArray(result.misses) ? result.misses : [];
+      const missedIndices = Array.isArray(result.missedEditIndices)
+        ? result.missedEditIndices.filter((/** @type {number} */ index) => Number.isInteger(index) && index >= 0 && index < remainingEdits.length)
+        : [];
+      if (!lastMisses.length && !missedIndices.length) {
+        remainingEdits = [];
+        break;
+      }
+
+      // Retry only the members that failed against the PDF containing every
+      // successful edit from this pass. Never silently rebase a partial batch.
+      if (!missedIndices.length || Number(result.applied || 0) <= 0) break;
+      remainingEdits = missedIndices.map((/** @type {number} */ index) => remainingEdits[index]);
     }
-    const misses = Array.isArray(result.misses) ? result.misses : [];
-    if (misses.length) console.warn('PDFBox could not apply some HTML text edits:', misses);
-    return base64ToArrayBuffer(result.pdfBase64);
+
+    if (remainingEdits.length) {
+      console.warn('PDFBox could not apply all HTML text edits:', lastMisses);
+      throw new Error(`Could not apply ${remainingEdits.length} text change${remainingEdits.length === 1 ? '' : 's'}. Your edits are still open; please try again.`);
+    }
+
+    if (imageEdits.length) {
+      const imageResult = await submitEdits(editedBytes, imageEdits);
+      const imageMisses = Array.isArray(imageResult.misses) ? imageResult.misses : [];
+      if (imageMisses.length) {
+        console.warn('PDFBox could not apply all HTML image edits:', imageMisses);
+        throw new Error('Could not apply every moved image. Your edits are still open; please try again.');
+      }
+      editedBytes = base64ToArrayBuffer(imageResult.pdfBase64);
+    }
+
+    return editedBytes;
   }
 
   export async function hasPendingTextEdits() {

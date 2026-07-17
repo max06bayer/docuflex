@@ -143,7 +143,8 @@ public class DocuflexPdfServer {
       String response = "{"
           + "\"pdfBase64\":\"" + escapeJson(Base64.getEncoder().encodeToString(result.pdfBytes)) + "\","
           + "\"applied\":" + result.applied + ","
-          + "\"misses\":" + result.missesJson()
+          + "\"misses\":" + result.missesJson() + ","
+          + "\"missedEditIndices\":" + result.missedEditIndicesJson()
           + "}";
       sendJson(exchange, 200, response);
     } catch (Exception error) {
@@ -1710,12 +1711,14 @@ public class DocuflexPdfServer {
     EditResult result = new EditResult();
     try (PDDocument document = loadPdf(pdfBytes)) {
       document.setAllSecurityToBeRemoved(true);
-      for (TextEdit edit : edits) {
+      for (int editIndex = 0; editIndex < edits.size(); editIndex++) {
+        TextEdit edit = edits.get(editIndex);
         if (edit.newText.equals(edit.oldText) && !edit.moved && !edit.overlay) {
           continue;
         }
         if (edit.page < 0 || edit.page >= document.getNumberOfPages()) {
           result.misses.add("Page " + (edit.page + 1) + " is outside the document.");
+          result.missedEditIndices.add(editIndex);
           continue;
         }
         PDPage page = document.getPage(edit.page);
@@ -1724,6 +1727,7 @@ public class DocuflexPdfServer {
             result.applied += 1;
           } else {
             result.misses.add("Could not place aligned text on page " + (edit.page + 1) + ": " + edit.oldText);
+            result.missedEditIndices.add(editIndex);
           }
           continue;
         }
@@ -1734,6 +1738,7 @@ public class DocuflexPdfServer {
             result.applied += 1;
           } else {
             result.misses.add("Could not move text while preserving original styling on page " + (edit.page + 1) + ": " + edit.oldText);
+            result.missedEditIndices.add(editIndex);
           }
           continue;
         }
@@ -1742,6 +1747,7 @@ public class DocuflexPdfServer {
           result.applied += 1;
         } else {
           result.misses.add("Could not find editable text on page " + (edit.page + 1) + ": " + edit.oldText);
+          result.missedEditIndices.add(editIndex);
         }
       }
       for (ImageEdit edit : imageEdits) {
@@ -4577,6 +4583,7 @@ public class DocuflexPdfServer {
     byte[] pdfBytes = new byte[0];
     int applied = 0;
     List<String> misses = new ArrayList<>();
+    List<Integer> missedEditIndices = new ArrayList<>();
 
     String missesJson() {
       StringBuilder json = new StringBuilder("[");
@@ -4585,6 +4592,18 @@ public class DocuflexPdfServer {
           json.append(",");
         }
         json.append("\"").append(escapeJson(misses.get(i))).append("\"");
+      }
+      json.append("]");
+      return json.toString();
+    }
+
+    String missedEditIndicesJson() {
+      StringBuilder json = new StringBuilder("[");
+      for (int i = 0; i < missedEditIndices.size(); i += 1) {
+        if (i > 0) {
+          json.append(",");
+        }
+        json.append(missedEditIndices.get(i));
       }
       json.append("]");
       return json.toString();
