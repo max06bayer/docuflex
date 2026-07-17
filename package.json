@@ -15,7 +15,7 @@
     "preview": "vite preview --host 127.0.0.1",
     "check": "svelte-kit sync && svelte-check --tsconfig ./jsconfig.json",
     "frontend:start": "node build",
-    "start": "node scripts/start-production.mjs"
+    "start": "bash scripts/start-unprivileged.sh"
   },
   "devDependencies": {
     "@sveltejs/adapter-auto": "^6.0.0",
