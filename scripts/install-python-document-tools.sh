@@ -10,7 +10,19 @@ if [[ -f "$runtime_dir/argostranslate/__init__.py" && -f "$runtime_dir/fitz/__in
   exit 0
 fi
 
-"$python_bin" -m pip install \
+pip_command=()
+if "$python_bin" -m pip --version >/dev/null 2>&1; then
+  pip_command=("$python_bin" -m pip)
+elif command -v pip3 >/dev/null 2>&1; then
+  pip_command=(pip3)
+elif command -v pip >/dev/null 2>&1; then
+  pip_command=(pip)
+else
+  echo "A Python pip executable is required to install document tools." >&2
+  exit 1
+fi
+
+"${pip_command[@]}" install \
   --disable-pip-version-check \
   --no-input \
   --only-binary=:all: \
