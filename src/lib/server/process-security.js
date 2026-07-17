@@ -3,7 +3,7 @@ import { env } from '$env/dynamic/private';
 const PROFILES = {
   native: { addressSpace: 1536 * 1024 * 1024, cpuSeconds: 600, fileBytes: 350 * 1024 * 1024, processes: 64 },
   ocr: { addressSpace: 2048 * 1024 * 1024, cpuSeconds: 900, fileBytes: 350 * 1024 * 1024, processes: 64 },
-  translation: { addressSpace: 2560 * 1024 * 1024, cpuSeconds: 1800, fileBytes: 350 * 1024 * 1024, processes: 64 }
+  translation: { addressSpace: 3584 * 1024 * 1024, cpuSeconds: 1800, fileBytes: 350 * 1024 * 1024, processes: 64 }
 };
 
 /**
