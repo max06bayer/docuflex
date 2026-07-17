@@ -34,9 +34,9 @@
     <a class="settings-row" href="https://github.com/max06bayer/docuflex" target="_blank" rel="noreferrer">
       <span>GitHub</span>
     </a>
-    <span class="settings-row disabled" aria-disabled="true">
+    <a class="settings-row" href="/">
       <span>Homepage</span>
-    </span>
+    </a>
     <button class="settings-row" type="button" onclick={() => (legalOpen = true)}>
       <span>Legal &amp; Privacy</span>
     </button>
@@ -118,9 +118,8 @@
   .panel-close:hover span { background: #000; }
   .settings-content { display: grid; align-content: start; gap: 0; padding: 7px; border-radius: 0 0 12px 12px; }
   .settings-row { display: flex; align-items: center; width: 100%; height: 40px; min-height: 40px; padding: 0 12px; border: 1px solid transparent; border-radius: 10px; background: transparent; color: #3f3f3f; font-family: Geist, Inter, sans-serif; font-size: 18px; text-align: left; text-decoration: none; cursor: pointer; transition: color 180ms ease, background-color 180ms ease, border-color 180ms ease, transform 180ms ease; }
-  .settings-row:hover:not(.disabled), .settings-row:focus-visible { border-color: rgba(0,0,0,.07); background: rgba(234,234,234,.62); color: #111; outline: none; transform: translateX(1px); }
+  .settings-row:hover, .settings-row:focus-visible { border-color: rgba(0,0,0,.07); background: rgba(234,234,234,.62); color: #111; outline: none; transform: translateX(1px); }
   .settings-row:active { transform: translateX(1px) scale(.99); }
-  .settings-row.disabled { color: #999; cursor: default; opacity: .58; }
   .legal-backdrop { position: fixed; z-index: 2000; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(235,235,235,.6); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); }
   .legal-panel { position: relative; display: grid; grid-template-rows: 50px minmax(0,1fr) auto; width: min(850px, calc(100vw - 48px)); height: min(790px, calc(100dvh - 48px)); margin: 0; padding: 0; overflow: hidden; border: 1.5px solid #bdbdbd; border-radius: 13px; background: rgba(250,250,250,.97); box-shadow: 0 28px 85px rgba(0,0,0,.2), 0 5px 20px rgba(0,0,0,.1); color: #111; }
   .legal-header { min-height: 50px; padding: 0 12px; border-radius: 12px 12px 0 0; }
