@@ -279,7 +279,6 @@
       display: grid;
       font: inherit;
       font-size: 18px;
-      grid-template-columns: 1fr 28px;
       height: 40px;
       padding: 0 7px;
       text-align: left;
@@ -290,20 +289,6 @@
     .docuflex-desktop-export-option:focus-visible {
       color: #000;
       outline: none;
-    }
-
-    .docuflex-desktop-export-extension {
-      background: rgba(0, 0, 0, 0.045);
-      border: 1px solid rgba(0, 0, 0, 0.04);
-      border-radius: 7px;
-      color: rgba(0, 0, 0, 0.16);
-      display: grid;
-      font-family: inherit;
-      font-size: 9px;
-      height: 28px;
-      place-items: center;
-      text-transform: uppercase;
-      width: 28px;
     }
 
   `;
@@ -340,10 +325,10 @@
   const exportButtonSelector = '.utilities .utility-button[aria-label="Download"], .utilities .utility-button[aria-label="Exporting PDF"]';
   const exportFormats = [
     ['pdf', 'PDF'],
-    ['docx', 'Word'],
-    ['doc', 'Word Legacy'],
-    ['xlsx', 'Excel'],
-    ['pptx', 'PowerPoint'],
+    ['docx', 'Word (.docx)'],
+    ['doc', 'Word (.doc)'],
+    ['xlsx', 'Excel (.xlsx)'],
+    ['pptx', 'PowerPoint (.pptx)'],
   ];
   let exportMenu = null;
   let allowExportButtonClick = false;
@@ -358,8 +343,12 @@
     const button = exportButton();
     if (!(button instanceof HTMLElement) || !(exportMenu instanceof HTMLElement)) return;
     const bounds = button.getBoundingClientRect();
-    exportMenu.style.right = `${Math.max(8, window.innerWidth - bounds.right)}px`;
-    exportMenu.style.top = `${Math.min(window.innerHeight - exportMenu.offsetHeight - 8, bounds.bottom + 8)}px`;
+    const shell = document.querySelector('.editor-shell');
+    const scale = shell instanceof HTMLElement
+      ? Number.parseFloat(getComputedStyle(shell).getPropertyValue('--ui-scale')) || 1
+      : 1;
+    exportMenu.style.right = `${Math.max(8, window.innerWidth - bounds.right) / scale}px`;
+    exportMenu.style.top = `${Math.min(window.innerHeight / scale - exportMenu.offsetHeight - 8, (bounds.bottom + 8) / scale)}px`;
   };
   const beginExport = (format) => {
     const button = exportButton();
@@ -390,14 +379,11 @@
       option.setAttribute('role', 'menuitem');
       const optionLabel = document.createElement('span');
       optionLabel.textContent = label;
-      const extension = document.createElement('kbd');
-      extension.className = 'docuflex-desktop-export-extension';
-      extension.textContent = format;
-      option.append(optionLabel, extension);
+      option.append(optionLabel);
       option.addEventListener('click', () => beginExport(format));
       menu.append(option);
     }
-    document.body.append(menu);
+    (document.querySelector('.editor-shell') || document.body).append(menu);
     exportMenu = menu;
     placeExportMenu();
     menu.querySelector('button')?.focus({ preventScroll: true });

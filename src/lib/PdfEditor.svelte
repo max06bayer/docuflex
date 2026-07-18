@@ -137,6 +137,12 @@
   let selectedShape = null;
   /** @type {Set<number>} */
   let selectedShapeIds = new Set();
+  /** @type {{ pointerId: number; pageIndex: number; start: StrokePoint; current: StrokePoint; initialIds: number[] } | null} */
+  let shapeMarquee = null;
+  /** @type {{ pageIndex: number; x: number; y: number; empty: boolean } | null} */
+  let shapeContextMenu = null;
+  /** @type {AnnotationShape[] | null} */
+  let shapeClipboard = null;
   /** @type {{ pageIndex: number; x: number; y: number; width: number; height: number; rotation: number } | null} */
   let multiSelectionFrame = null;
   /** @type {{ pageIndex: number; id: number } | null} */
@@ -1339,7 +1345,7 @@
         }
         if (!imageData || imageData.length > 15 * 1024 * 1024) throw new Error('The processed image is too large.');
 
-        const pageIndex = visibleSignaturePageIndex();
+        const pageIndex = visiblePdfPageIndex();
         const pageSize = pageSizes[pageIndex];
         if (!pageSize) throw new Error('No PDF page is ready for the image.');
         const aspectRatio = image.naturalWidth / image.naturalHeight;
@@ -1374,19 +1380,28 @@
     }
   }
 
-  function visibleSignaturePageIndex() {
+  function visiblePdfPageIndex() {
     if (!viewer) return 0;
     const viewerRect = viewer.getBoundingClientRect();
-    const viewportCenter = viewerRect.top + viewerRect.height / 2;
     const pages = [...viewer.querySelectorAll('.pdf-page')];
     let bestIndex = 0;
-    let bestDistance = Number.POSITIVE_INFINITY;
+    let bestVisibleArea = -1;
+    let bestCenterDistance = Number.POSITIVE_INFINITY;
+    const viewportCenterX = viewerRect.left + viewerRect.width / 2;
+    const viewportCenterY = viewerRect.top + viewerRect.height / 2;
     pages.forEach((page, index) => {
       const rect = page.getBoundingClientRect();
-      const distance = Math.abs(rect.top + rect.height / 2 - viewportCenter);
-      if (distance < bestDistance) {
+      const visibleWidth = Math.max(0, Math.min(rect.right, viewerRect.right) - Math.max(rect.left, viewerRect.left));
+      const visibleHeight = Math.max(0, Math.min(rect.bottom, viewerRect.bottom) - Math.max(rect.top, viewerRect.top));
+      const visibleArea = visibleWidth * visibleHeight;
+      const centerDistance = Math.hypot(
+        rect.left + rect.width / 2 - viewportCenterX,
+        rect.top + rect.height / 2 - viewportCenterY
+      );
+      if (visibleArea > bestVisibleArea || (visibleArea === bestVisibleArea && centerDistance < bestCenterDistance)) {
         bestIndex = index;
-        bestDistance = distance;
+        bestVisibleArea = visibleArea;
+        bestCenterDistance = centerDistance;
       }
     });
     return bestIndex;
@@ -1394,7 +1409,7 @@
 
   /** @param {{ imageUrl: string; aspectRatio: number }} signature */
   function insertSavedSignature(signature) {
-    const pageIndex = visibleSignaturePageIndex();
+    const pageIndex = visiblePdfPageIndex();
     const pageSize = pageSizes[pageIndex];
     if (!pageSize) return;
     let width = Math.min(190, pageSize.width * 0.38);
@@ -1898,6 +1913,9 @@
       if (pageContextMenu && (!(target instanceof Element) || !target.closest('.page-context-menu'))) {
         pageContextMenu = null;
       }
+      if (shapeContextMenu && (!(target instanceof Element) || !target.closest('.shape-context-menu'))) {
+        shapeContextMenu = null;
+      }
     }
 
     /** @param {KeyboardEvent} event */
@@ -1941,7 +1959,7 @@
     document.addEventListener('pointerdown', commitTextFieldOnOutsidePointer, true);
     window.addEventListener('keydown', handlePageMenuShortcut, true);
     window.addEventListener('keydown', updateZoomCursor);
-    window.addEventListener('keydown', handleShapeKeyboard);
+    window.addEventListener('keydown', handleShapeKeyboard, true);
     window.addEventListener('keydown', handleHistoryShortcut);
     window.addEventListener('keyup', updateZoomCursor);
     window.addEventListener('blur', resetZoomCursor);
@@ -1968,7 +1986,7 @@
       document.removeEventListener('pointerdown', commitTextFieldOnOutsidePointer, true);
       window.removeEventListener('keydown', handlePageMenuShortcut, true);
       window.removeEventListener('keydown', updateZoomCursor);
-      window.removeEventListener('keydown', handleShapeKeyboard);
+      window.removeEventListener('keydown', handleShapeKeyboard, true);
       window.removeEventListener('keydown', handleHistoryShortcut);
       window.removeEventListener('keyup', updateZoomCursor);
       window.removeEventListener('blur', resetZoomCursor);
@@ -3518,6 +3536,125 @@
     multiSelectionFrame = ids.length > 1 && bounds ? { pageIndex, ...bounds } : null;
   }
 
+  /** @param {StrokePoint} start @param {StrokePoint} current */
+  function marqueeBounds(start, current) {
+    return {
+      x: Math.min(start.x, current.x),
+      y: Math.min(start.y, current.y),
+      width: Math.abs(current.x - start.x),
+      height: Math.abs(current.y - start.y)
+    };
+  }
+
+  /** @param {{ x: number; y: number; width: number; height: number }} left @param {{ x: number; y: number; width: number; height: number }} right */
+  function boundsIntersect(left, right) {
+    return left.x <= right.x + right.width && left.x + left.width >= right.x
+      && left.y <= right.y + right.height && left.y + left.height >= right.y;
+  }
+
+  /** @param {PointerEvent} event @param {HTMLElement} shell @param {number} pageIndex */
+  function beginShapeMarquee(event, shell, pageIndex) {
+    const start = pointOnPage(event, shell);
+    const initialIds = event.shiftKey && selectedShape?.pageIndex === pageIndex ? [...selectedShapeIds] : [];
+    shapeContextMenu = null;
+    shapeMarquee = { pointerId: event.pointerId, pageIndex, start, current: start, initialIds };
+    setShapeSelection(pageIndex, initialIds);
+    shapeGuides = null;
+    window.getSelection()?.removeAllRanges();
+    event.preventDefault();
+    viewer?.setPointerCapture(event.pointerId);
+  }
+
+  /** @param {PointerEvent} event */
+  function updateShapeMarquee(event) {
+    if (!shapeMarquee || event.pointerId !== shapeMarquee.pointerId || !viewer) return;
+    const shell = viewer.querySelectorAll('.pdf-page')[shapeMarquee.pageIndex];
+    if (!(shell instanceof HTMLElement)) return;
+    const current = pointOnPage(event, shell);
+    const bounds = marqueeBounds(shapeMarquee.start, current);
+    const selectedIds = (shapes[shapeMarquee.pageIndex] ?? [])
+      .filter((shape) => shape.type !== 'crop')
+      .filter((shape) => {
+        const shapeBounds = selectionBounds([shape]);
+        return Boolean(shapeBounds && boundsIntersect(bounds, shapeBounds));
+      })
+      .map((shape) => shape.id);
+    const ids = [...new Set([...shapeMarquee.initialIds, ...selectedIds])];
+    shapeMarquee = { ...shapeMarquee, current };
+    setShapeSelection(shapeMarquee.pageIndex, ids);
+  }
+
+  function deleteSelectedShapes() {
+    if (!selectedShape) return;
+    const pageIndex = selectedShape.pageIndex;
+    shapes = {
+      ...shapes,
+      [pageIndex]: (shapes[pageIndex] ?? []).filter((shape) => !selectedShapeIds.has(shape.id))
+    };
+    setShapeSelection(pageIndex, []);
+    shapeContextMenu = null;
+    shapeGuides = null;
+  }
+
+  function copySelectedShapes() {
+    if (!selectedShape) return;
+    shapeClipboard = selectedShapesOnPage(selectedShape.pageIndex)
+      .filter((shape) => shape.type !== 'crop')
+      .map((shape) => structuredClone(shape));
+    shapeContextMenu = null;
+  }
+
+  function pasteSelectedShapes() {
+    if (!shapeClipboard?.length) return;
+    const pageIndex = visiblePdfPageIndex();
+    const pageSize = pageSizes[pageIndex];
+    if (!pageSize) return;
+    const offset = 12 / zoomLevel;
+    const pasted = shapeClipboard.map((source) => {
+      const shape = structuredClone(source);
+      shape.id = nextAnnotationId++;
+      shape.x = clamp(shape.x + offset, 0, Math.max(0, pageSize.width - shape.width));
+      shape.y = clamp(shape.y + offset, 0, Math.max(0, pageSize.height - shape.height));
+      return shape;
+    });
+    shapes = { ...shapes, [pageIndex]: [...(shapes[pageIndex] ?? []), ...pasted] };
+    setShapeSelection(pageIndex, pasted.map((shape) => shape.id));
+    shapeContextMenu = null;
+    shapeGuides = null;
+  }
+
+  /** @param {MouseEvent} event */
+  function openShapeContextMenu(event) {
+    if (activeTool !== 'select') return;
+    const hit = shapeTarget(event);
+    const shape = hit ? findShape(hit.pageIndex, hit.id) : null;
+    const target = event.target;
+    if (!shape && target instanceof Element && target.closest('.textLayer span')) return;
+    const pageHit = shape ? null : pageAtPoint(event.clientX, event.clientY);
+    if ((!shape && !pageHit) || shape?.type === 'crop') return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (shape && hit) {
+      if (selectedShape?.pageIndex !== hit.pageIndex || !selectedShapeIds.has(hit.id)) {
+        setShapeSelection(hit.pageIndex, [hit.id]);
+      }
+    } else if (selectedShape) {
+      setShapeSelection(selectedShape.pageIndex, []);
+    }
+    pageContextMenu = null;
+    const empty = !shape;
+    const pageIndex = hit?.pageIndex ?? pageHit?.pageIndex;
+    if (pageIndex === undefined) return;
+    const menuWidth = 204;
+    const menuHeight = 132;
+    shapeContextMenu = {
+      pageIndex,
+      x: Math.max(10, Math.min(event.clientX, window.innerWidth - menuWidth - 10)),
+      y: Math.max(10, Math.min(event.clientY, window.innerHeight - menuHeight - 10)),
+      empty
+    };
+  }
+
   /** @param {string} base64 */
   function base64ToBytes(base64) {
     const binary = atob(base64);
@@ -3717,12 +3854,12 @@
     return { x: fixed.x + Math.cos(snapped) * distance, y: fixed.y + Math.sin(snapped) * distance };
   }
 
-  /** @param {PointerEvent} event */
+  /** @param {Event} event */
   function shapeTarget(event) {
     const target = event.target;
     if (!(target instanceof Element)) return null;
     const element = target.closest('[data-shape-id]');
-    if (!(element instanceof SVGElement)) return null;
+    if (!(element instanceof HTMLElement) && !(element instanceof SVGElement)) return null;
     const id = Number(element.dataset.shapeId);
     const pageIndex = Number(element.dataset.shapePage);
     return Number.isInteger(id) && Number.isInteger(pageIndex) ? { id, pageIndex, element } : null;
@@ -3766,9 +3903,23 @@
 
   /** @param {KeyboardEvent} event */
   function handleShapeKeyboard(event) {
-    if (!selectedShape) return;
     const target = event.target;
     if (target instanceof HTMLElement && (target.matches('input, textarea, select') || target.isContentEditable)) return;
+    const clipboardShortcut = (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && !event.repeat;
+    const clipboardKey = event.code === 'KeyC' ? 'c' : event.code === 'KeyV' ? 'v' : event.key.toLowerCase();
+    if (clipboardShortcut && clipboardKey === 'c' && selectedShape) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      copySelectedShapes();
+      return;
+    }
+    if (clipboardShortcut && clipboardKey === 'v' && shapeClipboard?.length) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      pasteSelectedShapes();
+      return;
+    }
+    if (!selectedShape) return;
     const pageIndex = selectedShape.pageIndex;
     const selected = selectedShapesOnPage(pageIndex);
     if (!selected.length) return;
@@ -3779,14 +3930,7 @@
     }
     if (event.key === 'Backspace' || event.key === 'Delete') {
       event.preventDefault();
-      shapes = {
-        ...shapes,
-        [pageIndex]: (shapes[pageIndex] ?? []).filter(
-          (candidate) => !selectedShapeIds.has(candidate.id)
-        )
-      };
-      setShapeSelection(pageIndex, []);
-      shapeGuides = null;
+      deleteSelectedShapes();
       return;
     }
     const direction = {
@@ -4373,6 +4517,13 @@
     }
 
     if (event.button === 0 && activeTool === 'select' && pageHit && !shapeHit) {
+      const target = event.target;
+      const startsOnPdfText = target instanceof Element && Boolean(target.closest('.textLayer span'));
+      const startsOnEditorControl = target instanceof Element && Boolean(target.closest('input, textarea, [contenteditable="true"]'));
+      if (!startsOnPdfText && !startsOnEditorControl) {
+        beginShapeMarquee(event, pageHit.shell, pageHit.pageIndex);
+        return;
+      }
       if (selectedShape) setShapeSelection(selectedShape.pageIndex, []);
       shapeGuides = null;
     }
@@ -4436,6 +4587,7 @@
   function handleViewerPointerMove(event) {
     updateEraserCursor(event);
     updateHoveredShape(event);
+    updateShapeMarquee(event);
     if (viewer && pendingFormDrag && event.pointerId === pendingFormDrag.pointerId) {
       const distance = Math.hypot(event.clientX - pendingFormDrag.clientX, event.clientY - pendingFormDrag.clientY);
       if (distance >= 4) {
@@ -4517,6 +4669,10 @@
   /** @param {PointerEvent} event */
   function endPan(event) {
     if (!viewer) return;
+    if (shapeMarquee?.pointerId === event.pointerId) {
+      updateShapeMarquee(event);
+      shapeMarquee = null;
+    }
     if (pendingFormDrag?.pointerId === event.pointerId) pendingFormDrag = null;
     if (drawingShape && event.pointerId === drawingShape.pointerId) {
       const finishedPageIndex = drawingShape.pageIndex;
@@ -4702,6 +4858,8 @@
     selectedShape = null;
     editingTextShape = null;
     selectedShapeIds = new Set();
+    shapeMarquee = null;
+    shapeContextMenu = null;
     multiSelectionFrame = null;
     drawingShape = null;
     shapeInteraction = null;
@@ -5010,6 +5168,7 @@
       selectedPages = new Set([pageIndex]);
       selectionAnchor = pageIndex;
     }
+    shapeContextMenu = null;
     const menuWidth = 204;
     const menuHeight = 252;
     pageContextMenu = {
@@ -5882,6 +6041,35 @@
   </div>
 {/if}
 
+{#if shapeContextMenu}
+  <div
+    class="page-context-menu shape-context-menu"
+    role="menu"
+    tabindex="-1"
+    aria-label="Selected object actions"
+    style:left={`${shapeContextMenu.x}px`}
+    style:top={`${shapeContextMenu.y}px`}
+    in:scale={{ duration: 190, easing: cubicOut, start: 0.92, opacity: 0 }}
+    out:scale={{ duration: 145, easing: cubicOut, start: 0.96, opacity: 0 }}
+  >
+    <button class="page-menu-item" role="menuitem" disabled={shapeContextMenu.empty} onclick={copySelectedShapes}>
+      <img src="/pages/copy.svg" alt="" />
+      <span>Copy</span>
+      <kbd>C</kbd>
+    </button>
+    <button class="page-menu-item" role="menuitem" disabled={!shapeClipboard?.length} onclick={pasteSelectedShapes}>
+      <img src="/pages/clipboard-plus.svg" alt="" />
+      <span>Paste</span>
+      <kbd>V</kbd>
+    </button>
+    <button class="page-menu-item delete-page" role="menuitem" disabled={shapeContextMenu.empty} onclick={deleteSelectedShapes}>
+      <img src="/pages/trash.svg" alt="" />
+      <span>Delete</span>
+      <kbd>D</kbd>
+    </button>
+  </div>
+{/if}
+
 <section class="pdf-workspace" aria-label={`PDF editor for ${workingFile.name}`} bind:this={workspace}>
   {#if htmlEditorStarted}
     <div class:active={htmlViewportVisible} class="html-editor-layer">
@@ -5918,6 +6106,7 @@
     onpointerup={endPan}
     onpointercancel={endPan}
     onpointerleave={handleViewerPointerLeave}
+    oncontextmenu={openShapeContextMenu}
   >
     <div class="pdf-document" style:--zoom-level={zoomLevel}>
       {#each Array(pageCount) as _, index}
@@ -6268,6 +6457,18 @@
                   />
                 {/if}
               </g>
+            </svg>
+          {/if}
+          {#if shapeMarquee?.pageIndex === index}
+            {@const marquee = marqueeBounds(shapeMarquee.start, shapeMarquee.current)}
+            <svg
+              class="annotation-layer shape-marquee-layer"
+              viewBox={`0 0 ${pageSizes[index]?.width ?? 1} ${pageSizes[index]?.height ?? 1}`}
+              preserveAspectRatio="none"
+              style:--shape-ui-scale={1 / zoomLevel}
+              aria-hidden="true"
+            >
+              <rect x={marquee.x} y={marquee.y} width={marquee.width} height={marquee.height} />
             </svg>
           {/if}
           <div class="pdf-form-layer" aria-label={`Form fields on page ${index + 1}`}>
@@ -9878,6 +10079,18 @@
     z-index: 8;
     overflow: visible;
     pointer-events: none;
+  }
+
+  .shape-marquee-layer {
+    z-index: 10;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+  .shape-marquee-layer rect {
+    fill: rgba(13, 153, 255, 0.12);
+    stroke: #0d99ff;
+    stroke-width: calc(1px * var(--shape-ui-scale));
   }
 
   .shape-hover-box,
