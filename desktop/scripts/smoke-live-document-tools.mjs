@@ -28,24 +28,35 @@ async function expectSuccessfulResponse(label, response) {
 }
 
 const pdf = minimalPdf('Docuflex Live Tools');
-const conversion = await expectSuccessfulResponse('Edit Text conversion', await fetch(`${frontend}/api/pdf/convert`, {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ pdfBase64: pdf.toString('base64') })
-}));
-const conversionResult = await conversion.json();
-if (!conversionResult.htmlBase64 || !Buffer.from(conversionResult.htmlBase64, 'base64').includes('Docuflex')) {
-  throw new Error('Edit Text conversion did not return the expected document text.');
+const failures = [];
+try {
+  const conversion = await expectSuccessfulResponse('Edit Text conversion', await fetch(`${frontend}/api/pdf/convert`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pdfBase64: pdf.toString('base64') })
+  }));
+  const conversionResult = await conversion.json();
+  if (!conversionResult.htmlBase64 || !Buffer.from(conversionResult.htmlBase64, 'base64').includes('Docuflex')) {
+    throw new Error('Edit Text conversion did not return the expected document text.');
+  }
+} catch (error) {
+  failures.push(error);
 }
 
-const ocr = await expectSuccessfulResponse('OCR', await fetch(`${frontend}/api/pdf/ocr`, {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/pdf', 'x-ocr-languages': 'eng' },
-  body: pdf
-}));
-const ocrBytes = Buffer.from(await ocr.arrayBuffer());
-if (!ocrBytes.subarray(0, 5).equals(Buffer.from('%PDF-'))) {
-  throw new Error('OCR did not return a PDF document.');
+try {
+  const ocr = await expectSuccessfulResponse('OCR', await fetch(`${frontend}/api/pdf/ocr`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/pdf', 'x-ocr-languages': 'eng' },
+    body: pdf
+  }));
+  const ocrBytes = Buffer.from(await ocr.arrayBuffer());
+  if (!ocrBytes.subarray(0, 5).equals(Buffer.from('%PDF-'))) {
+    throw new Error('OCR did not return a PDF document.');
+  }
+} catch (error) {
+  failures.push(error);
 }
+
+if (failures.length) throw new AggregateError(failures, 'Packaged document tools failed.');
 
 process.stdout.write('Packaged Edit Text and OCR API tests passed.\n');

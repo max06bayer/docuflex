@@ -76,6 +76,13 @@ try {
     timeout: 60_000
   });
   if (!/docuflex/i.test(ocrText)) throw new Error(`Bundled OCR smoke test failed: ${ocrText.trim()}`);
+  const ocrPdfBase = join(temporary, 'ocr-searchable');
+  run(ocrExecutable('tesseract'), [image, ocrPdfBase, '--dpi', '300', '-l', 'eng', 'pdf'], {
+    env: { TESSDATA_PREFIX: join(resources, 'runtime', 'ocr', 'share', 'tessdata') },
+    timeout: 60_000
+  });
+  const ocrPdf = await readFile(`${ocrPdfBase}.pdf`);
+  if (!ocrPdf.subarray(0, 5).equals(Buffer.from('%PDF-'))) throw new Error('Bundled OCR PDF smoke test failed.');
 
   const pdf = join(temporary, 'document.pdf');
   const html = join(temporary, 'document.html');

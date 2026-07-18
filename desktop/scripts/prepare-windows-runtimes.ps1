@@ -53,6 +53,7 @@ $popplerBin = Join-Path $popplerExtract 'poppler-26.02.0/Library/bin'
 $ocrRuntime = Join-Path $RuntimeRoot 'ocr'
 New-Item -ItemType Directory -Force -Path (Join-Path $ocrRuntime 'bin'), (Join-Path $ocrRuntime 'poppler/bin'), (Join-Path $ocrRuntime 'share/tessdata') | Out-Null
 Copy-Item (Join-Path $tesseractRoot '*') (Join-Path $ocrRuntime 'bin') -Recurse -Force
+Copy-Item (Join-Path $tesseractRoot 'tessdata/*') (Join-Path $ocrRuntime 'share/tessdata') -Recurse -Force
 Copy-Item (Join-Path $popplerBin '*') (Join-Path $ocrRuntime 'poppler/bin') -Recurse -Force
 Copy-Item (Join-Path $popplerExtract 'poppler-26.02.0/Library/share') (Join-Path $ocrRuntime 'share/poppler') -Recurse -Force
 
