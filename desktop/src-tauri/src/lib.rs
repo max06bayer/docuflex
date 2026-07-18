@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsString,
     fs::{self, File},
     io::{Read, Write},
     net::{SocketAddr, TcpStream},
@@ -8,10 +9,9 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tauri::{
-    webview::DownloadEvent, LogicalPosition, Manager, TitleBarStyle, WebviewUrl,
-    WebviewWindowBuilder,
-};
+use tauri::{webview::DownloadEvent, Manager, WebviewUrl, WebviewWindowBuilder};
+#[cfg(target_os = "macos")]
+use tauri::{LogicalPosition, TitleBarStyle};
 use url::Url;
 
 const FRONTEND_PORT: u16 = 43_127;
@@ -29,12 +29,97 @@ impl Services {
                 unsafe {
                     libc::kill(child.id() as i32, libc::SIGTERM);
                 }
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = Command::new("taskkill.exe")
+                        .args(["/PID", &child.id().to_string(), "/T", "/F"])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
+                }
             }
             for child in children.iter_mut() {
                 let _ = child.wait();
             }
             children.clear();
         }
+    }
+}
+
+fn runtime_executable(resource_root: &Path, runtime: &str, name: &str) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    let executable = format!("{name}.exe");
+    #[cfg(not(target_os = "windows"))]
+    let executable = name.to_string();
+    resource_root
+        .join("runtime")
+        .join(runtime)
+        .join("bin")
+        .join(executable)
+}
+
+fn python_executable(resource_root: &Path) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    return resource_root.join("runtime/python/python.exe");
+    #[cfg(not(target_os = "windows"))]
+    return resource_root.join("runtime/python/bin/python3");
+}
+
+fn office_executable(resource_root: &Path) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    return resource_root.join("runtime/office/program/soffice.exe");
+    #[cfg(target_os = "linux")]
+    return resource_root.join("runtime/office/program/soffice");
+    #[cfg(target_os = "macos")]
+    return resource_root.join("runtime/office/bin/soffice");
+}
+
+fn ocr_executable(resource_root: &Path, name: &str) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        if name != "tesseract" {
+            return resource_root
+                .join("runtime/ocr/poppler/bin")
+                .join(format!("{name}.exe"));
+        }
+    }
+    runtime_executable(resource_root, "ocr", name)
+}
+
+fn supervised_command(
+    resource_root: &Path,
+    parent_pid: &str,
+    executable: &Path,
+    arguments: &[OsString],
+) -> Command {
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = Command::new("powershell.exe");
+        command
+            .arg("-NoLogo")
+            .arg("-NoProfile")
+            .arg("-NonInteractive")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-File")
+            .arg(resource_root.join("runtime/supervise.ps1"))
+            .arg("-DocuflexParentPid")
+            .arg(parent_pid)
+            .arg("-FilePath")
+            .arg(executable)
+            .arg("--")
+            .args(arguments);
+        command
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg(resource_root.join("runtime/supervise.sh"))
+            .arg(parent_pid)
+            .arg(executable)
+            .args(arguments);
+        command
     }
 }
 
@@ -58,22 +143,27 @@ fn spawn_services(
     resource_root: &Path,
     log_directory: &Path,
 ) -> Result<Vec<Child>, Box<dyn std::error::Error>> {
-    let java = resource_root.join("runtime/java/bin/java");
-    let node = resource_root.join("runtime/node/bin/node");
+    let java = runtime_executable(resource_root, "java", "java");
+    let node = runtime_executable(resource_root, "node", "node");
     let pdf2html = resource_root.join("runtime/pdf2htmlEX");
     let ocr = resource_root.join("runtime/ocr");
-    let python = resource_root.join("runtime/python/bin/python3");
-    let document_converter = resource_root.join("runtime/soffice-shim.sh");
-    let supervisor = resource_root.join("runtime/supervise.sh");
+    let python = python_executable(resource_root);
+    let document_converter = office_executable(resource_root);
     let parent_pid = std::process::id().to_string();
+    #[cfg(target_os = "windows")]
+    let classpath = "backend/out;backend/lib/pdfbox-app-3.0.8.jar";
+    #[cfg(not(target_os = "windows"))]
     let classpath = "backend/out:backend/lib/pdfbox-app-3.0.8.jar";
+    let backend_arguments = [
+        OsString::from("-cp"),
+        OsString::from(classpath),
+        OsString::from("DocuflexPdfServer"),
+    ];
     let (backend_stdout, backend_stderr) = log_file(log_directory, "pdf-backend")?;
-    let backend = Command::new("/bin/sh")
+    let mut backend_command =
+        supervised_command(resource_root, &parent_pid, &java, &backend_arguments);
+    let backend = backend_command
         .current_dir(resource_root)
-        .arg(&supervisor)
-        .arg(&parent_pid)
-        .arg(java)
-        .args(["-cp", classpath, "DocuflexPdfServer"])
         .env("PDF_BACKEND_HOST", "127.0.0.1")
         .env("PDF_BACKEND_PORT", BACKEND_PORT.to_string())
         .env(
@@ -85,13 +175,12 @@ fn spawn_services(
         .stderr(backend_stderr)
         .spawn()?;
 
+    let frontend_arguments = [OsString::from("frontend/index.js")];
     let (frontend_stdout, frontend_stderr) = log_file(log_directory, "frontend")?;
-    let frontend = Command::new("/bin/sh")
+    let mut frontend_command =
+        supervised_command(resource_root, &parent_pid, &node, &frontend_arguments);
+    frontend_command
         .current_dir(resource_root)
-        .arg(&supervisor)
-        .arg(&parent_pid)
-        .arg(node)
-        .arg("frontend/index.js")
         .env("HOST", "127.0.0.1")
         .env("PORT", FRONTEND_PORT.to_string())
         .env("ORIGIN", format!("http://127.0.0.1:{FRONTEND_PORT}"))
@@ -103,18 +192,23 @@ fn spawn_services(
         .env("ADDRESS_HEADER", "")
         .env("PROTOCOL_HEADER", "")
         .env("HOST_HEADER", "")
-        .env("PDF2HTMLEX_BIN", pdf2html.join("bin/pdf2htmlEX"))
+        .env(
+            "PDF2HTMLEX_BIN",
+            runtime_executable(resource_root, "pdf2htmlEX", "pdf2htmlEX"),
+        )
         .env("PDF2HTMLEX_DATA_DIR", pdf2html.join("share/pdf2htmlEX"))
-        .env("FONTCONFIG_PATH", pdf2html.join("etc/fonts"))
-        .env("FONTCONFIG_FILE", "fonts.conf")
-        .env("PDFTOPPM_BIN", ocr.join("bin/pdftoppm"))
-        .env("PDFUNITE_BIN", ocr.join("bin/pdfunite"))
-        .env("TESSERACT_BIN", ocr.join("bin/tesseract"))
+        .env("PDFTOPPM_BIN", ocr_executable(resource_root, "pdftoppm"))
+        .env("PDFUNITE_BIN", ocr_executable(resource_root, "pdfunite"))
+        .env("TESSERACT_BIN", ocr_executable(resource_root, "tesseract"))
         .env("TESSDATA_PREFIX", ocr.join("share/tessdata"))
-        .env("PDF_RENDER_BIN", ocr.join("bin/pdftoppm"))
+        .env("PDF_RENDER_BIN", ocr_executable(resource_root, "pdftoppm"))
         .env("DOCUMENT_CONVERTER_PYTHON", python)
-        .env("DOCUMENT_CONVERTER_BIN", document_converter)
-        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("DOCUMENT_CONVERTER_BIN", document_converter);
+    #[cfg(target_os = "macos")]
+    frontend_command
+        .env("FONTCONFIG_PATH", pdf2html.join("etc/fonts"))
+        .env("FONTCONFIG_FILE", "fonts.conf");
+    let frontend = frontend_command
         .stdin(Stdio::null())
         .stdout(frontend_stdout)
         .stderr(frontend_stderr)
@@ -158,29 +252,9 @@ fn choose_download_destination(suggested: &Path) -> Option<PathBuf> {
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
         .unwrap_or("document.pdf");
-    let script = r#"
-on run argv
-  set suggestedName to item 1 of argv
-  set chosenFile to choose file name with prompt "Save exported document" default name suggestedName
-  return POSIX path of chosenFile
-end run
-"#;
-    let output = Command::new("/usr/bin/osascript")
-        .arg("-e")
-        .arg(script)
-        .arg(suggested_name)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let selected = String::from_utf8(output.stdout).ok()?;
-    let selected = selected.trim();
-    if selected.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(selected))
-    }
+    rfd::FileDialog::new()
+        .set_file_name(suggested_name)
+        .save_file()
 }
 
 fn editor_initialization_script() -> &'static str {
@@ -221,18 +295,48 @@ pub fn run() {
 
             let editor_url = Url::parse(&format!("http://127.0.0.1:{FRONTEND_PORT}/editor"))?;
             let allowed_origin = editor_url.origin().ascii_serialization();
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::External(editor_url))
-                .title("Docuflex")
+            let window_actions = app.handle().clone();
+            let window_builder =
+                WebviewWindowBuilder::new(app, "main", WebviewUrl::External(editor_url))
+                    .title("Docuflex")
+                    .inner_size(1440.0, 920.0)
+                    .min_inner_size(960.0, 640.0)
+                    .center();
+            #[cfg(target_os = "macos")]
+            let window_builder = window_builder
                 .title_bar_style(TitleBarStyle::Overlay)
                 .hidden_title(true)
-                .traffic_light_position(LogicalPosition::new(24.0, 24.0))
-                .inner_size(1440.0, 920.0)
-                .min_inner_size(960.0, 640.0)
-                .center()
+                .traffic_light_position(LogicalPosition::new(24.0, 24.0));
+            #[cfg(target_os = "windows")]
+            let window_builder = window_builder.decorations(false).shadow(true);
+            window_builder
                 .initialization_script(editor_initialization_script())
                 .on_navigation(move |url| {
                     if url.scheme() == "about" {
                         return true;
+                    }
+                    if url.origin().ascii_serialization() == allowed_origin {
+                        if let Some(action) = url.path().strip_prefix("/__docuflex/window/") {
+                            if let Some(window) = window_actions.get_webview_window("main") {
+                                match action {
+                                    "minimize" => {
+                                        let _ = window.minimize();
+                                    }
+                                    "maximize" => {
+                                        if window.is_maximized().unwrap_or(false) {
+                                            let _ = window.unmaximize();
+                                        } else {
+                                            let _ = window.maximize();
+                                        }
+                                    }
+                                    "close" => {
+                                        let _ = window.close();
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            return false;
+                        }
                     }
                     url.origin().ascii_serialization() == allowed_origin && url.path() == "/editor"
                 })

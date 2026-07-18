@@ -1,4 +1,9 @@
 (() => {
+  const desktopPlatform = /Windows/i.test(navigator.userAgent)
+    ? 'windows'
+    : /Linux/i.test(navigator.userAgent)
+      ? 'linux'
+      : 'macos';
   const desktopBlobUrls = new Map();
   const originalCreateObjectUrl = URL.createObjectURL.bind(URL);
   const originalRevokeObjectUrl = URL.revokeObjectURL.bind(URL);
@@ -249,6 +254,91 @@
       position: absolute;
     }
 
+    html[data-docuflex-desktop="windows"] .topbar,
+    html[data-docuflex-desktop="windows"] .brand-area,
+    html[data-docuflex-desktop="windows"] .tab-strip,
+    html[data-docuflex-desktop="windows"] .utilities {
+      -webkit-app-region: drag;
+    }
+
+    html[data-docuflex-desktop="windows"] .utilities {
+      padding-right: 138px !important;
+    }
+
+    html[data-docuflex-desktop="windows"] .topbar button,
+    html[data-docuflex-desktop="windows"] .topbar a,
+    html[data-docuflex-desktop="windows"] .topbar input,
+    html[data-docuflex-desktop="windows"] .docuflex-windows-controls {
+      -webkit-app-region: no-drag;
+    }
+
+    .docuflex-windows-controls {
+      display: none;
+    }
+
+    html[data-docuflex-desktop="windows"] .docuflex-windows-controls {
+      display: flex;
+      height: 56px;
+      position: fixed;
+      right: 0;
+      top: 0;
+      z-index: 10002;
+    }
+
+    .docuflex-windows-control {
+      align-items: center;
+      background: transparent;
+      border: 0;
+      color: #616161;
+      display: flex;
+      height: 56px;
+      justify-content: center;
+      padding: 0;
+      position: relative;
+      width: 46px;
+    }
+
+    .docuflex-windows-control:hover {
+      background: rgba(0, 0, 0, 0.07);
+      color: #171717;
+    }
+
+    .docuflex-windows-control.close:hover {
+      background: #c42b1c;
+      color: #fff;
+    }
+
+    .docuflex-windows-control::before,
+    .docuflex-windows-control::after {
+      box-sizing: border-box;
+      content: "";
+      position: absolute;
+    }
+
+    .docuflex-windows-control.minimize::before {
+      border-top: 1px solid currentColor;
+      height: 1px;
+      width: 10px;
+    }
+
+    .docuflex-windows-control.maximize::before {
+      border: 1px solid currentColor;
+      height: 10px;
+      width: 10px;
+    }
+
+    .docuflex-windows-control.close::before,
+    .docuflex-windows-control.close::after {
+      background: currentColor;
+      height: 1px;
+      transform: rotate(45deg);
+      width: 12px;
+    }
+
+    .docuflex-windows-control.close::after {
+      transform: rotate(-45deg);
+    }
+
     .docuflex-desktop-export-menu {
       -webkit-backdrop-filter: blur(18px);
       animation: docuflex-desktop-export-menu-in 125ms cubic-bezier(0.215, 0.61, 0.355, 1);
@@ -294,7 +384,7 @@
   `;
 
   const installDesktopChrome = () => {
-    document.documentElement.dataset.docuflexDesktop = 'macos';
+    document.documentElement.dataset.docuflexDesktop = desktopPlatform;
 
     if (!document.getElementById('docuflex-desktop-chrome')) {
       const style = document.createElement('style');
@@ -304,6 +394,7 @@
     }
 
     const markDragRegion = () => {
+      if (desktopPlatform === 'linux') return;
       document
         .querySelectorAll('.topbar, .brand-area, .tab-strip, .utilities')
         .forEach((element) => element.setAttribute('data-tauri-drag-region', 'deep'));
@@ -314,6 +405,27 @@
       childList: true,
       subtree: true,
     });
+
+    if (desktopPlatform === 'windows' && !document.querySelector('.docuflex-windows-controls')) {
+      const controls = document.createElement('div');
+      controls.className = 'docuflex-windows-controls';
+      controls.setAttribute('aria-label', 'Window controls');
+      for (const [action, label] of [
+        ['minimize', 'Minimize'],
+        ['maximize', 'Maximize or restore'],
+        ['close', 'Close'],
+      ]) {
+        const button = document.createElement('button');
+        button.className = `docuflex-windows-control ${action}`;
+        button.type = 'button';
+        button.setAttribute('aria-label', label);
+        button.addEventListener('click', () => {
+          window.location.assign(`/__docuflex/window/${action}`);
+        });
+        controls.append(button);
+      }
+      document.body.append(controls);
+    }
   };
 
   if (document.readyState === 'loading') {
