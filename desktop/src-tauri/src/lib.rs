@@ -19,6 +19,26 @@ use url::Url;
 const FRONTEND_PORT: u16 = 43_127;
 const BACKEND_PORT: u16 = 43_128;
 
+#[cfg(target_os = "windows")]
+fn native_tool_path(path: PathBuf) -> PathBuf {
+    // Tauri may return verbatim (`\\?\`) paths for installed resources. Older
+    // native tools such as pdf2htmlEX 0.14 and Tesseract do not understand that
+    // prefix even though Node and Rust do.
+    let value = path.to_string_lossy();
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = value.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    path
+}
+
+#[cfg(not(target_os = "windows"))]
+fn native_tool_path(path: PathBuf) -> PathBuf {
+    path
+}
+
 fn configure_platform_webview() {
     #[cfg(target_os = "linux")]
     {
@@ -344,7 +364,7 @@ pub fn run() {
             },
         ))
         .setup(move |app| {
-            let resource_root = app.path().resource_dir()?.join("resources");
+            let resource_root = native_tool_path(app.path().resource_dir()?.join("resources"));
             let log_directory = app.path().app_log_dir()?;
             let children = match spawn_services(&resource_root, &log_directory) {
                 Ok(children) => children,

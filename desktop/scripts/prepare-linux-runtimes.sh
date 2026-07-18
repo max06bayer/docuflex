@@ -66,6 +66,15 @@ for data in eng deu osd; do
   test -n "$source_data"
   cp "$source_data" "$RUNTIME_ROOT/ocr/share/tessdata/$data.traineddata"
 done
+
+# Tesseract's searchable-PDF renderer loads these relative to TESSDATA_PREFIX.
+# The traineddata files alone are enough for plain text OCR, but not PDF output.
+for relative_data in configs/pdf pdf.ttf; do
+  source_data=$(find /usr/share -path "*/tessdata/$relative_data" -print -quit)
+  test -n "$source_data"
+  mkdir -p "$RUNTIME_ROOT/ocr/share/tessdata/$(dirname "$relative_data")"
+  cp "$source_data" "$RUNTIME_ROOT/ocr/share/tessdata/$relative_data"
+done
 mkdir -p "$RUNTIME_ROOT/ocr/licenses"
 for package in poppler-utils tesseract-ocr tesseract-ocr-eng tesseract-ocr-deu tesseract-ocr-osd; do
   if [ -f "/usr/share/doc/$package/copyright" ]; then
