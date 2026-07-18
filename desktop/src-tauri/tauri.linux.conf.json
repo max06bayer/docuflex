@@ -1,0 +1,17 @@
+{
+  "bundle": {
+    "linux": {
+      "appimage": {
+        "files": {
+          "/usr/bin/docuflex-launcher": "../runtime/linux-app-launcher.sh"
+        }
+      },
+      "deb": {
+        "desktopTemplate": "../runtime/docuflex.desktop.hbs",
+        "files": {
+          "/usr/bin/docuflex-launcher": "../runtime/linux-app-launcher.sh"
+        }
+      }
+    }
+  }
+}

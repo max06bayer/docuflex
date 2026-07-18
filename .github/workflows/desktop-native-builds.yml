@@ -115,7 +115,8 @@ jobs:
           appimage=$(find src-tauri/target/release/bundle/appimage -maxdepth 1 -name '*.AppImage' -print -quit)
           test -n "$appimage"
           chmod +x "$appimage"
-          rm -f /tmp/docuflex-page-loaded
+          rm -f /tmp/docuflex-launcher-env /tmp/docuflex-page-loaded
+          DOCUFLEX_LAUNCHER_MARKER=/tmp/docuflex-launcher-env \
           DOCUFLEX_PAGE_LOAD_MARKER=/tmp/docuflex-page-loaded \
             timeout 75s xvfb-run -a "$appimage" > /tmp/docuflex-appimage.log 2>&1 &
           launcher_pid=$!
@@ -132,6 +133,8 @@ jobs:
             fi
             if curl --fail --silent http://127.0.0.1:43128/health >/dev/null \
               && curl --fail --silent http://127.0.0.1:43127/editor >/dev/null \
+              && grep --quiet '^dmabuf=1$' /tmp/docuflex-launcher-env 2>/dev/null \
+              && grep --quiet '^compositing=1$' /tmp/docuflex-launcher-env 2>/dev/null \
               && grep --quiet '^editor-loaded$' /tmp/docuflex-page-loaded 2>/dev/null; then
               echo "Packaged AppImage service and WebKit page-load test passed."
               exit 0
