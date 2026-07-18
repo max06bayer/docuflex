@@ -123,6 +123,17 @@ fn supervised_command(
     }
 }
 
+fn isolate_service_environment(_command: &mut Command) {
+    #[cfg(target_os = "linux")]
+    {
+        // AppImage's AppRun prepends its Ubuntu libraries so the GUI can load.
+        // Those paths must not leak into our self-contained Java and Node
+        // runtimes on rolling distributions such as Arch/CachyOS.
+        _command.env_remove("LD_LIBRARY_PATH");
+        _command.env_remove("LD_PRELOAD");
+    }
+}
+
 impl Drop for Services {
     fn drop(&mut self) {
         self.stop();
@@ -162,6 +173,7 @@ fn spawn_services(
     let (backend_stdout, backend_stderr) = log_file(log_directory, "pdf-backend")?;
     let mut backend_command =
         supervised_command(resource_root, &parent_pid, &java, &backend_arguments);
+    isolate_service_environment(&mut backend_command);
     let backend = backend_command
         .current_dir(resource_root)
         .env("PDF_BACKEND_HOST", "127.0.0.1")
@@ -179,6 +191,7 @@ fn spawn_services(
     let (frontend_stdout, frontend_stderr) = log_file(log_directory, "frontend")?;
     let mut frontend_command =
         supervised_command(resource_root, &parent_pid, &node, &frontend_arguments);
+    isolate_service_environment(&mut frontend_command);
     frontend_command
         .current_dir(resource_root)
         .env("HOST", "127.0.0.1")
@@ -235,15 +248,41 @@ fn service_ready(port: u16, path: &str) -> bool {
     response[..size].starts_with(b"HTTP/1.1 200")
 }
 
-fn wait_for_services() -> Result<(), Box<dyn std::error::Error>> {
-    let deadline = Instant::now() + Duration::from_secs(20);
+fn log_tail(path: &Path) -> String {
+    let Ok(contents) = fs::read_to_string(path) else {
+        return "log unavailable".to_string();
+    };
+    let mut tail = contents.chars().rev().take(4_000).collect::<Vec<_>>();
+    tail.reverse();
+    let tail = tail.into_iter().collect::<String>();
+    if tail.trim().is_empty() {
+        "log is empty".to_string()
+    } else {
+        tail
+    }
+}
+
+fn service_startup_error(log_directory: &Path) -> String {
+    let backend = log_tail(&log_directory.join("pdf-backend.log"));
+    let frontend = log_tail(&log_directory.join("frontend.log"));
+    format!(
+        "Docuflex local services did not start within 60 seconds.\n\
+         Logs: {}\n\n[pdf-backend]\n{}\n\n[frontend]\n{}",
+        log_directory.display(),
+        backend,
+        frontend
+    )
+}
+
+fn wait_for_services(log_directory: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
         if service_ready(BACKEND_PORT, "/health") && service_ready(FRONTEND_PORT, "/editor") {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(120));
     }
-    Err("Docuflex local services did not start within 20 seconds.".into())
+    Err(service_startup_error(log_directory).into())
 }
 
 fn choose_download_destination(suggested: &Path) -> Option<PathBuf> {
@@ -288,7 +327,8 @@ pub fn run() {
                 .lock()
                 .map_err(|_| "Could not track local services.")? = children;
 
-            if let Err(error) = wait_for_services() {
+            if let Err(error) = wait_for_services(&log_directory) {
+                eprintln!("{error}");
                 services_for_setup.stop();
                 return Err(error);
             }

@@ -75,7 +75,7 @@ jobs:
       - name: Install Tauri Linux build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libfuse2
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libfuse2 xvfb
       - uses: actions/setup-node@v4
         with:
           node-version: 24.18.0
@@ -109,6 +109,35 @@ jobs:
           DOCUFLEX_OFFICE_RUNTIME: ${{ github.workspace }}/desktop/.native-runtime/linux/office
           DOCUFLEX_PYTHON_RUNTIME: ${{ env.pythonLocation }}
         run: npm run build
+      - name: Launch-test packaged AppImage
+        working-directory: desktop
+        run: |
+          appimage=$(find src-tauri/target/release/bundle/appimage -maxdepth 1 -name '*.AppImage' -print -quit)
+          test -n "$appimage"
+          chmod +x "$appimage"
+          timeout 75s xvfb-run -a "$appimage" > /tmp/docuflex-appimage.log 2>&1 &
+          launcher_pid=$!
+          cleanup() {
+            kill "$launcher_pid" 2>/dev/null || true
+            wait "$launcher_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for attempt in $(seq 1 60); do
+            if ! kill -0 "$launcher_pid" 2>/dev/null; then
+              cat /tmp/docuflex-appimage.log
+              echo "Packaged AppImage exited before its local services became ready." >&2
+              exit 1
+            fi
+            if curl --fail --silent http://127.0.0.1:43128/health >/dev/null \
+              && curl --fail --silent http://127.0.0.1:43127/editor >/dev/null; then
+              echo "Packaged AppImage local-service launch test passed."
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/docuflex-appimage.log
+          echo "Packaged AppImage local services were not ready within 60 seconds." >&2
+          exit 1
       - name: Upload Linux packages
         uses: actions/upload-artifact@v4
         with:
