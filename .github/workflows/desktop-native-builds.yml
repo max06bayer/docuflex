@@ -152,3 +152,77 @@ jobs:
           path: |
             desktop/src-tauri/target/release/bundle/appimage/*.AppImage
             desktop/src-tauri/target/release/bundle/deb/*.deb
+
+  arch-linux-x64:
+    name: Arch and CachyOS native x64 package
+    needs: linux-x64
+    runs-on: ubuntu-22.04
+    container: archlinux:latest
+    timeout-minutes: 90
+    steps:
+      - name: Install current Arch build and runtime dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed \
+            base-devel binutils curl dbus git gtk3 libayatana-appindicator \
+            librsvg nodejs npm rust webkit2gtk-4.1 xorg-server-xvfb
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: Docuflex-Linux-x64
+          path: desktop/.linux-bundle
+      - name: Extract offline application resources
+        run: |
+          deb=$(find desktop/.linux-bundle -name '*.deb' -print -quit)
+          test -n "$deb"
+          mkdir -p desktop/.deb-extracted desktop/.deb-parts
+          (cd desktop/.deb-parts && ar x "$GITHUB_WORKSPACE/$deb")
+          data_archive=$(find desktop/.deb-parts -name 'data.tar.*' -print -quit)
+          test -n "$data_archive"
+          bsdtar -xf "$data_archive" -C desktop/.deb-extracted
+      - name: Build current-Arch native package
+        run: |
+          chmod +x desktop/scripts/package-arch-linux.sh
+          desktop/scripts/package-arch-linux.sh \
+            "$GITHUB_WORKSPACE/desktop/.deb-extracted" \
+            "$GITHUB_WORKSPACE/desktop/.arch-package"
+      - name: Install and launch-test native package
+        run: |
+          package=$(find desktop/.arch-package -name '*.pkg.tar.zst' -print -quit)
+          test -n "$package"
+          pacman -U --noconfirm "$package"
+          rm -f /tmp/docuflex-page-loaded
+          DOCUFLEX_PAGE_LOAD_MARKER=/tmp/docuflex-page-loaded \
+            timeout 75s xvfb-run -a dbus-run-session -- docuflex-desktop \
+            > /tmp/docuflex-arch.log 2>&1 &
+          app_pid=$!
+          cleanup() {
+            kill "$app_pid" 2>/dev/null || true
+            wait "$app_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for attempt in $(seq 1 60); do
+            if ! kill -0 "$app_pid" 2>/dev/null; then
+              cat /tmp/docuflex-arch.log
+              echo 'Native Arch package exited before startup completed.' >&2
+              exit 1
+            fi
+            if curl --fail --silent http://127.0.0.1:43128/health >/dev/null \
+              && curl --fail --silent http://127.0.0.1:43127/editor >/dev/null \
+              && grep --quiet '^editor-loaded$' /tmp/docuflex-page-loaded 2>/dev/null; then
+              echo 'Native Arch services and WebKit page-load test passed.'
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/docuflex-arch.log
+          echo 'Native Arch package did not become ready within 60 seconds.' >&2
+          exit 1
+      - name: Upload Arch and CachyOS package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Docuflex-Arch-CachyOS-x64
+          if-no-files-found: error
+          path: |
+            desktop/.arch-package/*.pkg.tar.zst
+            desktop/.arch-package/docuflex-arch-ldd.txt

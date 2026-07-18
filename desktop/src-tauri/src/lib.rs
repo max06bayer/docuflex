@@ -22,15 +22,15 @@ const BACKEND_PORT: u16 = 43_128;
 fn configure_platform_webview() {
     #[cfg(target_os = "linux")]
     {
-        // WebKitGTK accelerated compositing can abort its web process while
-        // creating an EGL display on Arch/CachyOS, especially under Wayland
-        // and NVIDIA. Preserve explicit user overrides, otherwise use the
-        // broadly compatible software-rendering path for this editor shell.
-        if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
-            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
-        }
-        if std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none() {
-            std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+        // The AppImage launcher must set these before WebKitGTK is loaded.
+        // Native distro packages use the host WebKit/Mesa stack unmodified.
+        if std::env::var_os("APPIMAGE").is_some() {
+            if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+                std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+            }
+            if std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none() {
+                std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+            }
         }
     }
 }
