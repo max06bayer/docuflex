@@ -10,8 +10,8 @@ const bundles = process.platform === 'darwin'
     ? ['nsis']
     : ['appimage', 'deb'];
 
-execFileSync(process.execPath, [tauriCli, 'build', '--bundles', bundles.join(',')], {
+execFileSync(process.execPath, [tauriCli, 'build', '--verbose', '--bundles', bundles.join(',')], {
   cwd: desktopRoot,
-  env: process.env,
+  env: process.platform === 'linux' ? { ...process.env, NO_STRIP: '1' } : process.env,
   stdio: 'inherit'
 });
