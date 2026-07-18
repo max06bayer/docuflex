@@ -9,9 +9,19 @@ const bundles = process.platform === 'darwin'
   : process.platform === 'win32'
     ? ['nsis']
     : ['appimage', 'deb'];
+const buildEnvironment = process.platform === 'linux'
+  ? {
+      ...process.env,
+      NO_STRIP: '1',
+      LD_LIBRARY_PATH: [
+        join(desktopRoot, 'src-tauri', 'resources', 'runtime', 'java', 'lib', 'server'),
+        process.env.LD_LIBRARY_PATH
+      ].filter(Boolean).join(':')
+    }
+  : process.env;
 
 execFileSync(process.execPath, [tauriCli, 'build', '--verbose', '--bundles', bundles.join(',')], {
   cwd: desktopRoot,
-  env: process.platform === 'linux' ? { ...process.env, NO_STRIP: '1' } : process.env,
+  env: buildEnvironment,
   stdio: 'inherit'
 });
