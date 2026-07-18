@@ -17,6 +17,11 @@ mkdir -p "$RUNTIME_ROOT/pdf2htmlEX/bin" "$RUNTIME_ROOT/pdf2htmlEX/share" \
   "$RUNTIME_ROOT/ocr/bin" "$RUNTIME_ROOT/ocr/lib" "$RUNTIME_ROOT/ocr/share/tessdata" \
   "$RUNTIME_ROOT/office"
 
+cc -O2 -Wall -Wextra -Werror \
+  desktop/runtime/linux-app-launcher.c \
+  -o "$RUNTIME_ROOT/docuflex-launcher"
+chmod +x "$RUNTIME_ROOT/docuflex-launcher"
+
 PDF2HTMLEX_URL=https://github.com/pdf2htmlEX/pdf2htmlEX/releases/download/v0.18.8.rc1/pdf2htmlEX-0.18.8.rc1-master-20200630-Ubuntu-focal-x86_64.AppImage
 PDF2HTMLEX_SHA256=11de2583a3abce5f141fd7fafb1fea2c67b15886e546d6b7675c600012e6ab8c
 PDF2HTMLEX_IMAGE="$RUNTIME_ROOT/pdf2htmlEX.AppImage"
