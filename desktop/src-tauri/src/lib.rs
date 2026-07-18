@@ -9,6 +9,8 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+#[cfg(target_os = "linux")]
+use tauri::webview::PageLoadEvent;
 use tauri::{webview::DownloadEvent, Manager, WebviewUrl, WebviewWindowBuilder};
 #[cfg(target_os = "macos")]
 use tauri::{LogicalPosition, TitleBarStyle};
@@ -16,6 +18,22 @@ use url::Url;
 
 const FRONTEND_PORT: u16 = 43_127;
 const BACKEND_PORT: u16 = 43_128;
+
+fn configure_platform_webview() {
+    #[cfg(target_os = "linux")]
+    {
+        // WebKitGTK accelerated compositing can abort its web process while
+        // creating an EGL display on Arch/CachyOS, especially under Wayland
+        // and NVIDIA. Preserve explicit user overrides, otherwise use the
+        // broadly compatible software-rendering path for this editor shell.
+        if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        }
+        if std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none() {
+            std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+        }
+    }
+}
 
 struct Services {
     children: Mutex<Vec<Child>>,
@@ -302,6 +320,7 @@ fn editor_initialization_script() -> &'static str {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    configure_platform_webview();
     let services = Arc::new(Services {
         children: Mutex::new(Vec::new()),
     });
@@ -336,6 +355,8 @@ pub fn run() {
             let editor_url = Url::parse(&format!("http://127.0.0.1:{FRONTEND_PORT}/editor"))?;
             let allowed_origin = editor_url.origin().ascii_serialization();
             let window_actions = app.handle().clone();
+            #[cfg(target_os = "linux")]
+            let page_load_marker = std::env::var_os("DOCUFLEX_PAGE_LOAD_MARKER").map(PathBuf::from);
             let window_builder =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::External(editor_url))
                     .title("Docuflex")
@@ -349,6 +370,14 @@ pub fn run() {
                 .traffic_light_position(LogicalPosition::new(24.0, 24.0));
             #[cfg(target_os = "windows")]
             let window_builder = window_builder.decorations(false).shadow(true);
+            #[cfg(target_os = "linux")]
+            let window_builder = window_builder.on_page_load(move |_window, payload| {
+                if payload.event() == PageLoadEvent::Finished && payload.url().path() == "/editor" {
+                    if let Some(marker) = &page_load_marker {
+                        let _ = fs::write(marker, b"editor-loaded\n");
+                    }
+                }
+            });
             window_builder
                 .initialization_script(editor_initialization_script())
                 .on_navigation(move |url| {
