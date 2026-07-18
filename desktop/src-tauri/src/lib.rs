@@ -67,7 +67,7 @@ fn python_executable(resource_root: &Path) -> PathBuf {
 
 fn office_executable(resource_root: &Path) -> PathBuf {
     #[cfg(target_os = "windows")]
-    return resource_root.join("runtime/office/program/soffice.exe");
+    return resource_root.join("runtime/office/program/soffice.com");
     #[cfg(target_os = "linux")]
     return resource_root.join("runtime/office/program/soffice");
     #[cfg(target_os = "macos")]

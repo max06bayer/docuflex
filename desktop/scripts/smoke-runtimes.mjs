@@ -12,7 +12,7 @@ const ocrExecutable = (name) => windows && name !== 'tesseract'
   : executable('ocr', name);
 const python = windows ? join(resources, 'runtime', 'python', 'python.exe') : executable('python', 'python3');
 const office = process.platform === 'win32'
-  ? join(resources, 'runtime', 'office', 'program', 'soffice.exe')
+  ? join(resources, 'runtime', 'office', 'program', 'soffice.com')
   : process.platform === 'linux'
     ? join(resources, 'runtime', 'office', 'program', 'soffice')
     : join(resources, 'runtime', 'office', 'bin', 'soffice');

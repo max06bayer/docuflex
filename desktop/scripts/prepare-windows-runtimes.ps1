@@ -76,7 +76,7 @@ Tesseract fast language data 4.1.0: https://github.com/tesseract-ocr/tessdata_fa
 
 choco install libreoffice-fresh --yes --no-progress
 $officeSource = Join-Path $env:ProgramFiles 'LibreOffice'
-if (-not (Test-Path (Join-Path $officeSource 'program/soffice.exe'))) { throw 'LibreOffice installation was not found.' }
+if (-not (Test-Path (Join-Path $officeSource 'program/soffice.com'))) { throw 'LibreOffice console launcher was not found.' }
 Copy-Item $officeSource (Join-Path $RuntimeRoot 'office') -Recurse
 @'
 Windows x64 native LibreOffice runtime from the libreoffice-fresh Chocolatey package.
