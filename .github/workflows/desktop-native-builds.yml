@@ -185,10 +185,10 @@ jobs:
           chmod +x desktop/scripts/package-arch-linux.sh
           desktop/scripts/package-arch-linux.sh \
             "$GITHUB_WORKSPACE/desktop/.deb-extracted" \
-            "$GITHUB_WORKSPACE/desktop/.arch-package"
+            "$GITHUB_WORKSPACE/desktop/arch-package"
       - name: Install and launch-test native package
         run: |
-          package=$(find desktop/.arch-package -name '*.pkg.tar.zst' -print -quit)
+          package=$(find desktop/arch-package -name '*.pkg.tar.zst' -print -quit)
           test -n "$package"
           pacman -U --noconfirm "$package"
           rm -f /tmp/docuflex-page-loaded
@@ -224,5 +224,5 @@ jobs:
           name: Docuflex-Arch-CachyOS-x64
           if-no-files-found: error
           path: |
-            desktop/.arch-package/*.pkg.tar.zst
-            desktop/.arch-package/docuflex-arch-ldd.txt
+            desktop/arch-package/*.pkg.tar.zst
+            desktop/arch-package/docuflex-arch-ldd.txt
