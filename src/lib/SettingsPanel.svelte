@@ -1,47 +1,66 @@
 <script>
-  import { onDestroy } from 'svelte';
+  import { onDestroy, tick } from 'svelte';
   import { cubicOut } from 'svelte/easing';
   import { fade, fly, scale } from 'svelte/transition';
 
   /** @type {() => void} */
   export let onClose = () => {};
-  let legalOpen = false;
+  export let legalOnly = false;
+  export let legalSection = 'top';
+  let legalOpen = legalOnly;
+  /** @type {HTMLDivElement | undefined} */
+  let legalContentElement;
+
+  function closeLegal() {
+    legalOpen = false;
+    if (legalOnly) onClose();
+  }
 
   /** @param {MouseEvent} event */
   function handleBackdropClick(event) {
-    if (event.target === event.currentTarget) legalOpen = false;
+    if (event.target === event.currentTarget) closeLegal();
   }
 
   /** @param {KeyboardEvent} event */
   function handleKeydown(event) {
     if (event.key !== 'Escape') return;
-    if (legalOpen) legalOpen = false;
+    if (legalOpen) closeLegal();
     else onClose();
   }
 
   if (typeof window !== 'undefined') window.addEventListener('keydown', handleKeydown);
   onDestroy(() => window.removeEventListener('keydown', handleKeydown));
+
+  if (legalOnly && typeof window !== 'undefined') {
+    tick().then(() => {
+      if (!legalContentElement || legalSection === 'top') return;
+      const target = legalContentElement.querySelector(`[data-legal-section="${legalSection}"]`);
+      if (target instanceof HTMLElement) legalContentElement.scrollTop = Math.max(0, target.offsetTop - 24);
+    });
+  }
 </script>
 
-<div class="settings-panel" role="dialog" aria-label="Settings" transition:fly={{ x: 18, duration: 240, easing: cubicOut }}>
-  <header class="panel-header">
-    <img src="/settings.svg" alt="" />
-    <h2>Settings</h2>
-    <button class="panel-close" type="button" aria-label="Close Settings" onclick={onClose}><span></span><span></span></button>
-  </header>
+{#if !legalOnly}
+  <div class="settings-panel" role="dialog" aria-label="Settings" transition:fly={{ x: 18, duration: 240, easing: cubicOut }}>
+    <header class="panel-header">
+      <img src="/settings.svg" alt="" />
+      <h2>Settings</h2>
+      <button class="panel-close" type="button" aria-label="Close Settings" onclick={onClose}><span></span><span></span></button>
+    </header>
 
-  <div class="settings-content">
-    <a class="settings-row" href="https://github.com/max06bayer/docuflex" target="_blank" rel="noreferrer">
-      <span>GitHub</span>
-    </a>
-    <a class="settings-row" href="/">
-      <span>Homepage</span>
-    </a>
-    <button class="settings-row" type="button" onclick={() => (legalOpen = true)}>
-      <span>Legal &amp; Privacy</span>
-    </button>
+    <div class="settings-content">
+      <a class="settings-row" href="https://github.com/max06bayer/docuflex" target="_blank" rel="noreferrer">
+        <span>GitHub</span>
+      </a>
+      <a class="settings-row" href="/">
+        <span>Homepage</span>
+      </a>
+      <button class="settings-row" type="button" onclick={() => (legalOpen = true)}>
+        <span>Legal &amp; Privacy</span>
+      </button>
+    </div>
   </div>
-</div>
+{/if}
 
 {#if legalOpen}
   <div class="legal-backdrop" role="presentation" onclick={handleBackdropClick} transition:fade={{ duration: 170 }}>
@@ -55,16 +74,16 @@
       <header class="panel-header legal-header">
         <img src="/settings.svg" alt="" />
         <h2 id="legal-title">Legal &amp; Privacy</h2>
-        <button class="panel-close legal-close" type="button" aria-label="Close Legal and Privacy" onclick={() => (legalOpen = false)}><span></span><span></span></button>
+        <button class="panel-close legal-close" type="button" aria-label="Close Legal and Privacy" onclick={closeLegal}><span></span><span></span></button>
       </header>
 
-      <div class="legal-content">
+      <div class="legal-content" bind:this={legalContentElement}>
         <div class="legal-intro">
           <p>Docuflex is a public beta of a source-available PDF app. It is offered for personal and other non-commercial use and has no user accounts, subscriptions, advertising, or built-in analytics.</p>
           <p class="updated">Last updated: July 17, 2026</p>
         </div>
 
-        <section>
+        <section data-legal-section="privacy">
           <h3>Privacy</h3>
           <p><strong>Controller.</strong> Maximilian Bayer, Lehmgrubenstraße 11, 86932 Pürgen, Germany. Email: <a href="mailto:max06.bayer@gmail.com">max06.bayer@gmail.com</a>.</p>
           <p><strong>Files you open.</strong> Recent documents are stored in your browser using IndexedDB so they can appear on the home screen. Saved signatures are stored in your browser using local storage. They remain on that browser until you delete them in Docuflex, clear the browser’s site data, or the browser removes them.</p>
@@ -72,6 +91,13 @@
           <p><strong>Document processing.</strong> When you use conversion, compression, translation, OCR, protection, flattening, text editing, or export, the document is sent to the Docuflex server serving this app. OCR and PDF conversion run locally on that server. Temporary processing files are removed after the operation and are not used for advertising, profiling, or model training.</p>
           <p><strong>Operational logs.</strong> The application does not use analytics, visitor tracking, third-party error reporting, or external log drains. Application errors and container events may appear in local Coolify and Docker console logs for troubleshooting and security. The app does not create a separate document or visitor database from these logs. Logs remain until the relevant container is replaced or removed, server cleanup runs, or longer retention is necessary to investigate a security incident.</p>
           <p><strong>No sale or advertising sharing.</strong> Docuflex does not sell personal information or share it for cross-context behavioral advertising.</p>
+        </section>
+
+        <section data-legal-section="cookies">
+          <h3>Cookies</h3>
+          <p><strong>Docuflex does not currently set or use cookies.</strong> The app does not use advertising cookies, analytics cookies, tracking pixels, or third-party marketing identifiers.</p>
+          <p>Browser storage used for recent documents and saved signatures is not cookie storage. Recent documents use IndexedDB and saved signatures use local storage, as described in the Privacy section above. You can remove this data from Docuflex or through your browser’s site-data settings.</p>
+          <p>If cookies are introduced in a future version, this notice will be updated before they are used and any consent required by applicable law will be requested.</p>
         </section>
 
         <section>
@@ -86,7 +112,7 @@
           <p>The complete <code>LICENSE</code> file in the repository controls. This summary does not replace or modify it. Third-party dependencies remain governed by their own licenses.</p>
         </section>
 
-        <section>
+        <section data-legal-section="terms">
           <h3>Terms of use</h3>
           <p>You must have the right to use and process any document you upload. Do not use the service to violate law, privacy, confidentiality, intellectual-property rights, or the rights of others.</p>
           <p>Docuflex is a development preview and may contain errors, alter document appearance, or produce incomplete results. Keep an original copy and independently verify important output. It is not legal, medical, financial, archival, or security advice and should not be the only system used for critical documents.</p>
@@ -100,7 +126,7 @@
         </section>
       </div>
 
-      <footer class="legal-footer"><button type="button" onclick={() => (legalOpen = false)}>Done</button></footer>
+      <footer class="legal-footer"><button type="button" onclick={closeLegal}>Done</button></footer>
     </dialog>
   </div>
 {/if}
