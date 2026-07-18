@@ -9,7 +9,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use tauri::webview::PageLoadEvent;
 use tauri::{webview::DownloadEvent, Manager, WebviewUrl, WebviewWindowBuilder};
 #[cfg(target_os = "macos")]
@@ -112,21 +112,12 @@ fn supervised_command(
 ) -> Command {
     #[cfg(target_os = "windows")]
     {
-        let mut command = Command::new("powershell.exe");
-        command
-            .arg("-NoLogo")
-            .arg("-NoProfile")
-            .arg("-NonInteractive")
-            .arg("-ExecutionPolicy")
-            .arg("Bypass")
-            .arg("-File")
-            .arg(resource_root.join("runtime/supervise.ps1"))
-            .arg("-DocuflexParentPid")
-            .arg(parent_pid)
-            .arg("-FilePath")
-            .arg(executable)
-            .arg("--")
-            .args(arguments);
+        use std::os::windows::process::CommandExt;
+
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let _ = (resource_root, parent_pid);
+        let mut command = Command::new(executable);
+        command.args(arguments).creation_flags(CREATE_NO_WINDOW);
         command
     }
     #[cfg(not(target_os = "windows"))]
@@ -303,6 +294,21 @@ fn wait_for_services(log_directory: &Path) -> Result<(), Box<dyn std::error::Err
     Err(service_startup_error(log_directory).into())
 }
 
+fn report_startup_error(log_directory: &Path, error: &dyn std::fmt::Display) {
+    let message = error.to_string();
+    eprintln!("{message}");
+    let _ = fs::create_dir_all(log_directory);
+    let _ = fs::write(log_directory.join("startup.log"), format!("{message}\n"));
+    #[cfg(target_os = "windows")]
+    {
+        let _ = rfd::MessageDialog::new()
+            .set_title("Docuflex could not start")
+            .set_description(&message)
+            .set_level(rfd::MessageLevel::Error)
+            .show();
+    }
+}
+
 fn choose_download_destination(suggested: &Path) -> Option<PathBuf> {
     let suggested_name = suggested
         .file_name()
@@ -340,14 +346,20 @@ pub fn run() {
         .setup(move |app| {
             let resource_root = app.path().resource_dir()?.join("resources");
             let log_directory = app.path().app_log_dir()?;
-            let children = spawn_services(&resource_root, &log_directory)?;
+            let children = match spawn_services(&resource_root, &log_directory) {
+                Ok(children) => children,
+                Err(error) => {
+                    report_startup_error(&log_directory, error.as_ref());
+                    return Err(error);
+                }
+            };
             *services_for_setup
                 .children
                 .lock()
                 .map_err(|_| "Could not track local services.")? = children;
 
             if let Err(error) = wait_for_services(&log_directory) {
-                eprintln!("{error}");
+                report_startup_error(&log_directory, error.as_ref());
                 services_for_setup.stop();
                 return Err(error);
             }
@@ -355,7 +367,7 @@ pub fn run() {
             let editor_url = Url::parse(&format!("http://127.0.0.1:{FRONTEND_PORT}/editor"))?;
             let allowed_origin = editor_url.origin().ascii_serialization();
             let window_actions = app.handle().clone();
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             let page_load_marker = std::env::var_os("DOCUFLEX_PAGE_LOAD_MARKER").map(PathBuf::from);
             let window_builder =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::External(editor_url))
@@ -370,7 +382,7 @@ pub fn run() {
                 .traffic_light_position(LogicalPosition::new(24.0, 24.0));
             #[cfg(target_os = "windows")]
             let window_builder = window_builder.decorations(false).shadow(true);
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             let window_builder = window_builder.on_page_load(move |_window, payload| {
                 if payload.event() == PageLoadEvent::Finished && payload.url().path() == "/editor" {
                     if let Some(marker) = &page_load_marker {

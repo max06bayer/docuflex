@@ -59,6 +59,52 @@ jobs:
         run: |
           $env:DOCUFLEX_PYTHON_RUNTIME = $env:pythonLocation
           npm run build
+      - name: Launch-test packaged Windows runtime
+        shell: pwsh
+        working-directory: desktop
+        run: |
+          $runtimeRoot = Resolve-Path 'src-tauri/resources'
+          $releaseRoot = Resolve-Path 'src-tauri/target/release'
+          $releaseResources = Join-Path $releaseRoot 'resources'
+          if (Test-Path $releaseResources) {
+            Remove-Item -LiteralPath $releaseResources -Recurse -Force
+          }
+          Copy-Item -LiteralPath $runtimeRoot -Destination $releaseResources -Recurse
+          $marker = Join-Path $env:RUNNER_TEMP 'docuflex-windows-page-loaded'
+          Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
+          $env:DOCUFLEX_PAGE_LOAD_MARKER = $marker
+          $process = Start-Process -FilePath (Join-Path $releaseRoot 'docuflex-desktop.exe') -PassThru
+          try {
+            foreach ($attempt in 1..60) {
+              $process.Refresh()
+              if ($process.HasExited) {
+                throw "Packaged Windows app exited with code $($process.ExitCode) before startup completed."
+              }
+              $backendReady = $false
+              $frontendReady = $false
+              try {
+                $backendReady = (Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:43128/health' -TimeoutSec 2).StatusCode -eq 200
+                $frontendReady = (Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:43127/editor' -TimeoutSec 2).StatusCode -eq 200
+              } catch {}
+              if ($backendReady -and $frontendReady -and (Test-Path $marker) -and ((Get-Content $marker -Raw).Trim() -eq 'editor-loaded')) {
+                Write-Host 'Packaged Windows services and WebView page-load test passed.'
+                exit 0
+              }
+              Start-Sleep -Seconds 1
+            }
+            throw 'Packaged Windows app did not become ready within 60 seconds.'
+          } finally {
+            if (-not $process.HasExited) {
+              & taskkill.exe /PID $process.Id /T /F | Out-Null
+            }
+            $logRoot = Join-Path $env:LOCALAPPDATA 'com.docuflex.editor/logs'
+            if (Test-Path $logRoot) {
+              Get-ChildItem $logRoot -Filter '*.log' | ForEach-Object {
+                Write-Host "[$($_.Name)]"
+                Get-Content $_.FullName
+              }
+            }
+          }
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4
         with:

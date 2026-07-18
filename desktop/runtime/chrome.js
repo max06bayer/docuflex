@@ -254,6 +254,14 @@
       position: absolute;
     }
 
+    html[data-docuflex-desktop="linux"] .editor-shell {
+      height: 117.6470588dvh !important;
+      transform: scale(0.85);
+      transform-origin: top left;
+      width: 117.6470588vw !important;
+      zoom: 1 !important;
+    }
+
     html[data-docuflex-desktop="windows"] .topbar,
     html[data-docuflex-desktop="windows"] .brand-area,
     html[data-docuflex-desktop="windows"] .tab-strip,
