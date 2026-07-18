@@ -270,7 +270,7 @@
     }
 
     html[data-docuflex-desktop="windows"] .utilities {
-      padding-right: 138px !important;
+      padding-right: 168px !important;
     }
 
     html[data-docuflex-desktop="windows"] .topbar button,
@@ -286,7 +286,7 @@
 
     html[data-docuflex-desktop="windows"] .docuflex-windows-controls {
       display: flex;
-      height: 56px;
+      height: 32px;
       position: fixed;
       right: 0;
       top: 0;
@@ -299,7 +299,7 @@
       border: 0;
       color: #616161;
       display: flex;
-      height: 56px;
+      height: 32px;
       justify-content: center;
       padding: 0;
       position: relative;
