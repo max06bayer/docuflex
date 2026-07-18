@@ -12,7 +12,8 @@ if (-not $RuntimeRoot.EndsWith($expectedSuffix, [StringComparison]::OrdinalIgnor
 
 function Get-VerifiedArchive {
   param([string]$Url, [string]$Path, [string]$Sha256)
-  Invoke-WebRequest -Uri $Url -OutFile $Path -UseBasicParsing
+  & curl.exe --location --fail --retry 5 --retry-all-errors --connect-timeout 30 --output $Path $Url
+  if ($LASTEXITCODE -ne 0) { throw "Download failed after retries: $Url" }
   $actual = (Get-FileHash -Path $Path -Algorithm SHA256).Hash.ToLowerInvariant()
   if ($actual -ne $Sha256) { throw "Checksum failed for $Url" }
 }
@@ -62,9 +63,7 @@ $trainedData = @{
 }
 foreach ($language in $trainedData.Keys) {
   $destination = Join-Path $ocrRuntime "share/tessdata/$language.traineddata"
-  Invoke-WebRequest -Uri "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/4.1.0/$language.traineddata" -OutFile $destination -UseBasicParsing
-  $actual = (Get-FileHash -Path $destination -Algorithm SHA256).Hash.ToLowerInvariant()
-  if ($actual -ne $trainedData[$language]) { throw "Checksum failed for $language.traineddata" }
+  Get-VerifiedArchive -Url "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/4.1.0/$language.traineddata" -Path $destination -Sha256 $trainedData[$language]
 }
 Remove-Item -LiteralPath $popplerArchive, $popplerExtract -Recurse -Force
 @'
