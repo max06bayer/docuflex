@@ -1,0 +1,15 @@
+{
+  "name": "docuflex-desktop-build",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "stage": "node scripts/prepare.mjs",
+    "build": "npm run stage && tauri build --bundles app",
+    "dev": "npm run stage && tauri dev"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4",
+    "pngjs": "7.0.0"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-window",
+  "description": "Allows the packaged macOS editor window to use its custom native drag regions.",
+  "remote": {
+    "urls": ["http://127.0.0.1:43127/*"]
+  },
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging"
+  ],
+  "platforms": ["macOS"]
+}

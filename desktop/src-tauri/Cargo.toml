@@ -1,0 +1,19 @@
+[package]
+name = "docuflex-desktop"
+version = "0.0.1"
+description = "Docuflex PDF editor for macOS"
+authors = ["Maximilian Bayer"]
+edition = "2021"
+
+[lib]
+name = "docuflex_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.5.6", features = [] }
+
+[dependencies]
+libc = "0.2.186"
+tauri = { version = "2.11.5", features = [] }
+tauri-plugin-single-instance = "2.4.0"
+url = "2.5.7"

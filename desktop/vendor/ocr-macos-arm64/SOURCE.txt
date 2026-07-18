@@ -1,0 +1,10 @@
+Docuflex offline OCR runtime
+
+Tesseract 5.5.2: https://github.com/tesseract-ocr/tesseract/tree/5.5.2
+Poppler 26.07.0: https://poppler.freedesktop.org/
+Tesseract fast language data 4.1.0: https://github.com/tesseract-ocr/tessdata_fast/tree/4.1.0
+
+Language data SHA-256:
+deu 19d219bbb6672c869d20a9636c6816a81eb9a71796cb93ebe0cb1530e2cdb22d
+eng 7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2
+osd 9cf5d576fcc47564f11265841e5ca839001e7e6f38ff7f7aacf46d15a96b00ff
