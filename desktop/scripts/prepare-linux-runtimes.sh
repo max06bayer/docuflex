@@ -68,7 +68,9 @@ for package in poppler-utils tesseract-ocr tesseract-ocr-eng tesseract-ocr-deu t
   fi
 done
 
-cp -a /usr/lib/libreoffice/. "$RUNTIME_ROOT/office/"
+# Dereference Ubuntu's links into /usr/share/libreoffice so the packaged
+# runtime remains self-contained after it leaves the build machine.
+cp -aL /usr/lib/libreoffice/. "$RUNTIME_ROOT/office/"
 chmod +x "$RUNTIME_ROOT/office/program/soffice" "$RUNTIME_ROOT/office/program/soffice.bin"
 
 cat > "$RUNTIME_ROOT/ocr/SOURCE.txt" <<'EOF'
