@@ -26,11 +26,15 @@ $pdfExtract = Join-Path $RuntimeRoot 'pdf2htmlEX-extract'
 Expand-Archive -LiteralPath $pdfArchive -DestinationPath $pdfExtract
 $pdfRuntime = Join-Path $RuntimeRoot 'pdf2htmlEX'
 New-Item -ItemType Directory -Force -Path (Join-Path $pdfRuntime 'bin'), (Join-Path $pdfRuntime 'share') | Out-Null
-Copy-Item (Join-Path $pdfExtract 'pdf2htmlEX.exe') (Join-Path $pdfRuntime 'bin/pdf2htmlEX.exe')
+Copy-Item (Join-Path $pdfExtract 'pdf2htmlEX.exe') (Join-Path $pdfRuntime 'bin/pdf2htmlEX-native.exe')
+$pdfWrapperSource = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../runtime/pdf2htmlEX-windows-wrapper.rs'))
+& rustc $pdfWrapperSource -C opt-level=z -C strip=symbols -o (Join-Path $pdfRuntime 'bin/pdf2htmlEX.exe')
+if ($LASTEXITCODE -ne 0) { throw 'Could not compile the native Windows pdf2htmlEX launcher.' }
 Copy-Item (Join-Path $pdfExtract 'data') (Join-Path $pdfRuntime 'share/pdf2htmlEX') -Recurse
 Copy-Item (Join-Path $pdfExtract 'LICENSE*') $pdfRuntime
 @'
-Windows native static pdf2htmlEX 0.14.6 with poppler-data.
+Windows native static pdf2htmlEX 0.14.6 with poppler-data and a native launcher
+that normalizes the newer endpoint CLI shorthands for this legacy build.
 Source and binary distribution: https://soft.rubypdf.com/software/pdf2htmlex-windows-version
 Archive SHA-256: e92aa55699c3e9d9b4b4954bea157e59b5c3363cbe9a7713495c553544026354
 '@ | Set-Content -Path (Join-Path $pdfRuntime 'SOURCE.txt') -Encoding UTF8
