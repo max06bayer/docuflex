@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const repositoryRoot = resolve(desktopRoot, '..');
 const tauriRoot = join(desktopRoot, 'src-tauri');
+const distRoot = join(desktopRoot, 'dist');
 const resourcesRoot = join(tauriRoot, 'resources');
 const cacheRoot = join(desktopRoot, '.cache');
 const nodeVersion = 'v24.18.0';
@@ -225,6 +226,21 @@ async function writeRuntimeManifest() {
   await writeFile(join(resourcesRoot, 'RUNTIME.json'), `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
+async function writeDesktopShell() {
+  await rm(distRoot, { recursive: true, force: true });
+  await mkdir(distRoot, { recursive: true });
+  await writeFile(join(distRoot, 'index.html'), `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Docuflex</title>
+  </head>
+  <body></body>
+</html>
+`);
+}
+
 async function main() {
   if (!supportedTargets.has(target)) throw new Error(`Unsupported desktop build target: ${target}`);
   await mkdir(cacheRoot, { recursive: true });
@@ -240,6 +256,7 @@ async function main() {
   await preparePythonRuntime();
   await generateIcons();
   await writeRuntimeManifest();
+  await writeDesktopShell();
 }
 
 await main();
