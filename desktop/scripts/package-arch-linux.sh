@@ -28,13 +28,20 @@ install -Dm755 "$TAURI_ROOT/target/release/docuflex-desktop" \
   "$PACKAGE_ROOT/usr/bin/docuflex-desktop"
 mkdir -p "$PACKAGE_ROOT/usr/lib/$RESOURCE_NAME"
 cp -a "$RESOURCE_SOURCE/." "$PACKAGE_ROOT/usr/lib/$RESOURCE_NAME/"
+INSTALLED_RESOURCE_ROOT="$PACKAGE_ROOT/usr/lib/$RESOURCE_NAME"
+if [ -d "$INSTALLED_RESOURCE_ROOT/resources/runtime" ]; then
+  RUNTIME_ROOT="$INSTALLED_RESOURCE_ROOT/resources/runtime"
+else
+  RUNTIME_ROOT="$INSTALLED_RESOURCE_ROOT/runtime"
+fi
+test -d "$RUNTIME_ROOT"
 
 # The Debian payload carries Ubuntu-compatible OCR binaries for AppImage and
 # Debian users. A native Arch package must use current Arch Poppler/Tesseract
 # binaries instead of mixing Ubuntu ELF dependencies with rolling libraries.
 for tool in pdftoppm pdfunite tesseract; do
   install -Dm755 /dev/stdin \
-    "$PACKAGE_ROOT/usr/lib/$RESOURCE_NAME/runtime/ocr/bin/$tool" <<EOF
+    "$RUNTIME_ROOT/ocr/bin/$tool" <<EOF
 #!/bin/sh
 exec /usr/bin/$tool "\$@"
 EOF
@@ -42,7 +49,7 @@ done
 
 # pdf2htmlEX remains the checksum-pinned extracted AppImage build, but its
 # launcher needs only the payload's legacy libxml2 soname on rolling Arch.
-PDF2HTML_RUNTIME="$PACKAGE_ROOT/usr/lib/$RESOURCE_NAME/runtime/pdf2htmlEX"
+PDF2HTML_RUNTIME="$RUNTIME_ROOT/pdf2htmlEX"
 mkdir -p "$PDF2HTML_RUNTIME/compat"
 LIBXML_SOURCE=$(find "$PDF2HTML_RUNTIME/app" -type f -name 'libxml2.so.2*' -print -quit)
 if [ -z "$LIBXML_SOURCE" ]; then
