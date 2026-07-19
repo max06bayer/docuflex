@@ -302,6 +302,11 @@ fn spawn_services(
             format!("http://127.0.0.1:{BACKEND_PORT}"),
         )
         .env("BODY_SIZE_LIMIT", (230_u64 * 1024 * 1024).to_string())
+        // The desktop invokes only its checksum-pinned bundled tools. Linux's
+        // RLIMIT_NPROC counts every process owned by the logged-in user, so the
+        // server profile's limit can prevent pdf2htmlEX from forking on a
+        // normal KDE session and can hide OCR fallback ENOENT detection.
+        .env("DISABLE_DOCUMENT_PRLIMIT", "1")
         .env("ADDRESS_HEADER", "")
         .env("PROTOCOL_HEADER", "")
         .env("HOST_HEADER", "")
