@@ -47,16 +47,33 @@ exec /usr/bin/$tool "\$@"
 EOF
 done
 
-# pdf2htmlEX remains the checksum-pinned extracted AppImage build, but its
-# launcher needs only the payload's legacy libxml2 soname on rolling Arch.
+# pdf2htmlEX remains the checksum-pinned extracted AppImage build. Copy only
+# sonames absent from rolling Arch into an isolated compatibility directory;
+# exposing the payload's whole Ubuntu library tree would conflict with host
+# GTK/GLib while resolving too little breaks on legacy ICU/libxml sonames.
 PDF2HTML_RUNTIME="$RUNTIME_ROOT/pdf2htmlEX"
 mkdir -p "$PDF2HTML_RUNTIME/compat"
-LIBXML_SOURCE=$(find "$PDF2HTML_RUNTIME/app" -type f -name 'libxml2.so.2*' -print -quit)
-if [ -z "$LIBXML_SOURCE" ]; then
-  echo 'Bundled pdf2htmlEX payload does not contain libxml2.so.2.' >&2
+for pass in 1 2 3 4 5 6 7 8; do
+  missing_libraries=$(LD_LIBRARY_PATH="$PDF2HTML_RUNTIME/compat" \
+    ldd "$PDF2HTML_RUNTIME/app/AppRun" | awk '/=> not found/ { print $1 }')
+  [ -n "$missing_libraries" ] || break
+  while IFS= read -r library; do
+    [ -n "$library" ] || continue
+    library_source=$(find "$PDF2HTML_RUNTIME/app" -name "$library" -print -quit)
+    if [ -z "$library_source" ]; then
+      echo "Bundled pdf2htmlEX payload does not contain $library." >&2
+      exit 1
+    fi
+    cp -L "$library_source" "$PDF2HTML_RUNTIME/compat/$library"
+  done <<EOF
+$missing_libraries
+EOF
+done
+if LD_LIBRARY_PATH="$PDF2HTML_RUNTIME/compat" \
+  ldd "$PDF2HTML_RUNTIME/app/AppRun" | grep -q '=> not found'; then
+  echo 'Bundled pdf2htmlEX still has unresolved Arch compatibility libraries.' >&2
   exit 1
 fi
-cp -L "$LIBXML_SOURCE" "$PDF2HTML_RUNTIME/compat/libxml2.so.2"
 install -Dm755 /dev/stdin \
   "$PDF2HTML_RUNTIME/bin/pdf2htmlEX" <<'EOF'
 #!/bin/bash
@@ -78,6 +95,7 @@ while [ "$#" -gt 0 ]; do
 done
 exec "$APP_ROOT/AppRun" "${normalized_args[@]}"
 EOF
+"$PDF2HTML_RUNTIME/bin/pdf2htmlEX" --version >/dev/null
 install -Dm644 "$TAURI_ROOT/icons/128x128.png" \
   "$PACKAGE_ROOT/usr/share/icons/hicolor/128x128/apps/docuflex.png"
 install -Dm644 /dev/stdin "$PACKAGE_ROOT/usr/share/applications/docuflex.desktop" <<'EOF'
