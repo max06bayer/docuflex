@@ -423,6 +423,7 @@ pub fn run() {
         .and_then(|cwd| pdf_path_from_arguments(std::env::args(), &cwd));
     let pending_pdf: PendingPdf = Arc::new(Mutex::new(initial_pdf));
     let pending_pdf_for_instance = Arc::clone(&pending_pdf);
+    #[cfg(target_os = "macos")]
     let pending_pdf_for_events = Arc::clone(&pending_pdf);
     let services = Arc::new(Services {
         children: Mutex::new(Vec::new()),
@@ -545,6 +546,7 @@ pub fn run() {
         .expect("could not build Docuflex");
 
     app.run(move |app_handle, event| {
+        #[cfg(target_os = "macos")]
         if let tauri::RunEvent::Opened { urls } = &event {
             if let Some(path) = urls.iter().find_map(|url| {
                 let path = url.to_file_path().ok()?;
