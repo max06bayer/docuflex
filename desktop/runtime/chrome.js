@@ -5,6 +5,18 @@
       ? 'linux'
       : 'macos';
   const desktopBlobUrls = new Map();
+  const NativeDesktopFile = globalThis.File;
+  const desktopConstructedFileBytes = new WeakMap();
+  if (typeof NativeDesktopFile === 'function') {
+    globalThis.File = class DocuflexDesktopFile extends NativeDesktopFile {
+      constructor(parts, name, options) {
+        super(parts, name, options);
+        if (parts?.length === 1 && parts[0] instanceof ArrayBuffer) {
+          desktopConstructedFileBytes.set(this, parts[0].slice(0));
+        }
+      }
+    };
+  }
   const originalCreateObjectUrl = URL.createObjectURL.bind(URL);
   const originalRevokeObjectUrl = URL.revokeObjectURL.bind(URL);
   URL.createObjectURL = (object) => {
@@ -74,7 +86,9 @@
       configurable: true,
       enumerable: false,
       value() {
-        if (!(this instanceof File)) return originalArrayBuffer.call(this);
+        if (!(this instanceof NativeDesktopFile)) return originalArrayBuffer.call(this);
+        const constructedBytes = desktopConstructedFileBytes.get(this);
+        if (constructedBytes) return Promise.resolve(constructedBytes.slice(0));
         let active = activeReads.get(this);
         if (!active) {
           const key = fileKey(this);
@@ -284,6 +298,13 @@
       padding-right: 168px !important;
     }
 
+    html[data-docuflex-desktop="linux"] .topbar,
+    html[data-docuflex-desktop="linux"] .brand-area,
+    html[data-docuflex-desktop="linux"] .tab-strip,
+    html[data-docuflex-desktop="linux"] .utilities {
+      -webkit-app-region: no-drag !important;
+    }
+
     html[data-docuflex-desktop="windows"] .topbar button,
     html[data-docuflex-desktop="windows"] .topbar a,
     html[data-docuflex-desktop="windows"] .topbar input,
@@ -418,6 +439,7 @@
     }
 
     const markDragRegion = () => {
+      if (desktopPlatform === 'linux') return;
       document.querySelectorAll('.topbar, .brand-area, .tab-strip, .utilities').forEach((element) => {
         element.setAttribute('data-tauri-drag-region', '');
         element.querySelectorAll('*').forEach((child) => {
