@@ -28,6 +28,17 @@ install -Dm755 "$TAURI_ROOT/target/release/docuflex-desktop" \
   "$PACKAGE_ROOT/usr/bin/docuflex-desktop"
 mkdir -p "$PACKAGE_ROOT/usr/lib/$RESOURCE_NAME"
 cp -a "$RESOURCE_SOURCE/." "$PACKAGE_ROOT/usr/lib/$RESOURCE_NAME/"
+
+# The Debian payload carries Ubuntu-compatible OCR binaries for AppImage and
+# Debian users. A native Arch package must use current Arch Poppler/Tesseract
+# binaries instead of mixing Ubuntu ELF dependencies with rolling libraries.
+for tool in pdftoppm pdfunite tesseract; do
+  install -Dm755 /dev/stdin \
+    "$PACKAGE_ROOT/usr/lib/$RESOURCE_NAME/runtime/ocr/bin/$tool" <<EOF
+#!/bin/sh
+exec /usr/bin/$tool "\$@"
+EOF
+done
 install -Dm644 "$TAURI_ROOT/icons/128x128.png" \
   "$PACKAGE_ROOT/usr/share/icons/hicolor/128x128/apps/docuflex.png"
 install -Dm644 /dev/stdin "$PACKAGE_ROOT/usr/share/applications/docuflex.desktop" <<'EOF'
@@ -59,6 +70,8 @@ depend = webkit2gtk-4.1
 depend = gtk3
 depend = libayatana-appindicator
 depend = librsvg
+depend = poppler
+depend = tesseract
 EOF
 
 mkdir -p "$OUTPUT_DIR"

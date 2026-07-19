@@ -232,7 +232,7 @@ jobs:
           pacman -Syu --noconfirm
           pacman -S --noconfirm --needed \
             base-devel binutils curl dbus git gtk3 libayatana-appindicator \
-            librsvg nodejs npm rust webkit2gtk-4.1 xorg-server-xvfb
+            librsvg nodejs npm poppler rust tesseract webkit2gtk-4.1 xorg-server-xvfb
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
