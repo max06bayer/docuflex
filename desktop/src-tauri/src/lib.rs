@@ -1,4 +1,6 @@
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use std::{
+    collections::HashMap,
     ffi::OsString,
     fs::{self, File},
     io::{Read, Write},
@@ -18,6 +20,75 @@ use url::Url;
 
 const FRONTEND_PORT: u16 = 43_127;
 const BACKEND_PORT: u16 = 43_128;
+const MAX_OPEN_PDF_BYTES: u64 = 230 * 1024 * 1024;
+
+type PendingPdf = Arc<Mutex<Option<PathBuf>>>;
+
+fn pdf_path_from_arguments<I, S>(arguments: I, cwd: &Path) -> Option<PathBuf>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    arguments.into_iter().skip(1).find_map(|argument| {
+        let value = argument.as_ref();
+        let candidate = if let Ok(url) = Url::parse(value) {
+            if url.scheme() != "file" {
+                return None;
+            }
+            url.to_file_path().ok()?
+        } else {
+            let path = PathBuf::from(value);
+            if path.is_absolute() {
+                path
+            } else {
+                cwd.join(path)
+            }
+        };
+        let is_pdf = candidate
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"));
+        (is_pdf && candidate.is_file()).then_some(candidate)
+    })
+}
+
+fn notify_pending_pdf(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.eval("window.dispatchEvent(new Event('docuflex-native-open-pdf'))");
+    }
+}
+
+#[tauri::command]
+fn take_pending_pdf(
+    pending: tauri::State<'_, PendingPdf>,
+) -> Result<Option<HashMap<String, String>>, String> {
+    let path = pending
+        .lock()
+        .map_err(|_| "Could not access the pending PDF.".to_string())?
+        .take();
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let metadata =
+        fs::metadata(&path).map_err(|error| format!("Could not inspect the PDF: {error}"))?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_OPEN_PDF_BYTES {
+        return Err("The selected PDF is empty or too large.".to_string());
+    }
+    let bytes = fs::read(&path).map_err(|error| format!("Could not read the PDF: {error}"))?;
+    if !bytes.starts_with(b"%PDF-") {
+        return Err("The selected file is not a valid PDF.".to_string());
+    }
+    let mut result = HashMap::new();
+    result.insert(
+        "name".to_string(),
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("document.pdf")
+            .to_string(),
+    );
+    result.insert("base64".to_string(), BASE64_STANDARD.encode(bytes));
+    Ok(Some(result))
+}
 
 #[cfg(target_os = "windows")]
 fn native_tool_path(path: PathBuf) -> PathBuf {
@@ -347,6 +418,12 @@ fn editor_initialization_script() -> &'static str {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     configure_platform_webview();
+    let initial_pdf = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| pdf_path_from_arguments(std::env::args(), &cwd));
+    let pending_pdf: PendingPdf = Arc::new(Mutex::new(initial_pdf));
+    let pending_pdf_for_instance = Arc::clone(&pending_pdf);
+    let pending_pdf_for_events = Arc::clone(&pending_pdf);
     let services = Arc::new(Services {
         children: Mutex::new(Vec::new()),
     });
@@ -354,8 +431,16 @@ pub fn run() {
     let services_for_exit = Arc::clone(&services);
 
     let app = tauri::Builder::default()
+        .manage(Arc::clone(&pending_pdf))
+        .invoke_handler(tauri::generate_handler![take_pending_pdf])
         .plugin(tauri_plugin_single_instance::init(
-            |app, _arguments, _cwd| {
+            move |app, arguments, cwd| {
+                if let Some(path) = pdf_path_from_arguments(arguments, Path::new(&cwd)) {
+                    if let Ok(mut pending) = pending_pdf_for_instance.lock() {
+                        *pending = Some(path);
+                    }
+                    notify_pending_pdf(app);
+                }
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.show();
                     let _ = window.unminimize();
@@ -400,7 +485,7 @@ pub fn run() {
                 .title_bar_style(TitleBarStyle::Overlay)
                 .hidden_title(true)
                 .traffic_light_position(LogicalPosition::new(24.0, 24.0));
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             let window_builder = window_builder.decorations(false).shadow(true);
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             let window_builder = window_builder.on_page_load(move |_window, payload| {
@@ -459,7 +544,21 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("could not build Docuflex");
 
-    app.run(move |_app_handle, event| {
+    app.run(move |app_handle, event| {
+        if let tauri::RunEvent::Opened { urls } = &event {
+            if let Some(path) = urls.iter().find_map(|url| {
+                let path = url.to_file_path().ok()?;
+                path.extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+                    .then_some(path)
+            }) {
+                if let Ok(mut pending) = pending_pdf_for_events.lock() {
+                    *pending = Some(path);
+                }
+                notify_pending_pdf(app_handle);
+            }
+        }
         if matches!(
             event,
             tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }

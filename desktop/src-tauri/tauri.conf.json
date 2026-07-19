@@ -7,6 +7,7 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [],
     "security": {
       "csp": null
@@ -15,6 +16,15 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "fileAssociations": [
+      {
+        "ext": ["pdf"],
+        "mimeType": "application/pdf",
+        "name": "PDF document",
+        "role": "Editor",
+        "rank": "Default"
+      }
+    ],
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
     "resources": ["resources/**/*"],
     "macOS": {

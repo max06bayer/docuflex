@@ -199,6 +199,7 @@ jobs:
               && grep --quiet '^compositing=1$' /tmp/docuflex-launcher-env 2>/dev/null \
               && grep --quiet '^editor-loaded$' /tmp/docuflex-page-loaded 2>/dev/null; then
               echo "Packaged AppImage service and WebKit page-load test passed."
+              node scripts/smoke-live-document-tools.mjs
               exit 0
             fi
             sleep 1
@@ -273,6 +274,11 @@ jobs:
               && curl --fail --silent http://127.0.0.1:43127/editor >/dev/null \
               && grep --quiet '^editor-loaded$' /tmp/docuflex-page-loaded 2>/dev/null; then
               echo 'Native Arch services and WebKit page-load test passed.'
+              if ! node desktop/scripts/smoke-live-document-tools.mjs; then
+                find "$HOME/.local/share/com.docuflex.editor/logs" -type f -name '*.log' \
+                  -exec sh -c 'echo "[$1]"; cat "$1"' _ {} \; 2>/dev/null || true
+                exit 1
+              fi
               exit 0
             fi
             sleep 1

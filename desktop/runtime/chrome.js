@@ -265,26 +265,36 @@
     html[data-docuflex-desktop="windows"] .topbar,
     html[data-docuflex-desktop="windows"] .brand-area,
     html[data-docuflex-desktop="windows"] .tab-strip,
-    html[data-docuflex-desktop="windows"] .utilities {
+    html[data-docuflex-desktop="windows"] .utilities,
+    html[data-docuflex-desktop="linux"] .topbar,
+    html[data-docuflex-desktop="linux"] .brand-area,
+    html[data-docuflex-desktop="linux"] .tab-strip,
+    html[data-docuflex-desktop="linux"] .utilities {
       -webkit-app-region: drag;
     }
 
-    html[data-docuflex-desktop="windows"] .utilities {
+    html[data-docuflex-desktop="windows"] .utilities,
+    html[data-docuflex-desktop="linux"] .utilities {
       padding-right: 168px !important;
     }
 
     html[data-docuflex-desktop="windows"] .topbar button,
     html[data-docuflex-desktop="windows"] .topbar a,
     html[data-docuflex-desktop="windows"] .topbar input,
-    html[data-docuflex-desktop="windows"] .docuflex-windows-controls {
+    html[data-docuflex-desktop="linux"] .topbar button,
+    html[data-docuflex-desktop="linux"] .topbar a,
+    html[data-docuflex-desktop="linux"] .topbar input,
+    html[data-docuflex-desktop="windows"] .docuflex-window-controls,
+    html[data-docuflex-desktop="linux"] .docuflex-window-controls {
       -webkit-app-region: no-drag;
     }
 
-    .docuflex-windows-controls {
+    .docuflex-window-controls {
       display: none;
     }
 
-    html[data-docuflex-desktop="windows"] .docuflex-windows-controls {
+    html[data-docuflex-desktop="windows"] .docuflex-window-controls,
+    html[data-docuflex-desktop="linux"] .docuflex-window-controls {
       display: flex;
       height: 32px;
       position: fixed;
@@ -293,7 +303,7 @@
       z-index: 10002;
     }
 
-    .docuflex-windows-control {
+    .docuflex-window-control {
       align-items: center;
       background: transparent;
       border: 0;
@@ -306,44 +316,44 @@
       width: 46px;
     }
 
-    .docuflex-windows-control:hover {
+    .docuflex-window-control:hover {
       background: rgba(0, 0, 0, 0.07);
       color: #171717;
     }
 
-    .docuflex-windows-control.close:hover {
+    .docuflex-window-control.close:hover {
       background: #c42b1c;
       color: #fff;
     }
 
-    .docuflex-windows-control::before,
-    .docuflex-windows-control::after {
+    .docuflex-window-control::before,
+    .docuflex-window-control::after {
       box-sizing: border-box;
       content: "";
       position: absolute;
     }
 
-    .docuflex-windows-control.minimize::before {
+    .docuflex-window-control.minimize::before {
       border-top: 1px solid currentColor;
       height: 1px;
       width: 10px;
     }
 
-    .docuflex-windows-control.maximize::before {
+    .docuflex-window-control.maximize::before {
       border: 1px solid currentColor;
       height: 10px;
       width: 10px;
     }
 
-    .docuflex-windows-control.close::before,
-    .docuflex-windows-control.close::after {
+    .docuflex-window-control.close::before,
+    .docuflex-window-control.close::after {
       background: currentColor;
       height: 1px;
       transform: rotate(45deg);
       width: 12px;
     }
 
-    .docuflex-windows-control.close::after {
+    .docuflex-window-control.close::after {
       transform: rotate(-45deg);
     }
 
@@ -402,7 +412,6 @@
     }
 
     const markDragRegion = () => {
-      if (desktopPlatform === 'linux') return;
       document
         .querySelectorAll('.topbar, .brand-area, .tab-strip, .utilities')
         .forEach((element) => element.setAttribute('data-tauri-drag-region', 'deep'));
@@ -414,9 +423,9 @@
       subtree: true,
     });
 
-    if (desktopPlatform === 'windows' && !document.querySelector('.docuflex-windows-controls')) {
+    if (desktopPlatform !== 'macos' && !document.querySelector('.docuflex-window-controls')) {
       const controls = document.createElement('div');
-      controls.className = 'docuflex-windows-controls';
+      controls.className = 'docuflex-window-controls';
       controls.setAttribute('aria-label', 'Window controls');
       for (const [action, label] of [
         ['minimize', 'Minimize'],
@@ -424,7 +433,7 @@
         ['close', 'Close'],
       ]) {
         const button = document.createElement('button');
-        button.className = `docuflex-windows-control ${action}`;
+        button.className = `docuflex-window-control ${action}`;
         button.type = 'button';
         button.setAttribute('aria-label', label);
         button.addEventListener('click', () => {
@@ -440,6 +449,59 @@
     document.addEventListener('DOMContentLoaded', installDesktopChrome, { once: true });
   } else {
     installDesktopChrome();
+  }
+
+  if (desktopPlatform !== 'macos') {
+    const forwardedZoomEvents = new WeakSet();
+    window.addEventListener('wheel', (event) => {
+      if (forwardedZoomEvents.has(event) || (!event.ctrlKey && !event.metaKey)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const slowed = new WheelEvent('wheel', {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        clientX: event.clientX,
+        clientY: event.clientY,
+        ctrlKey: event.ctrlKey,
+        metaKey: event.metaKey,
+        deltaMode: event.deltaMode,
+        deltaX: event.deltaX * 0.32,
+        deltaY: event.deltaY * 0.32,
+        deltaZ: event.deltaZ * 0.32,
+      });
+      forwardedZoomEvents.add(slowed);
+      event.target?.dispatchEvent(slowed);
+    }, { capture: true, passive: false });
+  }
+
+  const openPendingNativePdf = async () => {
+    const invoke = globalThis.__TAURI__?.core?.invoke;
+    if (typeof invoke !== 'function') return;
+    const pending = await invoke('take_pending_pdf').catch((error) => {
+      console.error('Could not read the PDF opened by the operating system:', error);
+      return null;
+    });
+    if (!pending?.base64 || !pending?.name) return;
+    const binary = atob(pending.base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    const input = document.querySelector('input.file-input[type="file"]');
+    if (!(input instanceof HTMLInputElement)) {
+      console.error('Could not find the desktop PDF input.');
+      return;
+    }
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([bytes], pending.name, { type: 'application/pdf', lastModified: Date.now() }));
+    input.files = transfer.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+
+  window.addEventListener('docuflex-native-open-pdf', () => void openPendingNativePdf());
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => void openPendingNativePdf(), { once: true });
+  } else {
+    void openPendingNativePdf();
   }
 
   const exportButtonSelector = '.utilities .utility-button[aria-label="Download"], .utilities .utility-button[aria-label="Exporting PDF"]';

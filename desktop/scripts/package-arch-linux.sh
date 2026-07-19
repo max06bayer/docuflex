@@ -34,9 +34,11 @@ install -Dm644 /dev/stdin "$PACKAGE_ROOT/usr/share/applications/docuflex.desktop
 [Desktop Entry]
 Categories=Office;
 Comment=Offline PDF editor
-Exec=docuflex-desktop %U
+Exec=docuflex-desktop %F
 Icon=docuflex
+MimeType=application/pdf;
 Name=Docuflex
+StartupWMClass=docuflex-desktop
 Terminal=false
 Type=Application
 EOF
