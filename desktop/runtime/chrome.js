@@ -262,6 +262,12 @@
       zoom: 1 !important;
     }
 
+    html[data-docuflex-desktop="linux"] .text-highlight-layer .text-highlight,
+    html[data-docuflex-desktop="linux"] [data-docuflex-annotation-type="highlight"] rect {
+      mix-blend-mode: multiply !important;
+      opacity: 0.42 !important;
+    }
+
     html[data-docuflex-desktop="windows"] .topbar,
     html[data-docuflex-desktop="windows"] .brand-area,
     html[data-docuflex-desktop="windows"] .tab-strip,
@@ -412,9 +418,14 @@
     }
 
     const markDragRegion = () => {
-      document
-        .querySelectorAll('.topbar, .brand-area, .tab-strip, .utilities')
-        .forEach((element) => element.setAttribute('data-tauri-drag-region', 'deep'));
+      document.querySelectorAll('.topbar, .brand-area, .tab-strip, .utilities').forEach((element) => {
+        element.setAttribute('data-tauri-drag-region', '');
+        element.querySelectorAll('*').forEach((child) => {
+          if (!child.closest('button, a, input, select, textarea, [role="button"]')) {
+            child.setAttribute('data-tauri-drag-region', '');
+          }
+        });
+      });
     };
 
     markDragRegion();
@@ -422,6 +433,20 @@
       childList: true,
       subtree: true,
     });
+
+    if (desktopPlatform === 'linux' && !document.documentElement.dataset.docuflexLinuxDragInstalled) {
+      document.documentElement.dataset.docuflexLinuxDragInstalled = 'true';
+      document.addEventListener('pointerdown', (event) => {
+        if (event.button !== 0 || !(event.target instanceof Element)) return;
+        if (!event.target.closest('.topbar')) return;
+        if (event.target.closest('button, a, input, select, textarea, [role="button"], .docuflex-window-controls')) return;
+        const appWindow = globalThis.__TAURI__?.window?.getCurrentWindow?.();
+        if (typeof appWindow?.startDragging === 'function') {
+          event.preventDefault();
+          void appWindow.startDragging();
+        }
+      }, { capture: true });
+    }
 
     if (desktopPlatform !== 'macos' && !document.querySelector('.docuflex-window-controls')) {
       const controls = document.createElement('div');

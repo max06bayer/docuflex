@@ -39,13 +39,25 @@ test -d "$RUNTIME_ROOT"
 # The Debian payload carries Ubuntu-compatible OCR binaries for AppImage and
 # Debian users. A native Arch package must use current Arch Poppler/Tesseract
 # binaries instead of mixing Ubuntu ELF dependencies with rolling libraries.
-for tool in pdftoppm pdfunite tesseract; do
+for tool in pdftoppm pdfunite; do
   install -Dm755 /dev/stdin \
     "$RUNTIME_ROOT/ocr/bin/$tool" <<EOF
 #!/bin/sh
 exec /usr/bin/$tool "\$@"
 EOF
 done
+install -Dm755 /dev/stdin "$RUNTIME_ROOT/ocr/bin/tesseract" <<'EOF'
+#!/bin/bash
+set -eu
+arguments=()
+for argument in "$@"; do
+  if [ "$argument" = "pdf" ]; then
+    arguments+=(-c textonly_pdf=0)
+  fi
+  arguments+=("$argument")
+done
+exec /usr/bin/tesseract "${arguments[@]}"
+EOF
 
 # pdf2htmlEX remains the checksum-pinned extracted AppImage build. Copy only
 # sonames absent from rolling Arch into an isolated compatibility directory;

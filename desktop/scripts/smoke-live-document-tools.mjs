@@ -53,6 +53,9 @@ try {
   if (!ocrBytes.subarray(0, 5).equals(Buffer.from('%PDF-'))) {
     throw new Error('OCR did not return a PDF document.');
   }
+  if (ocrBytes.length < 5_000 || ocrBytes.length < pdf.length * 3) {
+    throw new Error(`OCR returned a suspiciously small, potentially blank PDF (${ocrBytes.length} bytes).`);
+  }
 } catch (error) {
   failures.push(error);
 }
