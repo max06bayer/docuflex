@@ -1,4 +1,33 @@
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 const frontend = process.env.DOCUFLEX_FRONTEND_URL || 'http://127.0.0.1:43127';
+
+function assertPdfHasVisiblePixels(pdfBytes) {
+  const directory = mkdtempSync(join(tmpdir(), 'docuflex-ocr-visual-'));
+  try {
+    const pdfPath = join(directory, 'ocr.pdf');
+    const imagePrefix = join(directory, 'page');
+    writeFileSync(pdfPath, pdfBytes);
+    execFileSync('pdftoppm', ['-f', '1', '-singlefile', '-r', '96', '-gray', pdfPath, imagePrefix], {
+      stdio: 'pipe'
+    });
+    const pgm = readFileSync(`${imagePrefix}.pgm`);
+    const header = pgm.toString('ascii', 0, Math.min(pgm.length, 256));
+    const match = header.match(/^P5\s+(?:#.*\s+)*(\d+)\s+(\d+)\s+(\d+)\s/);
+    if (!match) throw new Error('OCR visual check could not parse the rendered page.');
+    const headerLength = match[0].length;
+    const pixels = pgm.subarray(headerLength);
+    const visiblePixels = pixels.reduce((count, value) => count + (value < 245 ? 1 : 0), 0);
+    if (visiblePixels < 100) {
+      throw new Error(`OCR rendered a blank page (${visiblePixels} non-white pixels).`);
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
 
 function minimalPdf(text) {
   const objects = [
@@ -56,6 +85,7 @@ try {
   if (ocrBytes.length < 5_000 || ocrBytes.length < pdf.length * 3) {
     throw new Error(`OCR returned a suspiciously small, potentially blank PDF (${ocrBytes.length} bytes).`);
   }
+  assertPdfHasVisiblePixels(ocrBytes);
 } catch (error) {
   failures.push(error);
 }

@@ -8,14 +8,24 @@
   const NativeDesktopFile = globalThis.File;
   const desktopConstructedFileBytes = new WeakMap();
   if (typeof NativeDesktopFile === 'function') {
-    globalThis.File = class DocuflexDesktopFile extends NativeDesktopFile {
-      constructor(parts, name, options) {
-        super(parts, name, options);
-        if (parts?.length === 1 && parts[0] instanceof ArrayBuffer) {
-          desktopConstructedFileBytes.set(this, parts[0].slice(0));
+    const DocuflexDesktopFile = function (parts, name, options) {
+      const file = new NativeDesktopFile(parts, name, options);
+      if (parts?.length === 1) {
+        const part = parts[0];
+        if (part instanceof ArrayBuffer) {
+          desktopConstructedFileBytes.set(file, part.slice(0));
+        } else if (ArrayBuffer.isView(part)) {
+          desktopConstructedFileBytes.set(
+            file,
+            part.buffer.slice(part.byteOffset, part.byteOffset + part.byteLength),
+          );
         }
       }
+      return file;
     };
+    Object.setPrototypeOf(DocuflexDesktopFile, NativeDesktopFile);
+    DocuflexDesktopFile.prototype = NativeDesktopFile.prototype;
+    globalThis.File = DocuflexDesktopFile;
   }
   const originalCreateObjectUrl = URL.createObjectURL.bind(URL);
   const originalRevokeObjectUrl = URL.revokeObjectURL.bind(URL);
@@ -298,13 +308,6 @@
       padding-right: 168px !important;
     }
 
-    html[data-docuflex-desktop="linux"] .topbar,
-    html[data-docuflex-desktop="linux"] .brand-area,
-    html[data-docuflex-desktop="linux"] .tab-strip,
-    html[data-docuflex-desktop="linux"] .utilities {
-      -webkit-app-region: no-drag !important;
-    }
-
     html[data-docuflex-desktop="windows"] .topbar button,
     html[data-docuflex-desktop="windows"] .topbar a,
     html[data-docuflex-desktop="windows"] .topbar input,
@@ -439,7 +442,6 @@
     }
 
     const markDragRegion = () => {
-      if (desktopPlatform === 'linux') return;
       document.querySelectorAll('.topbar, .brand-area, .tab-strip, .utilities').forEach((element) => {
         element.setAttribute('data-tauri-drag-region', '');
         element.querySelectorAll('*').forEach((child) => {
@@ -455,22 +457,6 @@
       childList: true,
       subtree: true,
     });
-
-    if (desktopPlatform === 'linux' && !document.documentElement.dataset.docuflexLinuxDragInstalled) {
-      document.documentElement.dataset.docuflexLinuxDragInstalled = 'true';
-      document.addEventListener('pointerdown', (event) => {
-        if (event.button !== 0 || !(event.target instanceof Element)) return;
-        if (!event.target.closest('.topbar')) return;
-        if (event.target.closest('button, a, input, select, textarea, [role="button"], .docuflex-window-controls')) return;
-        const invoke = globalThis.__TAURI__?.core?.invoke;
-        if (typeof invoke === 'function') {
-          event.preventDefault();
-          void invoke('start_window_drag').catch((error) => {
-            console.error('Could not start native window dragging:', error);
-          });
-        }
-      }, { capture: true });
-    }
 
     if (desktopPlatform !== 'macos' && !document.querySelector('.docuflex-window-controls')) {
       const controls = document.createElement('div');
