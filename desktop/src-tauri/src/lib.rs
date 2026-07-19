@@ -90,6 +90,16 @@ fn take_pending_pdf(
     Ok(Some(result))
 }
 
+#[tauri::command]
+fn start_window_drag(app: tauri::AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "The Docuflex window is unavailable.".to_string())?;
+    window
+        .start_dragging()
+        .map_err(|error| format!("Could not drag the Docuflex window: {error}"))
+}
+
 #[cfg(target_os = "windows")]
 fn native_tool_path(path: PathBuf) -> PathBuf {
     // Tauri may return verbatim (`\\?\`) paths for installed resources. Older
@@ -438,7 +448,10 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .manage(Arc::clone(&pending_pdf))
-        .invoke_handler(tauri::generate_handler![take_pending_pdf])
+        .invoke_handler(tauri::generate_handler![
+            take_pending_pdf,
+            start_window_drag
+        ])
         .plugin(tauri_plugin_single_instance::init(
             move |app, arguments, cwd| {
                 if let Some(path) = pdf_path_from_arguments(arguments, Path::new(&cwd)) {

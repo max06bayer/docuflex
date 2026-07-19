@@ -440,10 +440,12 @@
         if (event.button !== 0 || !(event.target instanceof Element)) return;
         if (!event.target.closest('.topbar')) return;
         if (event.target.closest('button, a, input, select, textarea, [role="button"], .docuflex-window-controls')) return;
-        const appWindow = globalThis.__TAURI__?.window?.getCurrentWindow?.();
-        if (typeof appWindow?.startDragging === 'function') {
+        const invoke = globalThis.__TAURI__?.core?.invoke;
+        if (typeof invoke === 'function') {
           event.preventDefault();
-          void appWindow.startDragging();
+          void invoke('start_window_drag').catch((error) => {
+            console.error('Could not start native window dragging:', error);
+          });
         }
       }, { capture: true });
     }
