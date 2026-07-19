@@ -39,6 +39,38 @@ for tool in pdftoppm pdfunite tesseract; do
 exec /usr/bin/$tool "\$@"
 EOF
 done
+
+# pdf2htmlEX remains the checksum-pinned extracted AppImage build, but its
+# launcher needs only the payload's legacy libxml2 soname on rolling Arch.
+PDF2HTML_RUNTIME="$PACKAGE_ROOT/usr/lib/$RESOURCE_NAME/runtime/pdf2htmlEX"
+mkdir -p "$PDF2HTML_RUNTIME/compat"
+LIBXML_SOURCE=$(find "$PDF2HTML_RUNTIME/app" -type f -name 'libxml2.so.2*' -print -quit)
+if [ -z "$LIBXML_SOURCE" ]; then
+  echo 'Bundled pdf2htmlEX payload does not contain libxml2.so.2.' >&2
+  exit 1
+fi
+cp -L "$LIBXML_SOURCE" "$PDF2HTML_RUNTIME/compat/libxml2.so.2"
+install -Dm755 /dev/stdin \
+  "$PDF2HTML_RUNTIME/bin/pdf2htmlEX" <<'EOF'
+#!/bin/bash
+set -eu
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+APP_ROOT="$SCRIPT_DIR/../app"
+export APPDIR="$APP_ROOT"
+export LD_LIBRARY_PATH="$SCRIPT_DIR/../compat${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+normalized_args=()
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--embed" ] && [ "$#" -ge 2 ] && [ "$2" = "1" ]; then
+    normalized_args+=(--embed-css 1 --embed-font 1 --embed-image 1 --embed-javascript 1 --embed-outline 1)
+    shift 2
+    continue
+  fi
+  normalized_args+=("$1")
+  shift
+done
+exec "$APP_ROOT/AppRun" "${normalized_args[@]}"
+EOF
 install -Dm644 "$TAURI_ROOT/icons/128x128.png" \
   "$PACKAGE_ROOT/usr/share/icons/hicolor/128x128/apps/docuflex.png"
 install -Dm644 /dev/stdin "$PACKAGE_ROOT/usr/share/applications/docuflex.desktop" <<'EOF'
