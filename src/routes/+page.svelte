@@ -119,38 +119,14 @@
       </div>
     </div>
 
-    <div class="video-placeholder" id="video" role="img" aria-label="Docuflex feature showcase video coming soon">
-      <div class="video-topbar">
-        <div class="video-channel">
-          <span class="video-avatar" aria-hidden="true">D</span>
-          <span>Docuflex Feature showcase</span>
-        </div>
-        <div class="video-utilities" aria-hidden="true">
-          <span class="video-utility">
-            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"></circle><path d="M12 7v5l3 2"></path></svg>
-            <span>Watch later</span>
-          </span>
-          <span class="video-utility">
-            <svg viewBox="0 0 24 24" class="share-icon">
-              <path d="M14 5l6 5-6 5v-3.2C9.5 11.8 6.7 13.2 4 17c.7-6.2 4.1-9.2 10-9.2V5Z"></path>
-            </svg>
-            <span>Share</span>
-          </span>
-        </div>
-      </div>
-
-      <span class="video-play" aria-hidden="true">
-        <svg viewBox="0 0 28 22"><path d="m11 6 8 5-8 5Z"></path></svg>
-      </span>
-
-      <span class="youtube-label" aria-hidden="true">
-        <span>Watch on</span>
-        <svg class="youtube-logo" viewBox="0 0 28 20">
-          <rect x="1" y="2" width="26" height="16" rx="4"></rect>
-          <path d="m12 6.4 6.2 3.6-6.2 3.6Z"></path>
-        </svg>
-        <strong>YouTube</strong>
-      </span>
+    <div class="video-embed" id="video">
+      <iframe
+        src="https://www.youtube.com/embed/hxAxo_cPU1M?si=zDl_hijbOhvrVPlJ"
+        title="Docuflex feature showcase"
+        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+        referrerpolicy="strict-origin-when-cross-origin"
+        allowfullscreen
+      ></iframe>
     </div>
   </section>
 
@@ -423,7 +399,7 @@
 
   .download-button {
     display: inline-flex;
-    width: 192px;
+    width: 120px;
     min-height: 38px;
     align-items: center;
     justify-content: center;
@@ -604,7 +580,7 @@
     }
   }
 
-  .video-placeholder {
+  .video-embed {
     position: relative;
     width: min(1190px, calc(100% - 80px));
     aspect-ratio: 16 / 9;
@@ -616,111 +592,11 @@
     color: #f1f1f1;
   }
 
-  .video-topbar {
-    position: absolute;
-    top: 0;
-    right: 0;
-    left: 0;
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    padding: 14px 16px;
-    font-size: 16px;
-  }
-
-  .video-channel {
-    display: flex;
-    align-items: center;
-    gap: 11px;
-  }
-
-  .video-avatar {
-    display: grid;
-    width: 38px;
-    height: 38px;
-    place-items: center;
-    border-radius: 50%;
-    background: #ececec;
-    color: #0878f9;
-    font-size: 18px;
-    font-weight: 650;
-  }
-
-  .video-utilities {
-    display: flex;
-    gap: 24px;
-  }
-
-  .video-utility {
-    display: grid;
-    justify-items: center;
-    gap: 3px;
-    font-size: 12px;
-  }
-
-  .video-utility svg {
-    width: 24px;
-    height: 24px;
-    fill: none;
-    stroke: currentColor;
-    stroke-width: 1.8;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-  }
-
-  .video-utility .share-icon {
-    fill: currentColor;
-    stroke: none;
-  }
-
-  .video-play {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    display: grid;
-    width: 88px;
-    height: 62px;
-    place-items: center;
-    border-radius: 15px;
-    background: #ff0033;
-    transform: translate(-50%, -50%);
-  }
-
-  .video-play svg {
-    width: 38px;
-    height: 30px;
-    fill: #fff;
-  }
-
-  .youtube-label {
-    position: absolute;
-    bottom: 0;
-    left: 0;
-    display: flex;
-    height: 48px;
-    align-items: center;
-    gap: 6px;
-    padding: 0 14px;
-    background: #181818;
-    color: #f4f4f4;
-    font-size: 13px;
-  }
-
-  .youtube-label .youtube-logo {
-    width: 24px;
-    height: 18px;
-  }
-
-  .youtube-logo rect {
-    fill: #ff0033;
-  }
-
-  .youtube-logo path {
-    fill: #fff;
-  }
-
-  .youtube-label strong {
-    font-weight: 650;
+  .video-embed iframe {
+    display: block;
+    width: 100%;
+    height: 100%;
+    border: 0;
   }
 
   .site-footer {
@@ -899,51 +775,53 @@
 
   @media (max-width: 760px) {
     .hero {
-      min-height: 980px;
+      min-height: 780px;
     }
 
     .site-header {
-      height: 60px;
-      padding-inline: 20px;
+      height: calc(74px + env(safe-area-inset-top, 0px));
+      align-items: flex-end;
+      padding: env(safe-area-inset-top, 0px) 22px 16px;
+      border-bottom-color: rgba(255, 255, 255, 0.09);
     }
 
     .brand {
-      width: 148px;
+      width: 176px;
     }
 
-    .nav-link {
+    .site-header nav,
+    .web-editor-button {
       display: none;
     }
 
-    nav {
-      gap: 0;
-    }
-
-    .web-editor-button {
-      height: 43px;
-      font-size: 16px;
-    }
-
     .hero-background {
-      inset-block-start: 60px;
+      inset-block-start: calc(74px + env(safe-area-inset-top, 0px));
+      background-image: linear-gradient(to bottom, transparent 70%, rgba(0, 0, 0, 0.72) 94%, #000 100%),
+        url('/landing-page/background.jpg');
       background-position: center top;
-      background-size: 100% auto;
+      background-size: auto 690px;
     }
 
     .hero-content {
-      width: calc(100% - 40px);
-      padding-top: 112px;
+      width: min(100% - 44px, 520px);
+      padding-top: 70px;
+      text-align: left;
     }
 
     h1 {
-      font-size: clamp(43px, 13vw, 64px);
-      line-height: 1.02;
+      max-width: 440px;
+      margin: 0;
+      font-size: clamp(40px, 11.5vw, 52px);
+      letter-spacing: -0.052em;
+      line-height: 1.04;
     }
 
     .hero-content p {
-      margin-top: 30px;
-      font-size: 17px;
-      line-height: 1.55;
+      max-width: 430px;
+      margin: 24px 0 0;
+      color: #969696;
+      font-size: 16px;
+      line-height: 1.58;
     }
 
     .desktop-break {
@@ -951,108 +829,175 @@
     }
 
     .hero-actions {
-      flex-wrap: wrap;
-      margin-top: 34px;
+      justify-content: flex-start;
+      gap: 26px;
+      margin-top: 30px;
+    }
+
+    .download-button {
+      width: 126px;
+      min-height: 42px;
+    }
+
+    .watch-link {
+      color: #b2b2b2;
+    }
+
+    .business-button {
+      display: none;
     }
 
     .editor-showcase {
-      top: 540px;
-      width: 1020px;
-      transform: translateX(-50%) rotate(-1deg);
+      top: 505px;
+      left: -16%;
+      width: 185%;
+      transform: rotate(-1deg);
+      filter: drop-shadow(0 24px 36px rgba(0, 0, 0, 0.38));
     }
 
-
     .next-section {
-      margin-top: -330px;
-      padding-block: 96px 120px;
+      min-height: 0;
+      margin-top: 0;
+      padding-block: 58px 62px;
     }
 
     .feature-set img,
     .feature-marquee-empty .feature-set img {
-      width: 268px;
-      height: 57px;
+      width: 210px;
+      height: 45px;
+    }
+
+    .feature-set,
+    .feature-marquee-empty .feature-set {
+      gap: 12px;
+      padding-right: 12px;
     }
 
     .feature-title-row {
-      min-height: 88px;
-      margin-block: 18px;
+      min-height: 78px;
+      margin-block: 12px;
     }
 
     .feature-title-row h2 {
-      width: calc(100% - 40px);
-      font-size: clamp(35px, 10vw, 54px);
+      width: calc(100% - 48px);
+      font-size: clamp(34px, 9.5vw, 44px);
+      line-height: 1.04;
     }
 
-    .video-placeholder {
-      width: calc(100% - 32px);
-      margin-top: 70px;
-    }
-
-    .video-topbar {
-      padding: 10px;
-      font-size: 12px;
-    }
-
-    .video-avatar {
-      width: 30px;
-      height: 30px;
-      font-size: 14px;
-    }
-
-    .video-utilities {
-      display: none;
-    }
-
-    .video-play {
-      width: 66px;
-      height: 46px;
+    .video-embed {
+      width: calc(100% - 24px);
+      margin-top: 52px;
+      border-color: #292929;
       border-radius: 12px;
+      box-shadow: 0 20px 48px rgba(0, 0, 0, 0.36);
     }
 
-    .youtube-label {
-      height: 38px;
-      font-size: 11px;
+    .site-footer {
+      border-top: 0;
+      background: linear-gradient(180deg, #111 0%, #0b0b0b 100%);
     }
 
     .footer-main {
       grid-template-columns: 1fr 1fr;
-      width: calc(100% - 40px);
+      width: 100%;
       min-height: 0;
-      gap: 54px 32px;
-      padding-block: 68px;
+      gap: 30px 28px;
+      padding: 40px 22px 30px;
     }
 
     .footer-brand {
       grid-column: 1 / -1;
-      width: 176px;
+      width: 182px;
+      margin: 0;
     }
 
     .footer-column {
-      gap: 20px;
-      font-size: 16px;
+      gap: 12px;
+      font-size: 13px;
     }
 
     .footer-column h3 {
-      font-size: 16px;
+      margin-bottom: 4px;
+      font-size: 14px;
+    }
+
+    .footer-column:last-child {
+      display: none;
     }
 
     .footer-bottom {
       min-height: 0;
-      align-items: flex-start;
       flex-direction: column;
-      gap: 34px;
-      padding: 34px 20px 44px;
+      gap: 18px;
+      padding: 10px 22px 28px;
+      border-top: 0;
+      background: transparent;
+    }
+
+    .footer-socials {
+      order: -1;
+      gap: 18px;
+      padding: 0;
+    }
+
+    .footer-socials a {
+      width: 24px;
+      height: 24px;
+    }
+
+    .footer-socials svg {
+      width: 22px;
+      height: 22px;
+    }
+
+    .footer-meta {
+      width: 100%;
+      gap: 16px;
     }
 
     .footer-legal-links {
+      display: flex;
       flex-wrap: wrap;
-      gap: 18px 28px;
+      justify-content: flex-start;
+      gap: 10px 20px;
     }
 
     .footer-legal-links button,
     .footer-legal-links a,
     .footer-meta p {
-      font-size: 16px;
+      font-size: 13px;
+    }
+
+    .footer-meta p {
+      color: #666;
+      font-size: 12px;
+    }
+  }
+
+  @media (max-width: 390px) {
+    .hero {
+      min-height: 750px;
+    }
+
+    .hero-content {
+      width: calc(100% - 36px);
+      padding-top: 58px;
+    }
+
+    h1 {
+      font-size: 39px;
+    }
+
+    .hero-content p {
+      font-size: 15px;
+    }
+
+    .editor-showcase {
+      top: 495px;
+    }
+
+    .footer-main {
+      gap: 34px 18px;
     }
   }
 
