@@ -58,13 +58,13 @@
       </p>
 
       <div class="hero-actions">
-        <a class="download-button animated-button" href="#download">
-          <svg class="apple-mark" viewBox="0 0 24 24" aria-hidden="true">
-            <path
-              d="M18.7 12.7c0-3.2 2.6-4.7 2.7-4.8a5.8 5.8 0 0 0-4.5-2.4c-1.9-.2-3.7 1.1-4.7 1.1-1 0-2.5-1.1-4.1-1.1a6.1 6.1 0 0 0-5.2 3.1c-2.2 3.8-.6 9.5 1.6 12.6 1.1 1.5 2.3 3.2 4 3.1 1.6-.1 2.2-1 4.1-1s2.5 1 4.2 1c1.7 0 2.8-1.5 3.8-3 1.2-1.8 1.7-3.6 1.8-3.7-.1 0-3.7-1.4-3.7-4.9ZM15.6 3.5A5.2 5.2 0 0 0 16.8 0a5.3 5.3 0 0 0-3.4 1.7 4.9 4.9 0 0 0-1.3 3.4 4.4 4.4 0 0 0 3.5-1.6Z"
-            />
-          </svg>
-          <span>Download for mac</span>
+        <a
+          class="download-button animated-button"
+          href="https://github.com/max06bayer/docuflex/releases/latest"
+          target="_blank"
+          rel="noreferrer"
+        >
+          <span>Download</span>
         </a>
         <a class="watch-link" href="#video">Watch Video</a>
       </div>
@@ -426,8 +426,7 @@
     width: 192px;
     min-height: 38px;
     align-items: center;
-    justify-content: flex-start;
-    gap: 11px;
+    justify-content: center;
     padding: 0 10px;
     border: 1px solid transparent;
     border-radius: 12px;
@@ -446,14 +445,6 @@
 
   .download-button:hover {
     color: #111;
-  }
-
-  .apple-mark {
-    width: 19px;
-    height: 19px;
-    align-self: center;
-    fill: currentColor;
-    transform: translateY(-1px);
   }
 
   .watch-link {
