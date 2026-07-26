@@ -79,8 +79,8 @@
 
       <div class="legal-content" bind:this={legalContentElement}>
         <div class="legal-intro">
-          <p>Docuflex is a public beta of a source-available PDF app. It is offered for personal and other non-commercial use and has no user accounts, subscriptions, advertising, or built-in analytics.</p>
-          <p class="updated">Last updated: July 17, 2026</p>
+          <p>Docuflex is a free and open-source PDF app licensed under the GNU Affero General Public License version 3. It has no user accounts, subscriptions, advertising, or built-in analytics.</p>
+          <p class="updated">Last updated: July 26, 2026</p>
         </div>
 
         <section data-legal-section="privacy">
@@ -108,8 +108,8 @@
 
         <section>
           <h3>Software license</h3>
-          <p>Docuflex is source-available under the <strong>PolyForm Noncommercial License 1.0.0</strong>. Personal and other non-commercial use, modification, non-commercial forks, and non-commercial redistribution are permitted. Commercial use is not permitted without a separate license from the copyright holder.</p>
-          <p>The complete <code>LICENSE</code> file in the repository controls. This summary does not replace or modify it. Third-party dependencies remain governed by their own licenses.</p>
+          <p>Docuflex is free and open-source software under the <strong>GNU Affero General Public License version 3.0 only (AGPL-3.0-only)</strong>. You may use the software for personal or commercial purposes, inspect and modify its source code, and redistribute it under the license’s terms.</p>
+          <p>If you modify Docuflex and let users interact with that version over a network, the AGPL requires you to offer those users the corresponding source code. The complete <a href="https://github.com/max06bayer/docuflex/blob/main/LICENSE" target="_blank" rel="noreferrer"><code>LICENSE</code> file</a> controls; this summary does not replace or modify it. Third-party components remain governed by their own licenses.</p>
         </section>
 
         <section data-legal-section="terms">
