@@ -76,6 +76,8 @@ Docuflex is under active development. Bug reports and focused improvements are w
 
 ## License
 
-Docuflex is **source-available**, not OSI-approved open-source software. The code is published under the [PolyForm Noncommercial License 1.0.0](LICENSE): personal and other non-commercial use, modification, forks, and redistribution are permitted under its terms. Commercial use requires separate permission from the copyright holder.
+Docuflex is free and open-source software licensed under the [GNU Affero General Public License version 3.0 only](LICENSE) (`AGPL-3.0-only`). You may use, modify, and redistribute it—including commercially—under the license’s terms. If you modify Docuflex and make that version available to users over a network, you must offer those users the corresponding source code as required by the AGPL.
+
+Third-party components remain governed by their own licenses.
 
 Copyright 2026 Maximilian Bayer.
