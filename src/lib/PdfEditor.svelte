@@ -3039,6 +3039,26 @@
     };
   }
 
+  /**
+   * Anchors the delete affordance above the top-right corner of a selection —
+   * for linear shapes that lands just past the end of the line.
+   * @param {AnnotationShape} shape @param {{ width: number; height: number }} pageSize
+   */
+  function shapeDeleteButtonBox(shape, pageSize) {
+    const size = 24 / zoomLevel;
+    const gap = 8 / zoomLevel;
+    const above = shape.y - gap - size;
+    return {
+      size,
+      icon: 14 / zoomLevel,
+      radius: 7 / zoomLevel,
+      // The page clips its overflow, so fall back to the inner corner when the
+      // shape sits too close to the top edge.
+      x: clamp(shape.x + shape.width - size, 0, Math.max(0, pageSize.width - size)),
+      y: clamp(above >= 0 ? above : shape.y + gap, 0, Math.max(0, pageSize.height - size))
+    };
+  }
+
   /** @param {AnnotationShape} shape */
   function shapeVisualPoints(shape) {
     if (isLinearShape(shape)) return Object.values(linearEndpoints(shape));
@@ -4375,6 +4395,12 @@
     if (!viewer) return;
     const pointerTarget = event.target;
     if (pointerTarget instanceof Element && pointerTarget.closest('[data-text-editor]')) return;
+    if (event.button === 0 && pointerTarget instanceof Element && pointerTarget.closest('[data-shape-delete]')) {
+      event.preventDefault();
+      event.stopPropagation();
+      deleteSelectedShapes();
+      return;
+    }
 
     const shapeHit = shapeTarget(event);
     const hitShape = shapeHit ? findShape(shapeHit.pageIndex, shapeHit.id) : null;
@@ -6756,6 +6782,35 @@
                       y={badgeY + badgeHeight / 2}
                       font-size={14 / zoomLevel}
                     >{badgeLabel}</text>
+                  </g>
+                {/if}
+                {#if activeTool === 'select'}
+                  {@const deleteButton = shapeDeleteButtonBox(currentSelection, pageSizes[index] ?? { width: 1, height: 1 })}
+                  <g
+                    class="shape-delete-button"
+                    data-shape-id={currentSelection.id}
+                    data-shape-page={index}
+                    data-shape-delete
+                    role="button"
+                    tabindex="-1"
+                    aria-label="Delete selection"
+                    transform={`rotate(${-currentSelection.rotation} ${deleteButton.x + deleteButton.size / 2} ${deleteButton.y + deleteButton.size / 2})`}
+                  >
+                    <rect
+                      x={deleteButton.x}
+                      y={deleteButton.y}
+                      width={deleteButton.size}
+                      height={deleteButton.size}
+                      rx={deleteButton.radius}
+                      stroke-width={1 / zoomLevel}
+                    />
+                    <image
+                      href="/pages/trash.svg"
+                      x={deleteButton.x + (deleteButton.size - deleteButton.icon) / 2}
+                      y={deleteButton.y + (deleteButton.size - deleteButton.icon) / 2}
+                      width={deleteButton.icon}
+                      height={deleteButton.icon}
+                    />
                   </g>
                 {/if}
               </g>
@@ -10180,6 +10235,25 @@
     stroke: none;
     cursor: url('/rotate-cursor.svg') 16 16, crosshair;
     pointer-events: all;
+  }
+
+  .shape-delete-button {
+    cursor: pointer;
+  }
+
+  .shape-delete-button rect {
+    fill: #fff;
+    stroke: rgba(13, 24, 40, 0.14);
+    pointer-events: all;
+  }
+
+  .shape-delete-button image {
+    pointer-events: none;
+  }
+
+  .shape-delete-button:hover rect {
+    fill: #ffe9ea;
+    stroke: #ff383c;
   }
 
   .shape-size-badge {
