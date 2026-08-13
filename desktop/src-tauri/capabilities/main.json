@@ -8,6 +8,10 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "core:window:allow-start-dragging"
+    "core:window:allow-start-dragging",
+    "allow-take-pending-pdf",
+    "allow-start-window-drag",
+    "allow-docuflex-save-prompt",
+    "allow-docuflex-save-overwrite"
   ]
 }

@@ -131,6 +131,38 @@
 
   installDurableDesktopBlobReads();
 
+  const arrayBufferToBase64 = (bufferLike) => {
+    const bytes = bufferLike instanceof Uint8Array ? bufferLike : new Uint8Array(bufferLike);
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+    }
+    return btoa(binary);
+  };
+
+  const isDesktopRuntime = () => typeof window.__TAURI__ !== 'undefined';
+
+  // Bridge used by DocuflexApp.svelte's Save button (desktop/src-tauri commands
+  // docuflex_save_prompt / docuflex_save_overwrite) to write PDF bytes straight
+  // to disk instead of going through a browser download.
+  window.__docuflexNative = isDesktopRuntime()
+    ? {
+        async promptAndSave(suggestedName, bytes) {
+          return window.__TAURI__.core.invoke('docuflex_save_prompt', {
+            suggestedName,
+            base64: arrayBufferToBase64(bytes),
+          });
+        },
+        async overwrite(path, bytes) {
+          return window.__TAURI__.core.invoke('docuflex_save_overwrite', {
+            path,
+            base64: arrayBufferToBase64(bytes),
+          });
+        },
+      }
+    : null;
+
   const desktopStyle = `
     html[data-docuflex-desktop="macos"] {
       background: #f8f8f8;
@@ -526,8 +558,11 @@
       console.error('Could not find the desktop PDF input.');
       return;
     }
+    const file = new File([bytes], pending.name, { type: 'application/pdf', lastModified: Date.now() });
+    // Lets DocuflexApp.svelte's Save button overwrite this exact file in place.
+    if (pending.path) file.__docuflexSourcePath = pending.path;
     const transfer = new DataTransfer();
-    transfer.items.add(new File([bytes], pending.name, { type: 'application/pdf', lastModified: Date.now() }));
+    transfer.items.add(file);
     input.files = transfer.files;
     input.dispatchEvent(new Event('change', { bubbles: true }));
   };
@@ -638,15 +673,43 @@
     }
   };
 
+  // Finalizes a completed export anchor. On desktop this always routes through
+  // the native Finder save panel (docuflex_save_prompt) instead of letting the
+  // browser handle the blob download itself: a plain anchor.click() on a
+  // blob: URL can silently save straight to ~/Downloads in WKWebView without
+  // ever prompting, which is exactly the "just saves without asking" behavior
+  // Download is meant not to have.
+  const finalizeDownload = async (anchor) => {
+    if (!window.__docuflexNative) {
+      originalAnchorClick.call(anchor);
+      return;
+    }
+    try {
+      const retainedBlob = desktopBlobUrls.get(anchor.href);
+      const blob = retainedBlob ?? await (await fetch(anchor.href)).blob();
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      await window.__docuflexNative.promptAndSave(anchor.download || 'document.pdf', bytes);
+    } catch (error) {
+      if (error !== 'cancelled') {
+        const message = error instanceof Error ? error.message : typeof error === 'string' ? error : 'Could not save this file.';
+        window.dispatchEvent(new CustomEvent('docuflex:error', { detail: { title: 'Could not download this PDF', message } }));
+      }
+    }
+  };
+
   const originalAnchorClick = HTMLAnchorElement.prototype.click;
   HTMLAnchorElement.prototype.click = function desktopExportClick() {
     if (this.dataset.docuflexFinalExport === 'true') {
-      return originalAnchorClick.call(this);
+      void finalizeDownload(this);
+      return;
     }
     if (pendingExportFormat && this.download?.toLowerCase().endsWith('.pdf') && this.href.startsWith('blob:')) {
       const format = pendingExportFormat;
       pendingExportFormat = null;
-      if (format === 'pdf') return originalAnchorClick.call(this);
+      if (format === 'pdf') {
+        void finalizeDownload(this);
+        return;
+      }
       void convertExportedPdf(this, format);
       return;
     }

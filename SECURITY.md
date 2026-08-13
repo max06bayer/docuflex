@@ -1,22 +1,22 @@
 # Security Policy
 
-Docuflex is currently a public beta. Security reports are welcome and should be sent privately rather than opened as public issues.
+## Supported Versions
 
-## Reporting a vulnerability
+Docuflex is a public beta. Security fixes are handled on the `main` branch and shipped with the next public deployment or release.
 
-Email **max06.bayer@gmail.com** with:
+## Reporting a Vulnerability
 
-- a concise description of the issue and its impact;
-- the affected Docuflex feature or endpoint;
-- reproducible steps or a minimal proof of concept; and
-- any suggested remediation, if available.
+Please report suspected security issues privately by email to max06.bayer@gmail.com. Include:
 
-Please do not include real user documents, personal data, credentials, or destructive proof-of-concept payloads. Allow reasonable time for investigation and remediation before publishing details.
+- a short description of the issue
+- steps to reproduce it
+- the affected route, file type, or deployment surface
+- any proof-of-concept files or screenshots that are safe to share
 
-## Supported version
-
-Only the latest version deployed at [docuflex.eu](https://docuflex.eu) and the latest commit on the default branch are supported. Older beta revisions may not receive security updates.
+Please do not open public GitHub issues for vulnerabilities until there is a fix or mitigation in place.
 
 ## Scope
 
-The Docuflex application and its document-processing endpoints are in scope. Social engineering, denial-of-service testing against the public service, and testing third-party infrastructure without permission are out of scope.
+Useful reports include issues in document upload and processing, file isolation, temporary-file handling, authentication or deployment configuration, dependency vulnerabilities, and ways a crafted document could affect other users or the service.
+
+Docuflex does not offer bug bounties at this time, but responsible reports are appreciated and credited when appropriate.

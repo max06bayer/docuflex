@@ -34,10 +34,15 @@
 
       <nav aria-label="Primary navigation">
         <a class="nav-link" href="#features">Features</a>
-        <a class="nav-link github-link" href="#github">
+        <a
+          class="nav-link github-link"
+          href="https://github.com/max06bayer/docuflex"
+          target="_blank"
+          rel="noreferrer"
+        >
           Github<span aria-hidden="true">↗</span>
         </a>
-        <a class="nav-link" href="#tutorial">Tutorial</a>
+        <a class="nav-link" href="#video">Tutorial</a>
         <span class="nav-link login-link" aria-disabled="true">Log In</span>
         <a class="web-editor-button animated-button" href="/editor">
           <span>Web Editor</span>
@@ -68,10 +73,6 @@
         </a>
         <a class="watch-link" href="#video">Watch Video</a>
       </div>
-
-      <button class="business-button" type="button" disabled>
-        <span>Business Version</span><span aria-hidden="true">→</span>
-      </button>
     </div>
 
     <div class="editor-showcase" aria-hidden="true">
@@ -444,27 +445,6 @@
 
   .watch-link:hover::after {
     transform: scaleX(1);
-  }
-
-  .business-button {
-    display: inline-flex;
-    height: 39px;
-    align-items: center;
-    gap: 10px;
-    margin-top: 20px;
-    padding: 0 16px;
-    border: 1px solid #454545;
-    border-radius: 12px;
-    background: linear-gradient(180deg, #252525, #1d1d1d);
-    color: #8c8c8c;
-    font-size: 16px;
-    cursor: not-allowed;
-    opacity: 0.84;
-  }
-
-  .business-button span:last-child {
-    font-size: 25px;
-    font-weight: 280;
   }
 
   .editor-showcase {
@@ -841,10 +821,6 @@
 
     .watch-link {
       color: #b2b2b2;
-    }
-
-    .business-button {
-      display: none;
     }
 
     .editor-showcase {

@@ -87,6 +87,8 @@ fn take_pending_pdf(
             .to_string(),
     );
     result.insert("base64".to_string(), BASE64_STANDARD.encode(bytes));
+    // Lets the frontend's Save button overwrite this exact file in place.
+    result.insert("path".to_string(), path.to_string_lossy().into_owned());
     Ok(Some(result))
 }
 
@@ -430,6 +432,31 @@ fn editor_initialization_script() -> &'static str {
     include_str!("../../runtime/chrome.js")
 }
 
+/// Always shows the native save dialog, then writes the decoded bytes to
+/// wherever the user picked. Returns the chosen path so the frontend can
+/// remember it for a subsequent silent overwrite. Errors with "cancelled" if
+/// the user dismisses the dialog, which the frontend treats as a no-op.
+#[tauri::command]
+async fn docuflex_save_prompt(suggested_name: String, base64: String) -> Result<String, String> {
+    let bytes = BASE64_STANDARD
+        .decode(base64)
+        .map_err(|error| error.to_string())?;
+    let destination = choose_download_destination(&PathBuf::from(suggested_name))
+        .ok_or_else(|| "cancelled".to_string())?;
+    fs::write(&destination, &bytes).map_err(|error| error.to_string())?;
+    Ok(destination.to_string_lossy().into_owned())
+}
+
+/// Overwrites a known path directly, no dialog. Used to silently re-save a
+/// document back to the file it was originally opened from.
+#[tauri::command]
+async fn docuflex_save_overwrite(path: String, base64: String) -> Result<(), String> {
+    let bytes = BASE64_STANDARD
+        .decode(base64)
+        .map_err(|error| error.to_string())?;
+    fs::write(&path, &bytes).map_err(|error| error.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     configure_platform_webview();
@@ -450,7 +477,9 @@ pub fn run() {
         .manage(Arc::clone(&pending_pdf))
         .invoke_handler(tauri::generate_handler![
             take_pending_pdf,
-            start_window_drag
+            start_window_drag,
+            docuflex_save_prompt,
+            docuflex_save_overwrite
         ])
         .plugin(tauri_plugin_single_instance::init(
             move |app, arguments, cwd| {
@@ -557,7 +586,8 @@ pub fn run() {
                     DownloadEvent::Finished { .. } => true,
                     _ => true,
                 })
-                .build()?;
+                .build()?
+                .maximize()?;
             Ok(())
         })
         .build(tauri::generate_context!())
