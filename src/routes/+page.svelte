@@ -34,10 +34,15 @@
 
       <nav aria-label="Primary navigation">
         <a class="nav-link" href="#features">Features</a>
-        <a class="nav-link github-link" href="#github">
+        <a
+          class="nav-link github-link"
+          href="https://github.com/max06bayer/docuflex"
+          target="_blank"
+          rel="noreferrer"
+        >
           Github<span aria-hidden="true">↗</span>
         </a>
-        <a class="nav-link" href="#tutorial">Tutorial</a>
+        <a class="nav-link" href="#video">Tutorial</a>
         <span class="nav-link login-link" aria-disabled="true">Log In</span>
         <a class="web-editor-button animated-button" href="/editor">
           <span>Web Editor</span>

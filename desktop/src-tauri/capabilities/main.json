@@ -8,7 +8,9 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "core:window:allow-start-dragging"
+    "core:window:allow-start-dragging",
+    "allow-docuflex-save-prompt",
+    "allow-docuflex-save-overwrite"
   ],
   "platforms": ["macOS"]
 }

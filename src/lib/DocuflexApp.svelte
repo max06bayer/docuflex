@@ -46,7 +46,7 @@
     { name: 'OCR', shortcut: 'O', icon: ocrIcon, description: 'Recognize text in scanned PDF pages.' }
   ];
 
-  /** @type {{ id: number; name: string; type: 'pdf'; file: File; protection: { enabled: boolean; password: string }; initialTool?: string }[]} */
+  /** @type {{ id: number; name: string; type: 'pdf'; file: File; protection: { enabled: boolean; password: string }; initialTool?: string; sourcePath?: string | null }[]} */
   let tabs = [];
   /** @type {RecentDocument[]} */
   let recentDocuments = [];
@@ -74,7 +74,7 @@
   let utilityTooltipTimer;
   /** @type {ReturnType<typeof setTimeout> | undefined} */
   let shortcutTimer;
-  /** @type {{ id: number; name: string; type: 'pdf'; file: File; protection: { enabled: boolean; password: string }; initialTool?: string } | undefined} */
+  /** @type {{ id: number; name: string; type: 'pdf'; file: File; protection: { enabled: boolean; password: string }; initialTool?: string; sourcePath?: string | null } | undefined} */
   let activeDocument;
   $: activeDocument = tabs.find((tab) => tab.id === activeTab);
   $: visibleRecentDocuments = recentDocuments
@@ -87,9 +87,22 @@
   $: sortModeText = sortMode === 'size' ? 'Size' : sortMode === 'name' ? 'Name' : 'Recent';
   /** @type {HTMLInputElement | undefined} */
   let fileInput;
-  /** @type {{ downloadPdf: () => Promise<void>; openSearchPanel: () => void; undo: () => Promise<void>; redo: () => Promise<void> } | undefined} */
+  /** @type {{ downloadPdf: () => Promise<void>; exportPdfForSave: () => Promise<{ blob: Blob; suggestedName: string }>; openSearchPanel: () => void; undo: () => Promise<void>; redo: () => Promise<void> } | undefined} */
   let pdfEditor;
   let isDownloading = false;
+  let isSaving = false;
+  /** @type {{ id: number; title: string; message: string } | null} */
+  let errorToast = null;
+  /** @type {ReturnType<typeof setTimeout>} */
+  let errorToastTimer;
+
+  /** @param {string} title @param {string} message */
+  function showErrorToast(title, message) {
+    clearTimeout(errorToastTimer);
+    errorToast = { id: Date.now(), title, message };
+    errorToastTimer = setTimeout(() => (errorToast = null), 7000);
+  }
+
   /** @type {'merge' | 'split' | null} */
   let activePagesQuickTool = null;
   let convertPanelOpen = false;
@@ -355,9 +368,47 @@
       await pdfEditor.downloadPdf();
     } catch (error) {
       console.error(error);
-      window.alert(error instanceof Error ? error.message : 'Could not export this PDF.');
+      showErrorToast('Could not download this PDF', error instanceof Error ? error.message : 'Could not export this PDF.');
     } finally {
       isDownloading = false;
+    }
+  }
+
+  /**
+   * Saves the active document back to the file it was opened from: overwrites in
+   * place if we know the original disk path (desktop file-association opens), or
+   * prompts once via a native save dialog and remembers the chosen path for next
+   * time otherwise. Falls back to a normal download when there's no native bridge
+   * (web build), since a browser can't write to an arbitrary path.
+   */
+  async function saveActiveDocument() {
+    if (!pdfEditor || isSaving) return;
+    const tab = tabs.find((entry) => entry.id === activeTab);
+    if (!tab) return;
+    const bridge = /** @type {any} */ (window).__docuflexNative;
+    if (!bridge) {
+      await downloadActiveDocument();
+      return;
+    }
+    isSaving = true;
+    try {
+      const { blob, suggestedName } = await pdfEditor.exportPdfForSave();
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      if (tab.sourcePath) {
+        await bridge.overwrite(tab.sourcePath, bytes);
+      } else {
+        const savedPath = await bridge.promptAndSave(suggestedName, bytes);
+        if (savedPath) tabs = tabs.map((entry) => (entry.id === tab.id ? { ...entry, sourcePath: savedPath } : entry));
+      }
+    } catch (error) {
+      if (error !== 'cancelled') {
+        console.error(error);
+        // The native save bridge (desktop/src-tauri) rejects with a plain string, not an Error.
+        const message = error instanceof Error ? error.message : typeof error === 'string' ? error : 'Could not save this PDF.';
+        showErrorToast('Could not save this PDF', message);
+      }
+    } finally {
+      isSaving = false;
     }
   }
 
@@ -428,7 +479,10 @@
   /** @param {File} file @param {{ enabled: boolean; password: string }} [protection] @param {string} [thumbnailUrl] @param {string} [initialTool] */
   function addFileTab(file, protection = { enabled: false, password: '' }, thumbnailUrl, initialTool = 'select') {
     const id = nextTabId++;
-    tabs = [...tabs, { id, name: file.name, type: 'pdf', file, protection, initialTool }];
+    // Desktop file-association opens (double-click / "Open With Docuflex") stash the
+    // originating disk path on the File object; see desktop/runtime/chrome.js.
+    const sourcePath = /** @type {any} */ (file).__docuflexSourcePath ?? null;
+    tabs = [...tabs, { id, name: file.name, type: 'pdf', file, protection, initialTool, sourcePath }];
     const recent = { name: file.name, file, protection, thumbnailUrl, openedAt: Date.now() };
     recentDocuments = [recent, ...recentDocuments.filter((document) => document.name !== file.name)].slice(0, MAX_RECENT_DOCUMENTS);
     void persistRecentDocument(recent);
@@ -541,13 +595,17 @@
       if (!(target instanceof Element) || !target.closest('.sort-button')) sortExpanded = false;
       if (!(target instanceof Element) || !target.closest('.recent-context-menu')) recentContextMenu = null;
     };
+    /** @param {CustomEvent<{ title: string; message: string }>} event */
+    const handleNativeError = (event) => showErrorToast(event.detail.title, event.detail.message);
     window.addEventListener('pointerdown', closeHomepageMenus);
     window.addEventListener('keydown', handleQuickToolShortcut);
     window.addEventListener('scroll', hideQuickTooltip, true);
     window.addEventListener('resize', hideQuickTooltip);
+    window.addEventListener('docuflex:error', /** @type {EventListener} */ (handleNativeError));
     return () => {
       window.removeEventListener('pointerdown', closeHomepageMenus);
       window.removeEventListener('keydown', handleQuickToolShortcut);
+      window.removeEventListener('docuflex:error', /** @type {EventListener} */ (handleNativeError));
       window.removeEventListener('scroll', hideQuickTooltip, true);
       window.removeEventListener('resize', hideQuickTooltip);
     };
@@ -616,6 +674,15 @@
 
     <nav class="utilities" aria-label="Editor utilities">
       {#if activeTab !== null}
+        <button
+          class="utility-button"
+          aria-label={isSaving ? 'Saving PDF' : 'Save'}
+          title={isSaving ? 'Saving…' : 'Save'}
+          disabled={isSaving}
+          onclick={saveActiveDocument}
+        >
+          <img src="/save.svg" alt="" />
+        </button>
         <button
           class="utility-button"
           aria-label={isDownloading ? 'Exporting PDF' : 'Download'}
@@ -847,6 +914,17 @@
 
   {#if settingsPanelOpen}
     <SettingsPanel onClose={() => (settingsPanelOpen = false)} />
+  {/if}
+
+  {#if errorToast}
+    {#key errorToast.id}
+      <div class="error-toast" role="alert" transition:scale={{ duration: 150, easing: cubicOut, start: 0.96, opacity: 0 }}>
+        <div class="error-toast-body">
+          <strong>{errorToast.title}</strong>
+          <span>{errorToast.message}</span>
+        </div>
+      </div>
+    {/key}
   {/if}
 
   <input bind:this={fileInput} class="file-input" type="file" accept="application/pdf,.pdf" onchange={handleFileSelection} />
@@ -1212,6 +1290,42 @@
   }
 
   .utility-tooltip span {
+    color: #aaaaaa;
+  }
+
+  .error-toast {
+    position: fixed;
+    z-index: 1400;
+    right: 24px;
+    top: 80px;
+    width: 320px;
+    padding: 11px 13px 12px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 9px;
+    background: #222222;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.2), 0 2px 7px rgba(0, 0, 0, 0.12);
+    -webkit-font-smoothing: antialiased;
+    transform-origin: top right;
+  }
+
+  .error-toast-body {
+    display: grid;
+    gap: 3px;
+    width: 100%;
+    color: #ffffff;
+    font-family: Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 17px;
+    font-weight: 400;
+    line-height: 1.2;
+    letter-spacing: -0.15px;
+  }
+
+  .error-toast-body strong {
+    font: inherit;
+    color: #ffffff;
+  }
+
+  .error-toast-body span {
     color: #aaaaaa;
   }
 

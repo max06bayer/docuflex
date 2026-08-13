@@ -5878,7 +5878,7 @@
     }));
   }
 
-  export async function downloadPdf() {
+  async function exportEditedPdfBlob() {
     if (passwordUnlockOpen || unlockingPdf) {
       throw new Error('Unlock this password-protected PDF before downloading.');
     }
@@ -5899,8 +5899,11 @@
       const error = await response.json().catch(() => null);
       throw new Error(error?.error ?? `PDF export failed (${response.status}).`);
     }
+    return response.blob();
+  }
 
-    const blob = await response.blob();
+  export async function downloadPdf() {
+    const blob = await exportEditedPdfBlob();
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     const baseName = workingFile.name.replace(/\.pdf$/i, '') || 'document';
@@ -5908,6 +5911,13 @@
     anchor.download = `${baseName}-edited.pdf`;
     anchor.click();
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  /** Returns the edited PDF bytes plus the original document name, for native "Save" flows that write directly to disk instead of going through a browser download. */
+  export async function exportPdfForSave() {
+    const blob = await exportEditedPdfBlob();
+    const baseName = workingFile.name.replace(/\.pdf$/i, '') || 'document';
+    return { blob, suggestedName: `${baseName}.pdf` };
   }
 
   onDestroy(() => {

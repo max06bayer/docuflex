@@ -642,7 +642,18 @@ public class DocuflexPdfServer {
           if (annotation.fieldChecked) checkbox.check();
           else checkbox.unCheck();
         } else if ("input".equals(annotation.type) && existing instanceof PDTextField textField) {
-          textField.setValue(annotation.fieldValue == null ? "" : annotation.fieldValue);
+          String value = annotation.fieldValue == null ? "" : annotation.fieldValue;
+          try {
+            textField.setValue(value);
+          } catch (IOException fontError) {
+            // Some existing fields carry their own /DA string pointing at a font
+            // that isn't actually declared in the PDF's resources (a common,
+            // malformed-but-real-world case), so PDFBox can't rebuild the
+            // appearance stream. Fall back to the same safe default already
+            // guaranteed to resolve for fields Docuflex creates itself.
+            textField.setDefaultAppearance("/Helv 0 Tf 0 g");
+            textField.setValue(value);
+          }
         }
         continue;
       }
@@ -4367,7 +4378,13 @@ public class DocuflexPdfServer {
     String reference = UUID.randomUUID().toString();
     System.err.println("[PDF request " + reference + "] " + error.getClass().getSimpleName() + ": " + error.getMessage());
     error.printStackTrace(System.err);
-    sendJson(exchange, 400, "{\"error\":\"" + escapeJson(publicMessage)
+    // The top-level exception message (not the stack trace) is safe to surface to
+    // the client: it's what lets the desktop app show what actually went wrong
+    // (e.g. "Could not find font: /Helvetica") instead of only a generic
+    // placeholder, without leaking internal file paths or class internals.
+    String detail = error.getMessage();
+    String combinedMessage = detail == null || detail.isBlank() ? publicMessage : publicMessage + " (" + detail + ")";
+    sendJson(exchange, 400, "{\"error\":\"" + escapeJson(combinedMessage)
         + "\",\"reference\":\"" + reference + "\"}");
   }
 

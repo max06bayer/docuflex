@@ -1,3 +1,4 @@
+use base64::Engine;
 use std::{
     fs::{self, File},
     io::{Read, Write},
@@ -187,6 +188,119 @@ fn editor_initialization_script() -> &'static str {
     include_str!("../../runtime/chrome.js")
 }
 
+/// Always shows the native Finder save panel, then writes the decoded bytes to
+/// wherever the user picked. Returns the chosen path so the frontend can
+/// remember it for a subsequent silent overwrite. Errors with "cancelled" if
+/// the user dismisses the dialog, which the frontend treats as a no-op.
+#[tauri::command]
+async fn docuflex_save_prompt(suggested_name: String, base64: String) -> Result<String, String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64)
+        .map_err(|error| error.to_string())?;
+    let destination = choose_download_destination(&PathBuf::from(suggested_name))
+        .ok_or_else(|| "cancelled".to_string())?;
+    fs::write(&destination, &bytes).map_err(|error| error.to_string())?;
+    Ok(destination.to_string_lossy().into_owned())
+}
+
+/// Overwrites a known path directly, no dialog. Used to silently re-save a
+/// document back to the file it was originally opened from.
+#[tauri::command]
+async fn docuflex_save_overwrite(path: String, base64: String) -> Result<(), String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64)
+        .map_err(|error| error.to_string())?;
+    fs::write(&path, &bytes).map_err(|error| error.to_string())
+}
+
+fn json_string_literal(value: &str) -> String {
+    let mut literal = String::with_capacity(value.len() + 2);
+    literal.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => literal.push_str("\\\""),
+            '\\' => literal.push_str("\\\\"),
+            '\n' => literal.push_str("\\n"),
+            '\r' => literal.push_str("\\r"),
+            control if (control as u32) < 0x20 => {
+                literal.push_str(&format!("\\u{:04x}", control as u32));
+            }
+            other => literal.push(other),
+        }
+    }
+    literal.push('"');
+    literal
+}
+
+/// Injects a self-polling call rather than a one-shot `eval`: the webview
+/// may not have finished navigating to the editor (and defined the bridge
+/// function in desktop/runtime/chrome.js) by the time this lands, either
+/// because the window isn't registered yet on cold launch or because the
+/// page is still loading. The `docuflexOpenId` guard makes repeated
+/// deliveries of the same open request idempotent.
+fn open_script(open_id: &str, name: &str, base64: &str, path: &str) -> String {
+    format!(
+        r#"(function() {{
+  var openId = {open_id};
+  window.__docuflexHandledOpens = window.__docuflexHandledOpens || {{}};
+  if (window.__docuflexHandledOpens[openId]) return;
+  var tryOpen = function() {{
+    if (window.__docuflexHandledOpens[openId]) return;
+    if (typeof window.__docuflexOpenExternalFile === 'function') {{
+      window.__docuflexHandledOpens[openId] = true;
+      window.__docuflexOpenExternalFile({name}, {base64}, {path});
+    }} else {{
+      setTimeout(tryOpen, 50);
+    }}
+  }};
+  tryOpen();
+}})();"#,
+        open_id = json_string_literal(open_id),
+        name = json_string_literal(name),
+        base64 = json_string_literal(base64),
+        path = json_string_literal(path)
+    )
+}
+
+fn open_document_in_editor(app: &tauri::AppHandle, path: PathBuf) {
+    let app = app.clone();
+    thread::spawn(move || {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("document.pdf")
+            .to_string();
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                eprintln!("Could not read {}: {error}", path.display());
+                return;
+            }
+        };
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let path_string = path.to_string_lossy().into_owned();
+        let open_id = format!("{}-{}", path.display(), Instant::now().elapsed().as_nanos());
+
+        // Retry the eval itself: on cold launch the "main" window may not be
+        // registered yet, and even once it is, it may still be mid-navigation
+        // to the editor URL in a context that's about to be torn down. Firing
+        // the same idempotent script repeatedly over a few seconds guarantees
+        // it eventually lands in the page that actually sticks around.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut delivered_after_window_ready = 0;
+        while Instant::now() < deadline {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.eval(&open_script(&open_id, &name, &encoded, &path_string));
+                delivered_after_window_ready += 1;
+                if delivered_after_window_ready >= 8 {
+                    break;
+                }
+            }
+            thread::sleep(Duration::from_millis(300));
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let services = Arc::new(Services {
@@ -196,6 +310,10 @@ pub fn run() {
     let services_for_exit = Arc::clone(&services);
 
     let app = tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![
+            docuflex_save_prompt,
+            docuflex_save_overwrite
+        ])
         .plugin(tauri_plugin_single_instance::init(
             |app, _arguments, _cwd| {
                 if let Some(window) = app.get_webview_window("main") {
@@ -248,18 +366,27 @@ pub fn run() {
                     DownloadEvent::Finished { .. } => true,
                     _ => true,
                 })
-                .build()?;
+                .build()?
+                .maximize()?;
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("could not build Docuflex");
 
-    app.run(move |_app_handle, event| {
-        if matches!(
-            event,
-            tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }
-        ) {
+    app.run(move |app_handle, event| match event {
+        tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. } => {
             services_for_exit.stop();
         }
+        tauri::RunEvent::Opened { urls } => {
+            for url in urls {
+                if url.scheme() != "file" {
+                    continue;
+                }
+                if let Ok(path) = url.to_file_path() {
+                    open_document_in_editor(app_handle, path);
+                }
+            }
+        }
+        _ => {}
     });
 }

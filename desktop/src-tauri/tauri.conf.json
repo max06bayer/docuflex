@@ -8,6 +8,7 @@
   },
   "app": {
     "windows": [],
+    "withGlobalTauri": true,
     "security": {
       "csp": null
     }
@@ -17,6 +18,15 @@
     "targets": ["app"],
     "icon": ["icons/icon.png", "icons/icon.icns"],
     "resources": ["resources/**/*"],
+    "fileAssociations": [
+      {
+        "ext": ["pdf"],
+        "name": "PDF Document",
+        "description": "PDF Document",
+        "mimeType": "application/pdf",
+        "role": "Editor"
+      }
+    ],
     "macOS": {
       "minimumSystemVersion": "26.0",
       "signingIdentity": "-",
