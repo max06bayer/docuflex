@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-window",
-  "description": "Allows the packaged macOS editor window to use its custom native drag regions.",
+  "description": "Allows the packaged desktop editor window to use its custom native drag regions.",
   "remote": {
     "urls": ["http://127.0.0.1:43127/*"]
   },
@@ -9,8 +9,9 @@
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
+    "allow-take-pending-pdf",
+    "allow-start-window-drag",
     "allow-docuflex-save-prompt",
     "allow-docuflex-save-overwrite"
-  ],
-  "platforms": ["macOS"]
+  ]
 }

@@ -1,0 +1,313 @@
+name: Desktop native builds
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/desktop-native-builds.yml'
+      - 'backend/**'
+      - 'desktop/**'
+      - 'package-lock.json'
+      - 'package.json'
+      - 'public/**'
+      - 'scripts/**'
+      - 'src/**'
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    name: Windows x64 offline installer
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.18.0
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+      - name: Install JavaScript dependencies
+        shell: pwsh
+        run: |
+          npm ci
+          npm ci --prefix desktop
+      - name: Install bundled Python conversion packages
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check pillow python-docx lxml openpyxl python-pptx xlsxwriter
+      - name: Prepare native Windows runtimes
+        shell: pwsh
+        run: ./desktop/scripts/prepare-windows-runtimes.ps1 -RuntimeRoot "$pwd/desktop/.native-runtime/windows"
+      - name: Build and smoke-test Windows package
+        shell: pwsh
+        working-directory: desktop
+        env:
+          DOCUFLEX_PDF2HTMLEX_RUNTIME: ${{ github.workspace }}/desktop/.native-runtime/windows/pdf2htmlEX
+          DOCUFLEX_OCR_RUNTIME: ${{ github.workspace }}/desktop/.native-runtime/windows/ocr
+          DOCUFLEX_OFFICE_RUNTIME: ${{ github.workspace }}/desktop/.native-runtime/windows/office
+        run: |
+          $env:DOCUFLEX_PYTHON_RUNTIME = $env:pythonLocation
+          npm run build
+      - name: Launch-test packaged Windows runtime
+        shell: pwsh
+        working-directory: desktop
+        run: |
+          $installer = Resolve-Path 'src-tauri/target/release/bundle/nsis/*.exe'
+          $install = Start-Process -FilePath $installer -ArgumentList '/S' -PassThru -Wait
+          if ($install.ExitCode -ne 0) {
+            throw "NSIS installation failed with exit code $($install.ExitCode)."
+          }
+          $entry = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' |
+            Where-Object { $_.DisplayName -eq 'Docuflex' } |
+            Select-Object -First 1
+          $candidates = @()
+          if ($entry.DisplayIcon) {
+            $candidates += ($entry.DisplayIcon -replace ',\d+$', '').Trim('"')
+          }
+          if ($entry.InstallLocation -and (Test-Path $entry.InstallLocation)) {
+            $candidates += Get-ChildItem $entry.InstallLocation -Filter '*.exe' -File |
+              Where-Object { $_.Name -notmatch 'uninstall' } |
+              Select-Object -ExpandProperty FullName
+          }
+          $appPath = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $appPath) {
+            throw 'Could not locate the Docuflex executable after NSIS installation.'
+          }
+          $marker = Join-Path $env:RUNNER_TEMP 'docuflex-windows-page-loaded'
+          Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
+          $env:DOCUFLEX_PAGE_LOAD_MARKER = $marker
+          $process = Start-Process -FilePath $appPath -PassThru
+          try {
+            foreach ($attempt in 1..60) {
+              $process.Refresh()
+              if ($process.HasExited) {
+                throw "Packaged Windows app exited with code $($process.ExitCode) before startup completed."
+              }
+              $backendReady = $false
+              $frontendReady = $false
+              try {
+                $backendReady = (Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:43128/health' -TimeoutSec 2).StatusCode -eq 200
+                $frontendReady = (Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:43127/editor' -TimeoutSec 2).StatusCode -eq 200
+              } catch {}
+              if ($backendReady -and $frontendReady -and (Test-Path $marker) -and ((Get-Content $marker -Raw).Trim() -eq 'editor-loaded')) {
+                Write-Host 'Packaged Windows services and WebView page-load test passed.'
+                # smoke-live-document-tools.mjs shells out to the bare `pdftoppm`
+                # command; that binary only exists inside the installed app's
+                # bundled resources (see ocr_executable() in src-tauri/src/lib.rs),
+                # not on the runner's PATH, so add it before running the script.
+                # Derived from $appPath (already resolved and validated above)
+                # rather than $entry.InstallLocation, which can carry stray
+                # quote characters straight from the registry value.
+                $installRoot = Split-Path $appPath -Parent
+                $ocrBinDir = Join-Path $installRoot 'resources\runtime\ocr\poppler\bin'
+                if (-not (Test-Path $ocrBinDir)) {
+                  throw "Could not find the bundled OCR tools at $ocrBinDir."
+                }
+                $env:PATH = "$ocrBinDir;$env:PATH"
+                node scripts/smoke-live-document-tools.mjs
+                if ($LASTEXITCODE -ne 0) { throw 'Packaged document-tool API tests failed.' }
+                exit 0
+              }
+              Start-Sleep -Seconds 1
+            }
+            throw 'Packaged Windows app did not become ready within 60 seconds.'
+          } finally {
+            if (-not $process.HasExited) {
+              & taskkill.exe /PID $process.Id /T /F | Out-Null
+            }
+            $logRoot = Join-Path $env:LOCALAPPDATA 'com.docuflex.editor/logs'
+            if (Test-Path $logRoot) {
+              Get-ChildItem $logRoot -Filter '*.log' | ForEach-Object {
+                Write-Host "[$($_.Name)]"
+                Get-Content $_.FullName
+              }
+            }
+          }
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Docuflex-Windows-x64
+          if-no-files-found: error
+          path: desktop/src-tauri/target/release/bundle/nsis/*.exe
+
+  linux-x64:
+    name: Linux x64 AppImage and Debian package
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Tauri Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libfuse2 xvfb
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.18.0
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+      - name: Install JavaScript dependencies
+        run: |
+          npm ci
+          npm ci --prefix desktop
+      - name: Install bundled Python conversion packages
+        run: python -m pip install --disable-pip-version-check pillow python-docx lxml openpyxl python-pptx xlsxwriter
+      - name: Prepare native Linux runtimes
+        run: |
+          chmod +x desktop/scripts/prepare-linux-runtimes.sh desktop/runtime/*.sh
+          desktop/scripts/prepare-linux-runtimes.sh "$GITHUB_WORKSPACE/desktop/.native-runtime/linux"
+      - name: Build and smoke-test Linux packages
+        working-directory: desktop
+        env:
+          DOCUFLEX_PDF2HTMLEX_RUNTIME: ${{ github.workspace }}/desktop/.native-runtime/linux/pdf2htmlEX
+          DOCUFLEX_OCR_RUNTIME: ${{ github.workspace }}/desktop/.native-runtime/linux/ocr
+          DOCUFLEX_OFFICE_RUNTIME: ${{ github.workspace }}/desktop/.native-runtime/linux/office
+          DOCUFLEX_PYTHON_RUNTIME: ${{ env.pythonLocation }}
+        run: npm run build
+      - name: Launch-test packaged AppImage
+        working-directory: desktop
+        run: |
+          appimage=$(find src-tauri/target/release/bundle/appimage -maxdepth 1 -name '*.AppImage' -print -quit)
+          test -n "$appimage"
+          chmod +x "$appimage"
+          rm -f /tmp/docuflex-launcher-env /tmp/docuflex-page-loaded
+          DOCUFLEX_LAUNCHER_MARKER=/tmp/docuflex-launcher-env \
+          DOCUFLEX_PAGE_LOAD_MARKER=/tmp/docuflex-page-loaded \
+            timeout 75s xvfb-run -a "$appimage" > /tmp/docuflex-appimage.log 2>&1 &
+          launcher_pid=$!
+          cleanup() {
+            kill "$launcher_pid" 2>/dev/null || true
+            wait "$launcher_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for attempt in $(seq 1 60); do
+            if ! kill -0 "$launcher_pid" 2>/dev/null; then
+              cat /tmp/docuflex-appimage.log
+              echo "Packaged AppImage exited before its local services became ready." >&2
+              exit 1
+            fi
+            if curl --fail --silent http://127.0.0.1:43128/health >/dev/null \
+              && curl --fail --silent http://127.0.0.1:43127/editor >/dev/null \
+              && grep --quiet '^dmabuf=1$' /tmp/docuflex-launcher-env 2>/dev/null \
+              && grep --quiet '^compositing=1$' /tmp/docuflex-launcher-env 2>/dev/null \
+              && grep --quiet '^editor-loaded$' /tmp/docuflex-page-loaded 2>/dev/null; then
+              echo "Packaged AppImage service and WebKit page-load test passed."
+              if ! node scripts/smoke-live-document-tools.mjs; then
+                find "$HOME/.local/share/com.docuflex.editor/logs" -type f -name '*.log' \
+                  -exec sh -c 'echo "[$1]"; cat "$1"' _ {} \; 2>/dev/null || true
+                exit 1
+              fi
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/docuflex-appimage.log
+          echo "Packaged AppImage local services were not ready within 60 seconds." >&2
+          exit 1
+      - name: Upload Linux packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: Docuflex-Linux-x64
+          if-no-files-found: error
+          path: |
+            desktop/src-tauri/target/release/bundle/appimage/*.AppImage
+            desktop/src-tauri/target/release/bundle/deb/*.deb
+
+  arch-linux-x64:
+    name: Arch and CachyOS native x64 package
+    needs: linux-x64
+    runs-on: ubuntu-22.04
+    container: archlinux:latest
+    timeout-minutes: 90
+    steps:
+      - name: Install current Arch build and runtime dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed \
+            base-devel binutils curl dbus git gtk3 libayatana-appindicator \
+            librsvg nodejs npm poppler rust tesseract webkit2gtk-4.1 xorg-server-xvfb
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: Docuflex-Linux-x64
+          path: desktop/.linux-bundle
+      - name: Extract offline application resources
+        run: |
+          deb=$(find desktop/.linux-bundle -name '*.deb' -print -quit)
+          test -n "$deb"
+          mkdir -p desktop/.deb-extracted desktop/.deb-parts
+          (cd desktop/.deb-parts && ar x "$GITHUB_WORKSPACE/$deb")
+          data_archive=$(find desktop/.deb-parts -name 'data.tar.*' -print -quit)
+          test -n "$data_archive"
+          bsdtar -xf "$data_archive" -C desktop/.deb-extracted
+      - name: Build current-Arch native package
+        run: |
+          chmod +x desktop/scripts/package-arch-linux.sh
+          desktop/scripts/package-arch-linux.sh \
+            "$GITHUB_WORKSPACE/desktop/.deb-extracted" \
+            "$GITHUB_WORKSPACE/desktop/arch-package"
+      - name: Install and launch-test native package
+        run: |
+          package=$(find desktop/arch-package -name '*.pkg.tar.zst' -print -quit)
+          test -n "$package"
+          pacman -U --noconfirm "$package"
+          rm -f /tmp/docuflex-page-loaded
+          DOCUFLEX_PAGE_LOAD_MARKER=/tmp/docuflex-page-loaded \
+            timeout 75s xvfb-run -a dbus-run-session -- docuflex-desktop \
+            > /tmp/docuflex-arch.log 2>&1 &
+          app_pid=$!
+          cleanup() {
+            kill "$app_pid" 2>/dev/null || true
+            wait "$app_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for attempt in $(seq 1 60); do
+            if ! kill -0 "$app_pid" 2>/dev/null; then
+              cat /tmp/docuflex-arch.log
+              echo 'Native Arch package exited before startup completed.' >&2
+              exit 1
+            fi
+            if curl --fail --silent http://127.0.0.1:43128/health >/dev/null \
+              && curl --fail --silent http://127.0.0.1:43127/editor >/dev/null \
+              && grep --quiet '^editor-loaded$' /tmp/docuflex-page-loaded 2>/dev/null; then
+              echo 'Native Arch services and WebKit page-load test passed.'
+              if ! node desktop/scripts/smoke-live-document-tools.mjs; then
+                find "$HOME/.local/share/com.docuflex.editor/logs" -type f -name '*.log' \
+                  -exec sh -c 'echo "[$1]"; cat "$1"' _ {} \; 2>/dev/null || true
+                exit 1
+              fi
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/docuflex-arch.log
+          echo 'Native Arch package did not become ready within 60 seconds.' >&2
+          exit 1
+      - name: Upload Arch and CachyOS package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Docuflex-Arch-CachyOS-x64
+          if-no-files-found: error
+          path: |
+            desktop/arch-package/*.pkg.tar.zst
+            desktop/arch-package/docuflex-arch-ldd.txt

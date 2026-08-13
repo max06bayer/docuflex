@@ -6,7 +6,9 @@
   "type": "module",
   "scripts": {
     "stage": "node scripts/prepare.mjs",
-    "build": "npm run stage && tauri build --bundles app",
+    "smoke": "node scripts/smoke-runtimes.mjs",
+    "bundle": "node scripts/build.mjs",
+    "build": "npm run stage && npm run smoke && npm run bundle",
     "dev": "npm run stage && tauri dev"
   },
   "devDependencies": {

@@ -16,6 +16,7 @@ tmp/
 .pdf2htmlex/
 .ocr/
 .document-python/
+desktop/.native-runtime/
 
 # Environment files
 .env

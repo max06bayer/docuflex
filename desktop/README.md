@@ -1,12 +1,18 @@
-# Docuflex for macOS
+# Docuflex desktop builds
 
-This directory packages the existing Docuflex `/editor` route as a native Tauri app. The web application source remains unchanged.
+The desktop package runs the existing `/editor` application and its Java backend entirely on loopback. Each native package contains Node.js, a reduced Java 17 runtime, Python conversion libraries, OCR tools and language data, `pdf2htmlEX`, and an office converter. Runtime staging fails instead of silently using tools installed on the end user's computer.
 
-The packaged app applies its macOS-only titlebar and sidebar arrangement from `runtime/chrome.js`; those overrides are injected by Tauri and are not included in the website.
+## Native packages
 
-## Build
+- macOS Apple Silicon: `npm run build` in `desktop/` creates `Docuflex.app`.
+- Windows x64: the `Desktop native builds` workflow creates a current-user NSIS installer and embeds the offline WebView2 installer.
+- Linux x64: the same workflow creates an AppImage and a Debian package on Ubuntu 22.04.
 
-The current native bundle targets Apple Silicon macOS 26 or newer.
+Windows and Linux are deliberately compiled on native GitHub runners. Tauri recommends native CI for installers, and this also ensures that every bundled helper executable matches the target operating system.
+
+Before packaging, `npm run smoke` verifies the bundled Node and Java runtimes, Python imports, all three OCR language files, real OCR output, a real PDF-to-HTML conversion that preserves text, and LibreOffice availability. A failed native dependency prevents the installer artifact from being uploaded.
+
+For a local Apple Silicon build:
 
 ```sh
 cd desktop
@@ -14,12 +20,12 @@ npm install
 npm run build
 ```
 
-The staging step builds the existing SvelteKit application and PDFBox server, downloads and verifies the pinned Node.js LTS runtime, creates a trimmed Java 17 runtime with `jlink`, bundles the native Apple Silicon `pdf2htmlEX` and OCR runtimes, and generates the macOS icon from `public/macos-icon-iOS-Default-1024x1024@1x.png`.
+The app is written to `desktop/src-tauri/target/release/bundle/macos/Docuflex.app`. It targets macOS 26 or newer and uses the icon exported at `public/macos-icon-iOS-Default-1024x1024@1x.png`.
 
-The resulting app is written below `desktop/src-tauri/target/release/bundle/macos/Docuflex.app`.
+The relocatable macOS converter and OCR inputs remain under `vendor/pdf2htmlEX-macos-arm64` and `vendor/ocr-macos-arm64`. Their pinned source versions and checksums are recorded in `runtime/pdf2htmlEX-SOURCE.txt` and the vendor `SOURCE.txt` files; the existing bundling scripts can recreate them from native builds.
 
-The app runs its frontend and PDFBox services only on `127.0.0.1`. No hosted Docuflex backend is used. Edit Text uses the bundled native `pdf2htmlEX`, Poppler, FontForge, data files, and relocated dylibraries, so conversion works offline without Homebrew, MacPorts, Docker, or a Linux compatibility layer.
+## Window chrome
 
-The converter bundle is under `vendor/pdf2htmlEX-macos-arm64`. Its pinned source versions and checksums are recorded in `runtime/pdf2htmlEX-SOURCE.txt`; `scripts/bundle-pdf2htmlex.mjs` recreates the relocatable runtime after the native sources have been built.
-
-Offline OCR uses bundled Apple Silicon builds of Tesseract, `pdftoppm`, and `pdfunite`, plus pinned English, German, and orientation language data. `scripts/bundle-ocr.mjs` recreates that relocatable runtime under `vendor/ocr-macos-arm64`.
+- macOS retains the integrated traffic lights and desktop-specific sidebar/header alignment.
+- Windows uses the web header with a draggable native window frame and Windows controls on the right; the utility area reserves the corresponding space.
+- Linux uses the normal desktop window decoration and the web header unchanged.

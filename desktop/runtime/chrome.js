@@ -1,5 +1,32 @@
 (() => {
+  const desktopPlatform = /Windows/i.test(navigator.userAgent)
+    ? 'windows'
+    : /Linux/i.test(navigator.userAgent)
+      ? 'linux'
+      : 'macos';
   const desktopBlobUrls = new Map();
+  const NativeDesktopFile = globalThis.File;
+  const desktopConstructedFileBytes = new WeakMap();
+  if (typeof NativeDesktopFile === 'function') {
+    const DocuflexDesktopFile = function (parts, name, options) {
+      const file = new NativeDesktopFile(parts, name, options);
+      if (parts?.length === 1) {
+        const part = parts[0];
+        if (part instanceof ArrayBuffer) {
+          desktopConstructedFileBytes.set(file, part.slice(0));
+        } else if (ArrayBuffer.isView(part)) {
+          desktopConstructedFileBytes.set(
+            file,
+            part.buffer.slice(part.byteOffset, part.byteOffset + part.byteLength),
+          );
+        }
+      }
+      return file;
+    };
+    Object.setPrototypeOf(DocuflexDesktopFile, NativeDesktopFile);
+    DocuflexDesktopFile.prototype = NativeDesktopFile.prototype;
+    globalThis.File = DocuflexDesktopFile;
+  }
   const originalCreateObjectUrl = URL.createObjectURL.bind(URL);
   const originalRevokeObjectUrl = URL.revokeObjectURL.bind(URL);
   URL.createObjectURL = (object) => {
@@ -69,7 +96,9 @@
       configurable: true,
       enumerable: false,
       value() {
-        if (!(this instanceof File)) return originalArrayBuffer.call(this);
+        if (!(this instanceof NativeDesktopFile)) return originalArrayBuffer.call(this);
+        const constructedBytes = desktopConstructedFileBytes.get(this);
+        if (constructedBytes) return Promise.resolve(constructedBytes.slice(0));
         let active = activeReads.get(this);
         if (!active) {
           const key = fileKey(this);
@@ -101,33 +130,6 @@
   };
 
   installDurableDesktopBlobReads();
-
-  const waitForFileInput = () => new Promise((resolve) => {
-    const existing = document.querySelector('.file-input');
-    if (existing) return resolve(existing);
-    const observer = new MutationObserver(() => {
-      const input = document.querySelector('.file-input');
-      if (!input) return;
-      observer.disconnect();
-      resolve(input);
-    });
-    observer.observe(document.documentElement, { childList: true, subtree: true });
-  });
-
-  // Called from the native shell (desktop/src-tauri/src/lib.rs) when the OS
-  // hands us a file to open, e.g. via double-click or "Open With Docuflex".
-  window.__docuflexOpenExternalFile = async (name, base64, sourcePath) => {
-    const input = await waitForFileInput();
-    const raw = atob(base64);
-    const bytes = new Uint8Array(raw.length);
-    for (let index = 0; index < raw.length; index += 1) bytes[index] = raw.charCodeAt(index);
-    const file = new File([bytes], name, { type: 'application/pdf' });
-    if (sourcePath) file.__docuflexSourcePath = sourcePath;
-    const transfer = new DataTransfer();
-    transfer.items.add(file);
-    input.files = transfer.files;
-    input.dispatchEvent(new Event('change', { bubbles: true }));
-  };
 
   const arrayBufferToBase64 = (bufferLike) => {
     const bytes = bufferLike instanceof Uint8Array ? bufferLike : new Uint8Array(bufferLike);
@@ -308,6 +310,115 @@
       position: absolute;
     }
 
+    html[data-docuflex-desktop="linux"] .editor-shell {
+      height: 117.6470588dvh !important;
+      transform: scale(0.85);
+      transform-origin: top left;
+      width: 117.6470588vw !important;
+      zoom: 1 !important;
+    }
+
+    html[data-docuflex-desktop="linux"] .text-highlight-layer .text-highlight,
+    html[data-docuflex-desktop="linux"] [data-docuflex-annotation-type="highlight"] rect {
+      mix-blend-mode: multiply !important;
+      opacity: 0.42 !important;
+    }
+
+    html[data-docuflex-desktop="windows"] .topbar,
+    html[data-docuflex-desktop="windows"] .brand-area,
+    html[data-docuflex-desktop="windows"] .tab-strip,
+    html[data-docuflex-desktop="windows"] .utilities,
+    html[data-docuflex-desktop="linux"] .topbar,
+    html[data-docuflex-desktop="linux"] .brand-area,
+    html[data-docuflex-desktop="linux"] .tab-strip,
+    html[data-docuflex-desktop="linux"] .utilities {
+      -webkit-app-region: drag;
+    }
+
+    html[data-docuflex-desktop="windows"] .utilities,
+    html[data-docuflex-desktop="linux"] .utilities {
+      padding-right: 168px !important;
+    }
+
+    html[data-docuflex-desktop="windows"] .topbar button,
+    html[data-docuflex-desktop="windows"] .topbar a,
+    html[data-docuflex-desktop="windows"] .topbar input,
+    html[data-docuflex-desktop="linux"] .topbar button,
+    html[data-docuflex-desktop="linux"] .topbar a,
+    html[data-docuflex-desktop="linux"] .topbar input,
+    html[data-docuflex-desktop="windows"] .docuflex-window-controls,
+    html[data-docuflex-desktop="linux"] .docuflex-window-controls {
+      -webkit-app-region: no-drag;
+    }
+
+    .docuflex-window-controls {
+      display: none;
+    }
+
+    html[data-docuflex-desktop="windows"] .docuflex-window-controls,
+    html[data-docuflex-desktop="linux"] .docuflex-window-controls {
+      display: flex;
+      height: 32px;
+      position: fixed;
+      right: 0;
+      top: 0;
+      z-index: 10002;
+    }
+
+    .docuflex-window-control {
+      align-items: center;
+      background: transparent;
+      border: 0;
+      color: #616161;
+      display: flex;
+      height: 32px;
+      justify-content: center;
+      padding: 0;
+      position: relative;
+      width: 46px;
+    }
+
+    .docuflex-window-control:hover {
+      background: rgba(0, 0, 0, 0.07);
+      color: #171717;
+    }
+
+    .docuflex-window-control.close:hover {
+      background: #c42b1c;
+      color: #fff;
+    }
+
+    .docuflex-window-control::before,
+    .docuflex-window-control::after {
+      box-sizing: border-box;
+      content: "";
+      position: absolute;
+    }
+
+    .docuflex-window-control.minimize::before {
+      border-top: 1px solid currentColor;
+      height: 1px;
+      width: 10px;
+    }
+
+    .docuflex-window-control.maximize::before {
+      border: 1px solid currentColor;
+      height: 10px;
+      width: 10px;
+    }
+
+    .docuflex-window-control.close::before,
+    .docuflex-window-control.close::after {
+      background: currentColor;
+      height: 1px;
+      transform: rotate(45deg);
+      width: 12px;
+    }
+
+    .docuflex-window-control.close::after {
+      transform: rotate(-45deg);
+    }
+
     .docuflex-desktop-export-menu {
       -webkit-backdrop-filter: blur(18px);
       animation: docuflex-desktop-export-menu-in 125ms cubic-bezier(0.215, 0.61, 0.355, 1);
@@ -353,7 +464,7 @@
   `;
 
   const installDesktopChrome = () => {
-    document.documentElement.dataset.docuflexDesktop = 'macos';
+    document.documentElement.dataset.docuflexDesktop = desktopPlatform;
 
     if (!document.getElementById('docuflex-desktop-chrome')) {
       const style = document.createElement('style');
@@ -363,9 +474,14 @@
     }
 
     const markDragRegion = () => {
-      document
-        .querySelectorAll('.topbar, .brand-area, .tab-strip, .utilities')
-        .forEach((element) => element.setAttribute('data-tauri-drag-region', 'deep'));
+      document.querySelectorAll('.topbar, .brand-area, .tab-strip, .utilities').forEach((element) => {
+        element.setAttribute('data-tauri-drag-region', '');
+        element.querySelectorAll('*').forEach((child) => {
+          if (!child.closest('button, a, input, select, textarea, [role="button"]')) {
+            child.setAttribute('data-tauri-drag-region', '');
+          }
+        });
+      });
     };
 
     markDragRegion();
@@ -373,12 +489,89 @@
       childList: true,
       subtree: true,
     });
+
+    if (desktopPlatform !== 'macos' && !document.querySelector('.docuflex-window-controls')) {
+      const controls = document.createElement('div');
+      controls.className = 'docuflex-window-controls';
+      controls.setAttribute('aria-label', 'Window controls');
+      for (const [action, label] of [
+        ['minimize', 'Minimize'],
+        ['maximize', 'Maximize or restore'],
+        ['close', 'Close'],
+      ]) {
+        const button = document.createElement('button');
+        button.className = `docuflex-window-control ${action}`;
+        button.type = 'button';
+        button.setAttribute('aria-label', label);
+        button.addEventListener('click', () => {
+          window.location.assign(`/__docuflex/window/${action}`);
+        });
+        controls.append(button);
+      }
+      document.body.append(controls);
+    }
   };
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', installDesktopChrome, { once: true });
   } else {
     installDesktopChrome();
+  }
+
+  if (desktopPlatform !== 'macos') {
+    const forwardedZoomEvents = new WeakSet();
+    window.addEventListener('wheel', (event) => {
+      if (forwardedZoomEvents.has(event) || (!event.ctrlKey && !event.metaKey)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const slowed = new WheelEvent('wheel', {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        clientX: event.clientX,
+        clientY: event.clientY,
+        ctrlKey: event.ctrlKey,
+        metaKey: event.metaKey,
+        deltaMode: event.deltaMode,
+        deltaX: event.deltaX * 0.32,
+        deltaY: event.deltaY * 0.32,
+        deltaZ: event.deltaZ * 0.32,
+      });
+      forwardedZoomEvents.add(slowed);
+      event.target?.dispatchEvent(slowed);
+    }, { capture: true, passive: false });
+  }
+
+  const openPendingNativePdf = async () => {
+    const invoke = globalThis.__TAURI__?.core?.invoke;
+    if (typeof invoke !== 'function') return;
+    const pending = await invoke('take_pending_pdf').catch((error) => {
+      console.error('Could not read the PDF opened by the operating system:', error);
+      return null;
+    });
+    if (!pending?.base64 || !pending?.name) return;
+    const binary = atob(pending.base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    const input = document.querySelector('input.file-input[type="file"]');
+    if (!(input instanceof HTMLInputElement)) {
+      console.error('Could not find the desktop PDF input.');
+      return;
+    }
+    const file = new File([bytes], pending.name, { type: 'application/pdf', lastModified: Date.now() });
+    // Lets DocuflexApp.svelte's Save button overwrite this exact file in place.
+    if (pending.path) file.__docuflexSourcePath = pending.path;
+    const transfer = new DataTransfer();
+    transfer.items.add(file);
+    input.files = transfer.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+
+  window.addEventListener('docuflex-native-open-pdf', () => void openPendingNativePdf());
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => void openPendingNativePdf(), { once: true });
+  } else {
+    void openPendingNativePdf();
   }
 
   const exportButtonSelector = '.utilities .utility-button[aria-label="Download"], .utilities .utility-button[aria-label="Exporting PDF"]';

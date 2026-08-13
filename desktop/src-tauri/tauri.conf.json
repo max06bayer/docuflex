@@ -7,6 +7,7 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [],
     "withGlobalTauri": true,
     "security": {
@@ -15,8 +16,17 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app"],
-    "icon": ["icons/icon.png", "icons/icon.icns"],
+    "targets": "all",
+    "fileAssociations": [
+      {
+        "ext": ["pdf"],
+        "mimeType": "application/pdf",
+        "name": "PDF document",
+        "role": "Editor",
+        "rank": "Default"
+      }
+    ],
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
     "resources": ["resources/**/*"],
     "fileAssociations": [
       {
@@ -31,6 +41,14 @@
       "minimumSystemVersion": "26.0",
       "signingIdentity": "-",
       "entitlements": "Entitlements.plist"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "offlineInstaller"
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
     }
   }
 }
