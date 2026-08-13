@@ -106,7 +106,11 @@ jobs:
                 # command; that binary only exists inside the installed app's
                 # bundled resources (see ocr_executable() in src-tauri/src/lib.rs),
                 # not on the runner's PATH, so add it before running the script.
-                $ocrBinDir = Join-Path $entry.InstallLocation 'resources\runtime\ocr\poppler\bin'
+                # Derived from $appPath (already resolved and validated above)
+                # rather than $entry.InstallLocation, which can carry stray
+                # quote characters straight from the registry value.
+                $installRoot = Split-Path $appPath -Parent
+                $ocrBinDir = Join-Path $installRoot 'resources\runtime\ocr\poppler\bin'
                 if (-not (Test-Path $ocrBinDir)) {
                   throw "Could not find the bundled OCR tools at $ocrBinDir."
                 }
