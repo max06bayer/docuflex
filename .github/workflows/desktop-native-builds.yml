@@ -102,6 +102,15 @@ jobs:
               } catch {}
               if ($backendReady -and $frontendReady -and (Test-Path $marker) -and ((Get-Content $marker -Raw).Trim() -eq 'editor-loaded')) {
                 Write-Host 'Packaged Windows services and WebView page-load test passed.'
+                # smoke-live-document-tools.mjs shells out to the bare `pdftoppm`
+                # command; that binary only exists inside the installed app's
+                # bundled resources (see ocr_executable() in src-tauri/src/lib.rs),
+                # not on the runner's PATH, so add it before running the script.
+                $ocrBinDir = Join-Path $entry.InstallLocation 'resources\runtime\ocr\poppler\bin'
+                if (-not (Test-Path $ocrBinDir)) {
+                  throw "Could not find the bundled OCR tools at $ocrBinDir."
+                }
+                $env:PATH = "$ocrBinDir;$env:PATH"
                 node scripts/smoke-live-document-tools.mjs
                 if ($LASTEXITCODE -ne 0) { throw 'Packaged document-tool API tests failed.' }
                 exit 0
