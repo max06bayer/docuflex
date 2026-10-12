@@ -542,9 +542,39 @@
     }, { capture: true, passive: false });
   }
 
+  // The editor's own input, not the ones inside the tool panels (Convert, Compress, ...).
+  const desktopPdfInputSelector = 'main.editor-shell > input.file-input[type="file"]';
+  // The app renders client-side only, so on a cold start (e.g. double-clicking a PDF
+  // while Docuflex is closed) the input does not exist yet when this script first runs.
+  const waitForDesktopPdfInput = (timeoutMs = 60_000) => new Promise((resolve) => {
+    const existing = document.querySelector(desktopPdfInputSelector);
+    if (existing instanceof HTMLInputElement) {
+      resolve(existing);
+      return;
+    }
+    const observer = new MutationObserver(() => {
+      const input = document.querySelector(desktopPdfInputSelector);
+      if (!(input instanceof HTMLInputElement)) return;
+      observer.disconnect();
+      window.clearTimeout(timeout);
+      resolve(input);
+    });
+    const timeout = window.setTimeout(() => {
+      observer.disconnect();
+      resolve(null);
+    }, timeoutMs);
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+  });
+
   const openPendingNativePdf = async () => {
     const invoke = globalThis.__TAURI__?.core?.invoke;
     if (typeof invoke !== 'function') return;
+    // Wait for the editor before taking the PDF: taking it clears it on the native side.
+    const input = await waitForDesktopPdfInput();
+    if (!(input instanceof HTMLInputElement)) {
+      console.error('Could not find the desktop PDF input.');
+      return;
+    }
     const pending = await invoke('take_pending_pdf').catch((error) => {
       console.error('Could not read the PDF opened by the operating system:', error);
       return null;
@@ -553,11 +583,6 @@
     const binary = atob(pending.base64);
     const bytes = new Uint8Array(binary.length);
     for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-    const input = document.querySelector('input.file-input[type="file"]');
-    if (!(input instanceof HTMLInputElement)) {
-      console.error('Could not find the desktop PDF input.');
-      return;
-    }
     const file = new File([bytes], pending.name, { type: 'application/pdf', lastModified: Date.now() });
     // Lets DocuflexApp.svelte's Save button overwrite this exact file in place.
     if (pending.path) file.__docuflexSourcePath = pending.path;
