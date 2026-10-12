@@ -67,6 +67,9 @@ import org.apache.pdfbox.pdmodel.interactive.annotation.PDAppearanceDictionary;
 import org.apache.pdfbox.pdmodel.interactive.annotation.PDAppearanceEntry;
 import org.apache.pdfbox.pdmodel.interactive.annotation.PDAppearanceStream;
 import org.apache.pdfbox.pdmodel.interactive.annotation.PDAnnotation;
+import org.apache.pdfbox.pdmodel.interactive.annotation.PDAnnotationHighlight;
+import org.apache.pdfbox.pdmodel.interactive.annotation.PDAnnotationMarkup;
+import org.apache.pdfbox.pdmodel.interactive.annotation.PDAnnotationText;
 import org.apache.pdfbox.pdmodel.interactive.annotation.PDAnnotationWidget;
 import org.apache.pdfbox.pdmodel.interactive.form.PDAcroForm;
 import org.apache.pdfbox.pdmodel.interactive.form.PDCheckBox;
@@ -200,13 +203,16 @@ public class DocuflexPdfServer {
       }
       boolean printCopy = Boolean.TRUE.equals(payload.get("printCopy"));
       List<Object> formValues = payload.get("formValues") instanceof List<?> ? asArray(payload.get("formValues")) : List.of();
+      List<PageCommentData> comments = parseComments(payload.get("comments"));
+      List<PdfReplyData> pdfReplies = parsePdfReplies(payload.get("commentReplies"));
+      boolean incremental = Boolean.TRUE.equals(payload.get("incremental"));
       byte[] exported;
-      if (!formValues.isEmpty()) {
-        exported = fillFormFieldsIncremental(pdfBytes, formValues);
-      } else if (annotations.isEmpty() && sourcePassword.isEmpty() && encryptionPassword.isEmpty() && !printCopy) {
+      if (incremental || !formValues.isEmpty()) {
+        exported = applyAllowedChangesIncremental(pdfBytes, formValues, comments, pdfReplies);
+      } else if (annotations.isEmpty() && comments.isEmpty() && pdfReplies.isEmpty() && sourcePassword.isEmpty() && encryptionPassword.isEmpty() && !printCopy) {
         exported = pdfBytes;
       } else {
-        exported = applyAnnotations(pdfBytes, annotations, sourcePassword, encryptionPassword, printCopy);
+        exported = applyAnnotations(pdfBytes, annotations, comments, pdfReplies, sourcePassword, encryptionPassword, printCopy);
       }
       sendPdf(exchange, exported);
     } catch (Exception error) {
@@ -471,6 +477,8 @@ public class DocuflexPdfServer {
   private static byte[] applyAnnotations(
       byte[] pdfBytes,
       List<AnnotationStroke> annotations,
+      List<PageCommentData> comments,
+      List<PdfReplyData> pdfReplies,
       String sourcePassword,
       String encryptionPassword,
       boolean printCopy) throws IOException {
@@ -558,6 +566,12 @@ public class DocuflexPdfServer {
         // A field baked into the page above must not be recreated as a new one.
         formFields.removeIf((field) -> field.existingField && flattenedFieldNames.contains(field.fieldName == null ? "" : field.fieldName.trim()));
         applyFormFields(document, formFields);
+      }
+      if (!comments.isEmpty()) {
+        addComments(document, comments);
+      }
+      if (!pdfReplies.isEmpty()) {
+        addPdfReplies(document, pdfReplies);
       }
       if (!pageCrops.isEmpty()) {
         applyPageCrops(document, pageCrops);
@@ -938,18 +952,39 @@ public class DocuflexPdfServer {
    * do it: only the changed fields are appended as an incremental update, so
    * the original bytes, encryption and permissions stay untouched.
    */
-  private static byte[] fillFormFieldsIncremental(byte[] pdfBytes, List<Object> formValues) throws IOException {
+  private static byte[] applyAllowedChangesIncremental(
+      byte[] pdfBytes,
+      List<Object> formValues,
+      List<PageCommentData> comments,
+      List<PdfReplyData> pdfReplies) throws IOException {
     try (PDDocument document = loadPdf(pdfBytes)) {
       AccessPermission access = document.getCurrentAccessPermission();
-      if (!access.isOwnerPermission() && !access.canFillInForm() && !access.canModifyAnnotations()) {
+      if (!formValues.isEmpty() && !access.isOwnerPermission() && !access.canFillInForm() && !access.canModifyAnnotations()) {
         throw new IllegalArgumentException("This PDF's owner disabled filling in its form fields.");
       }
-      PDAcroForm acroForm = document.getDocumentCatalog().getAcroForm();
-      if (acroForm == null) throw new IllegalArgumentException("This PDF has no form fields.");
-      acroForm.setNeedAppearances(false);
+      if ((!comments.isEmpty() || !pdfReplies.isEmpty()) && !access.isOwnerPermission() && !access.canModifyAnnotations()) {
+        throw new IllegalArgumentException("This PDF's owner disabled adding comments.");
+      }
       Set<org.apache.pdfbox.cos.COSDictionary> changed = new java.util.HashSet<>();
       changed.add(document.getDocumentCatalog().getCOSObject());
-      changed.add(acroForm.getCOSObject());
+      for (PDAnnotation annotation : addComments(document, comments)) {
+        changed.add(annotation.getCOSObject());
+        if (annotation.getAppearance() != null) changed.add(annotation.getAppearance().getCOSObject());
+      }
+      for (PDAnnotation reply : addPdfReplies(document, pdfReplies)) changed.add(reply.getCOSObject());
+      int pages = document.getNumberOfPages();
+      for (PageCommentData comment : comments) {
+        if (comment.page() >= 0 && comment.page() < pages) changed.add(document.getPage(comment.page()).getCOSObject());
+      }
+      for (PdfReplyData reply : pdfReplies) {
+        if (reply.page() >= 0 && reply.page() < pages) changed.add(document.getPage(reply.page()).getCOSObject());
+      }
+      PDAcroForm acroForm = formValues.isEmpty() ? null : document.getDocumentCatalog().getAcroForm();
+      if (!formValues.isEmpty() && acroForm == null) throw new IllegalArgumentException("This PDF has no form fields.");
+      if (acroForm != null) {
+        acroForm.setNeedAppearances(false);
+        changed.add(acroForm.getCOSObject());
+      }
       for (Object entry : formValues) {
         Map<String, Object> formValue = asObject(entry);
         PDField field = acroForm.getField(asString(formValue.get("fieldName")));
@@ -982,6 +1017,199 @@ public class DocuflexPdfServer {
       // saveIncremental writes original bytes plus the update section.
       return appended.length >= pdfBytes.length ? appended : concat(pdfBytes, appended);
     }
+  }
+
+  private record CommentReplyData(String author, String text) {}
+
+  private record PageCommentData(int page, double x, double y, String text, String author, List<double[]> rects, List<CommentReplyData> replies) {}
+
+  /** A reply to a comment already in the PDF; ref is pdf.js's object id such as "15R". */
+  private record PdfReplyData(int page, String ref, String author, String text) {}
+
+  private static List<CommentReplyData> parseReplies(Object raw) {
+    if (!(raw instanceof List<?>)) return List.of();
+    List<CommentReplyData> replies = new ArrayList<>();
+    for (Object entry : asArray(raw)) {
+      Map<String, Object> reply = asObject(entry);
+      String text = optionalString(reply.get("text"));
+      if (text.isBlank()) continue;
+      if (text.length() > 20_000) throw new IllegalArgumentException("Reply is too long.");
+      replies.add(new CommentReplyData(optionalString(reply.get("author")), text));
+    }
+    return replies;
+  }
+
+  private static List<PdfReplyData> parsePdfReplies(Object raw) {
+    if (!(raw instanceof List<?>)) return List.of();
+    List<Object> entries = asArray(raw);
+    if (entries.size() > 5_000) throw new IllegalArgumentException("Too many replies.");
+    List<PdfReplyData> replies = new ArrayList<>();
+    for (Object entry : entries) {
+      Map<String, Object> reply = asObject(entry);
+      String text = optionalString(reply.get("text"));
+      if (text.isBlank()) continue;
+      if (text.length() > 20_000) throw new IllegalArgumentException("Reply is too long.");
+      replies.add(new PdfReplyData((int) asDouble(reply.get("page")), optionalString(reply.get("ref")), optionalString(reply.get("author")), text));
+    }
+    return replies;
+  }
+
+  private static List<PageCommentData> parseComments(Object raw) {
+    if (!(raw instanceof List<?>)) return List.of();
+    List<Object> entries = asArray(raw);
+    if (entries.size() > 5_000) throw new IllegalArgumentException("Too many comments.");
+    List<PageCommentData> result = new ArrayList<>();
+    for (Object entry : entries) {
+      Map<String, Object> comment = asObject(entry);
+      String text = optionalString(comment.get("text"));
+      if (text.isBlank()) continue;
+      if (text.length() > 20_000) throw new IllegalArgumentException("Comment is too long.");
+      List<double[]> rects = new ArrayList<>();
+      if (comment.get("rects") instanceof List<?>) {
+        for (Object rawRect : asArray(comment.get("rects"))) {
+          Map<String, Object> rect = asObject(rawRect);
+          rects.add(new double[] {
+              clamp(optionalDouble(rect.get("x")), 0, 1), clamp(optionalDouble(rect.get("y")), 0, 1),
+              clamp(optionalDouble(rect.get("width")), 0, 1), clamp(optionalDouble(rect.get("height")), 0, 1)
+          });
+        }
+      }
+      result.add(new PageCommentData(
+          (int) asDouble(comment.get("page")),
+          clamp(optionalDouble(comment.get("x")), 0, 1),
+          clamp(optionalDouble(comment.get("y")), 0, 1),
+          text,
+          optionalString(comment.get("author")),
+          rects,
+          parseReplies(comment.get("replies"))));
+    }
+    return result;
+  }
+
+  /**
+   * Writes comments as standard PDF markup annotations, so Acrobat, Preview
+   * and Chrome list them: a highlight carrying the comment when text was
+   * selected, otherwise a sticky note at the clicked spot.
+   */
+  private static List<PDAnnotation> addComments(PDDocument document, List<PageCommentData> comments) throws IOException {
+    List<PDAnnotation> added = new ArrayList<>();
+    java.util.Calendar now = java.util.Calendar.getInstance();
+    for (PageCommentData comment : comments) {
+      if (comment.page() < 0 || comment.page() >= document.getNumberOfPages()) continue;
+      PDPage page = document.getPage(comment.page());
+      PDAnnotationMarkup annotation;
+      if (!comment.rects().isEmpty()) {
+        PDAnnotationHighlight highlight = new PDAnnotationHighlight();
+        float[] quads = new float[comment.rects().size() * 8];
+        float left = Float.MAX_VALUE, bottom = Float.MAX_VALUE, right = -Float.MAX_VALUE, top = -Float.MAX_VALUE;
+        int offset = 0;
+        for (double[] rect : comment.rects()) {
+          // QuadPoints order: upper-left, upper-right, lower-left, lower-right.
+          PdfPoint[] corners = {
+              normalizedToPdfPoint(page, new NormalizedPoint(rect[0], rect[1])),
+              normalizedToPdfPoint(page, new NormalizedPoint(rect[0] + rect[2], rect[1])),
+              normalizedToPdfPoint(page, new NormalizedPoint(rect[0], rect[1] + rect[3])),
+              normalizedToPdfPoint(page, new NormalizedPoint(rect[0] + rect[2], rect[1] + rect[3]))
+          };
+          for (PdfPoint corner : corners) {
+            quads[offset++] = corner.x();
+            quads[offset++] = corner.y();
+            left = Math.min(left, corner.x());
+            right = Math.max(right, corner.x());
+            bottom = Math.min(bottom, corner.y());
+            top = Math.max(top, corner.y());
+          }
+        }
+        highlight.setQuadPoints(quads);
+        highlight.setRectangle(new PDRectangle(left, bottom, right - left, top - bottom));
+        highlight.setColor(new PDColor(new float[] { 1f, 0.84f, 0.04f }, PDDeviceRGB.INSTANCE));
+        annotation = highlight;
+      } else {
+        PDAnnotationText note = new PDAnnotationText();
+        PdfPoint anchor = normalizedToPdfPoint(page, new NormalizedPoint(comment.x(), comment.y()));
+        note.setRectangle(new PDRectangle(anchor.x(), anchor.y() - 20, 20, 20));
+        note.setName(PDAnnotationText.NAME_COMMENT);
+        note.setColor(new PDColor(new float[] { 1f, 0.84f, 0.04f }, PDDeviceRGB.INSTANCE));
+        annotation = note;
+      }
+      annotation.setContents(comment.text());
+      annotation.setTitlePopup(comment.author().isBlank() ? "Docuflex" : comment.author());
+      annotation.setCreationDate(now);
+      annotation.setModifiedDate(now);
+      annotation.setAnnotationName(UUID.randomUUID().toString());
+      annotation.setPrinted(true);
+      annotation.setPage(page);
+      annotation.constructAppearances(document);
+      List<PDAnnotation> pageAnnotations = page.getAnnotations();
+      pageAnnotations.add(annotation);
+      page.setAnnotations(pageAnnotations);
+      added.add(annotation);
+      for (CommentReplyData reply : comment.replies()) {
+        added.add(addReply(document, page, annotation, reply.author(), reply.text(), now));
+      }
+    }
+    return added;
+  }
+
+  /**
+   * A reply the way Acrobat writes one: a note annotation with In Reply To
+   * pointing at the parent and sharing its position. Viewers fold it into the
+   * parent's thread (it must not be hidden, or pdf.js skips it entirely).
+   */
+  private static PDAnnotation addReply(
+      PDDocument document,
+      PDPage page,
+      PDAnnotation parent,
+      String author,
+      String text,
+      java.util.Calendar when) throws IOException {
+    PDAnnotationText reply = new PDAnnotationText();
+    PDRectangle parentRect = parent.getRectangle();
+    reply.setRectangle(parentRect == null ? new PDRectangle(0, 0, 20, 20) : parentRect);
+    reply.setInReplyTo(parent);
+    reply.setContents(text);
+    reply.setTitlePopup(author.isBlank() ? "Docuflex" : author);
+    reply.setCreationDate(when);
+    reply.setModifiedDate(when);
+    reply.setAnnotationName(UUID.randomUUID().toString());
+    reply.setPage(page);
+    List<PDAnnotation> pageAnnotations = page.getAnnotations();
+    pageAnnotations.add(reply);
+    page.setAnnotations(pageAnnotations);
+    return reply;
+  }
+
+  /** Finds a page's annotation by the "15R" / "15R2" object id pdf.js reports. */
+  private static PDAnnotation findAnnotationByRef(PDPage page, String ref) throws IOException {
+    java.util.regex.Matcher match = java.util.regex.Pattern.compile("^(\\d+)R(\\d*)$").matcher(ref == null ? "" : ref.trim());
+    if (!match.matches()) return null;
+    long number = Long.parseLong(match.group(1));
+    int generation = match.group(2).isEmpty() ? 0 : Integer.parseInt(match.group(2));
+    COSArray annots = page.getCOSObject().getCOSArray(COSName.ANNOTS);
+    if (annots == null) return null;
+    for (int index = 0; index < annots.size(); index += 1) {
+      if (annots.get(index) instanceof org.apache.pdfbox.cos.COSObject object
+          && object.getKey() != null
+          && object.getKey().getNumber() == number
+          && object.getKey().getGeneration() == generation
+          && object.getObject() instanceof org.apache.pdfbox.cos.COSDictionary dictionary) {
+        return PDAnnotation.createAnnotation(dictionary);
+      }
+    }
+    return null;
+  }
+
+  private static List<PDAnnotation> addPdfReplies(PDDocument document, List<PdfReplyData> replies) throws IOException {
+    List<PDAnnotation> added = new ArrayList<>();
+    java.util.Calendar now = java.util.Calendar.getInstance();
+    for (PdfReplyData reply : replies) {
+      if (reply.page() < 0 || reply.page() >= document.getNumberOfPages()) continue;
+      PDPage page = document.getPage(reply.page());
+      PDAnnotation parent = findAnnotationByRef(page, reply.ref());
+      if (parent == null) continue;
+      added.add(addReply(document, page, parent, reply.author(), reply.text(), now));
+    }
+    return added;
   }
 
   private static byte[] concat(byte[] first, byte[] second) {

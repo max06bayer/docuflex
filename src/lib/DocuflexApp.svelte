@@ -93,6 +93,8 @@
   let isSaving = false;
   /** @type {{ id: number; title: string; message: string } | null} */
   let errorToast = null;
+  /** Comment view, shared across open documents. */
+  let commentMode = false;
   /** @type {ReturnType<typeof setTimeout>} */
   let errorToastTimer;
 
@@ -678,6 +680,21 @@
 
     <nav class="utilities" aria-label="Editor utilities">
       {#if activeTab !== null}
+        {@const commentUtility = { label: 'Comments', description: commentMode ? 'Hide comments.' : 'Show comments. Click or select text to comment.' }}
+        <button
+          class="utility-button"
+          class:active={commentMode}
+          aria-label={commentUtility.label}
+          aria-pressed={commentMode}
+          aria-describedby={utilityTooltip?.label === commentUtility.label ? 'utility-tooltip' : undefined}
+          onmouseenter={(event) => scheduleUtilityTooltip(commentUtility, event.currentTarget)}
+          onmouseleave={hideUtilityTooltip}
+          onfocus={(event) => scheduleUtilityTooltip(commentUtility, event.currentTarget)}
+          onblur={hideUtilityTooltip}
+          onclick={() => { hideUtilityTooltip(); commentMode = !commentMode; }}
+        >
+          <img src="/comments.svg" alt="" />
+        </button>
         {@const rasterUtility = { label: 'Adjust & Rasterize', description: 'Rotate, color-correct and rasterize pages.' }}
         <button
           class="utility-button"
@@ -923,6 +940,7 @@
         file={activeDocument.file}
         protection={activeDocument.protection}
         initialTool={activeDocument.initialTool ?? 'select'}
+        {commentMode}
         onProtectionChange={(protection) => updateDocumentProtection(activeDocument.id, protection)}
         onRequestClose={() => requestCloseTab(activeDocument.id)}
         bind:this={pdfEditor}
@@ -1208,6 +1226,17 @@
   .utility-button:hover {
     border-color: #c8c8c8;
     background: #eee;
+  }
+
+  .utility-button.active,
+  .utility-button.active:hover {
+    border-color: #171717;
+    background: #171717;
+  }
+
+  .utility-button.active img,
+  .utility-button.active:hover img {
+    filter: brightness(0) invert(1);
   }
 
   .utility-button:disabled {

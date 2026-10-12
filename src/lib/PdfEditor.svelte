@@ -12,8 +12,15 @@
   /** @typedef {{ id: number; type: 'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'measure' | 'crop' | 'textfield' | 'signature' | 'image' | 'checkbox' | 'input'; x: number; y: number; width: number; height: number; rotation: number; text?: string; textColor?: string; fontFamily?: string; fontSize?: number; fontWeight?: number; letterSpacing?: number; lineHeight?: number; textAlign?: 'left' | 'center' | 'right'; verticalAlign?: 'top' | 'middle' | 'bottom'; italic?: boolean; underline?: boolean; strikethrough?: boolean; textStyleRanges?: TextStyleRange[]; imageData?: string; fieldName?: string; fieldValue?: string | boolean; existingField?: boolean; originalFieldValue?: string | boolean; originalFrame?: { x: number; y: number; width: number; height: number }; readOnly?: boolean; opacity?: number; cornerRadius?: number; fillPresent?: boolean; fillEnabled?: boolean; fillColor?: string; fillAlpha?: number; strokePresent?: boolean; strokeEnabled?: boolean; strokeColor?: string; strokeAlpha?: number; strokeWidth?: number; shadowPresent?: boolean; shadowEnabled?: boolean; shadowOpacity?: number; shadowBlur?: number; shadowX?: number; shadowY?: number; backgroundBlurPresent?: boolean; backgroundBlurEnabled?: boolean; backgroundBlur?: number }} AnnotationShape */
   /** @typedef {{ id: number; type: 'highlight' | 'underline' | 'crossout' | 'blackout' | 'whiteout'; rects: { x: number; y: number; width: number; height: number; color?: [number, number, number]; thickness?: number }[] }} TextHighlight */
 
+  /** @typedef {{ x: number; y: number; width: number; height: number }} CommentRect */
+  /** @typedef {{ author: string; text: string; createdAt: number }} CommentReply */
+  /** @typedef {{ id: number; x: number; y: number; rects: CommentRect[]; quote: string; text: string; author: string; createdAt: number; existing?: boolean; ref?: string; replies?: CommentReply[] }} PageComment */
+  /** @typedef {{ ref: string; author: string; text: string; createdAt: number }} PdfCommentReply */
+
   /** @type {File} */
   export let file;
+  /** Comment view toggled from the top bar: shows comments and turns clicks / text selection into new comments. */
+  export let commentMode = false;
   /** @type {{ enabled: boolean; password: string }} */
   export let protection = { enabled: false, password: '' };
   /** @type {(protection: { enabled: boolean; password: string }) => void} */
@@ -179,6 +186,7 @@
   let editPrintAllowed = false;
   /** Whether the owner still allows filling in form fields on an edit-protected file. */
   let editFillAllowed = false;
+  let editAnnotationsAllowed = false;
   /** The file as loaded; any later rewrite (page operations, text edits) is a disallowed change. */
   /** @type {File | null} */
   let editLockedSourceFile = null;
@@ -196,6 +204,34 @@
   let rasterPanelOpen = false;
   let rasterizing = false;
   let rasterAdjust = { ...RASTER_DEFAULTS };
+  const COMMENT_AUTHOR_KEY = 'docuflex:comment-author';
+  /** Author written into new comments, so other viewers see a real name. */
+  let commentAuthor = '';
+  try {
+    commentAuthor = (typeof localStorage !== 'undefined' && localStorage.getItem(COMMENT_AUTHOR_KEY)) || '';
+  } catch {
+    commentAuthor = '';
+  }
+  /** Comments added in this editor, per page. */
+  /** @type {Record<number, PageComment[]>} */
+  let comments = {};
+  /** Comments already stored in the PDF (sticky notes, commented highlights …), read-only. */
+  /** @type {Record<number, PageComment[]>} */
+  let pdfComments = {};
+  /** New replies to comments that are already in the PDF, per page, matched by the PDF object ref. */
+  /** @type {Record<number, PdfCommentReply[]>} */
+  let commentReplies = {};
+  /**
+   * The comment panel. threadId set: showing that comment with a reply box.
+   * editingId set: editing one of the editor's own comments. Neither: a new comment.
+   * @type {{ pageIndex: number; x: number; y: number; rects: CommentRect[]; quote: string; text: string; editingId: number | null; threadId: number | null } | null}
+   */
+  let commentDraft = null;
+  /** @type {HTMLTextAreaElement | undefined} */
+  let commentInput;
+  /** @type {number | null} */
+  let hoveredCommentId = null;
+  let nextCommentId = 1;
   /** Main pages preview through capped-size JS canvases; a CSS filter on a zoomed page outgrows GPU limits and turns white. */
   const RASTER_PREVIEW_MAX_PIXELS = 4_000_000;
   /** @type {Map<number, ImageData>} */
@@ -310,6 +346,8 @@
     annotations;
     shapes;
     textHighlights;
+    comments;
+    commentReplies;
     appliedWatermarkText;
     encryptionEnabled;
     protectionPassword;
@@ -350,6 +388,8 @@
       annotations,
       shapes,
       textHighlights,
+      comments,
+      commentReplies,
       appliedWatermarkText,
       encryptionEnabled,
       protectionPassword: encryptionEnabled ? protectionPassword : '',
@@ -365,6 +405,8 @@
       left.annotations === right.annotations &&
       left.shapes === right.shapes &&
       left.textHighlights === right.textHighlights &&
+      left.comments === right.comments &&
+      left.commentReplies === right.commentReplies &&
       left.appliedWatermarkText === right.appliedWatermarkText &&
       left.encryptionEnabled === right.encryptionEnabled &&
       left.protectionPassword === right.protectionPassword &&
@@ -416,6 +458,8 @@
     annotations = state.annotations;
     shapes = state.shapes;
     textHighlights = state.textHighlights;
+    comments = state.comments;
+    commentReplies = state.commentReplies;
     appliedWatermarkText = state.appliedWatermarkText;
     encryptionEnabled = state.encryptionEnabled;
     protectionPassword = state.protectionPassword;
@@ -1007,6 +1051,293 @@
       pageOperationBusy = false;
       editorTransition = '';
     }
+  }
+
+  const PDF_COMMENT_SUBTYPES = new Set(['Text', 'FreeText', 'Highlight', 'Underline', 'StrikeOut', 'Squiggly', 'Square', 'Circle', 'Line', 'Polygon', 'PolyLine', 'Ink', 'Caret', 'Stamp', 'FileAttachment']);
+
+  /**
+   * Turns a page's markup annotations into comments, the way Acrobat lists
+   * them: anything with text, with replies (In Reply To) folded into their
+   * parent comment.
+   * @param {any[]} pageAnnotations @param {import('pdfjs-dist').PageViewport} viewport
+   * @returns {PageComment[]}
+   */
+  function readPdfComments(pageAnnotations, viewport) {
+    /** @param {number[]} points */
+    const boundsOf = (points) => {
+      const xs = [];
+      const ys = [];
+      for (let offset = 0; offset + 1 < points.length; offset += 2) {
+        const [x, y] = viewport.convertToViewportPoint(points[offset], points[offset + 1]);
+        xs.push(x);
+        ys.push(y);
+      }
+      return { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) };
+    };
+    /** @type {Map<string, PageComment>} */
+    const byPdfId = new Map();
+    /** @type {{ parent: string; reply: CommentReply }[]} */
+    const replies = [];
+    /** @type {PageComment[]} */
+    const result = [];
+    for (const annotation of pageAnnotations) {
+      if (!PDF_COMMENT_SUBTYPES.has(annotation.subtype) || !Array.isArray(annotation.rect) && !(annotation.rect instanceof Float32Array)) continue;
+      const text = String(annotation.contentsObj?.str ?? '').trim();
+      const author = String(annotation.titleObj?.str ?? '').trim();
+      const createdAt = Date.parse(String(annotation.modificationDate ?? '').replace(/^D:(\d{4})(\d{2})(\d{2})(\d{2})?(\d{2})?.*$/, '$1-$2-$3T$4:$5')) || 0;
+      // Acrobat stores review statuses ("Accepted set by …") as state replies; they are not comments.
+      if (annotation.inReplyTo && (annotation.stateModel || annotation.state)) continue;
+      if (annotation.inReplyTo && annotation.replyType !== 'Group') {
+        if (text) replies.push({ parent: annotation.inReplyTo, reply: { author, text, createdAt } });
+        continue;
+      }
+      const [x0, y0, x1, y1] = annotation.rect;
+      const area = boundsOf([x0, y0, x1, y1]);
+      /** @type {CommentRect[]} */
+      const rects = [];
+      const quads = annotation.quadPoints;
+      if (quads && quads.length >= 8 && annotation.subtype !== 'Text') {
+        for (let offset = 0; offset + 7 < quads.length; offset += 8) rects.push(boundsOf([...quads.slice(offset, offset + 8)]));
+      }
+      const anchor = rects[0] ?? area;
+      const comment = {
+        id: nextCommentId++,
+        x: rects.length ? anchor.x + anchor.width : anchor.x,
+        y: anchor.y,
+        rects,
+        quote: '',
+        text,
+        author,
+        createdAt,
+        existing: true,
+        ref: annotation.id ? String(annotation.id) : undefined,
+        replies: []
+      };
+      if (annotation.id) byPdfId.set(annotation.id, comment);
+      result.push(comment);
+    }
+    replies.forEach(({ parent, reply }) => byPdfId.get(parent)?.replies?.push(reply));
+    return result.filter((comment) => comment.text || comment.replies?.length);
+  }
+
+  /** @param {number} pageIndex @param {{ x: number; y: number }} point @param {CommentRect[]} [rects] @param {string} [quote] */
+  function openCommentDraft(pageIndex, point, rects = [], quote = '') {
+    commentDraft = { pageIndex, x: point.x, y: point.y, rects, quote, text: '', editingId: null, threadId: null };
+    void tick().then(() => commentInput?.focus());
+  }
+
+  /** Clicking any card opens its thread with a reply box. @param {number} pageIndex @param {PageComment} comment */
+  function openCommentThread(pageIndex, comment) {
+    commentDraft = { pageIndex, x: comment.x, y: comment.y, rects: comment.rects, quote: comment.quote, text: '', editingId: null, threadId: comment.id };
+    void tick().then(() => commentInput?.focus());
+  }
+
+  /** Switches the open thread of one of the editor's own comments to editing its text. */
+  function startEditingComment() {
+    const found = commentDraft?.threadId != null ? findComment(commentDraft.threadId) : null;
+    if (!commentDraft || !found || found.comment.existing) return;
+    commentDraft = { ...commentDraft, editingId: found.comment.id, text: found.comment.text };
+    void tick().then(() => commentInput?.focus());
+  }
+
+  /** @param {number} id @param {Record<number, PageComment[]>[]} [sources] @returns {{ comment: PageComment; pageIndex: number } | null} */
+  function findComment(id, sources = [comments, pdfComments]) {
+    for (const source of sources) {
+      for (const [page, list] of Object.entries(source)) {
+        const comment = list.find((entry) => entry.id === id);
+        if (comment) return { comment, pageIndex: Number(page) };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Replies stored in the PDF plus replies added here. The reply map is passed
+   * in so the template re-renders when it changes.
+   * @param {PageComment} comment @param {number} pageIndex @param {Record<number, PdfCommentReply[]>} added
+   */
+  function commentThreadReplies(comment, pageIndex, added = commentReplies) {
+    const extra = comment.ref ? (added[pageIndex] ?? []).filter((reply) => reply.ref === comment.ref) : [];
+    return [...(comment.replies ?? []), ...extra];
+  }
+
+  function closeCommentDraft() {
+    commentDraft = null;
+  }
+
+  function currentCommentAuthor() {
+    return commentAuthor.trim() || 'Docuflex';
+  }
+
+  function rememberCommentAuthor() {
+    try {
+      localStorage.setItem(COMMENT_AUTHOR_KEY, commentAuthor.trim());
+    } catch {
+      // Name just won't be remembered.
+    }
+  }
+
+  function saveCommentDraft() {
+    if (!commentDraft) return;
+    const text = commentDraft.text.trim();
+    if (!text) return;
+    const { pageIndex, editingId, threadId } = commentDraft;
+    const author = currentCommentAuthor();
+    rememberCommentAuthor();
+
+    if (editingId !== null) {
+      comments = {
+        ...comments,
+        [pageIndex]: (comments[pageIndex] ?? []).map((comment) => comment.id === editingId ? { ...comment, text, author } : comment)
+      };
+      commentDraft = { ...commentDraft, editingId: null, text: '' };
+      return;
+    }
+
+    if (threadId !== null) {
+      const found = findComment(threadId);
+      if (!found) return;
+      const reply = { author, text, createdAt: Date.now() };
+      if (found.comment.existing && found.comment.ref) {
+        commentReplies = {
+          ...commentReplies,
+          [found.pageIndex]: [...(commentReplies[found.pageIndex] ?? []), { ref: found.comment.ref, ...reply }]
+        };
+      } else {
+        comments = {
+          ...comments,
+          [found.pageIndex]: (comments[found.pageIndex] ?? []).map((comment) => comment.id === threadId
+            ? { ...comment, replies: [...(comment.replies ?? []), reply] }
+            : comment)
+        };
+      }
+      commentDraft = { ...commentDraft, text: '' };
+      void tick().then(() => commentInput?.focus());
+      return;
+    }
+
+    const pageComments = comments[pageIndex] ?? [];
+    comments = {
+      ...comments,
+      [pageIndex]: [...pageComments, {
+        id: nextCommentId++,
+        x: commentDraft.x,
+        y: commentDraft.y,
+        rects: commentDraft.rects,
+        quote: commentDraft.quote,
+        text,
+        author,
+        createdAt: Date.now(),
+        replies: []
+      }]
+    };
+    commentDraft = null;
+  }
+
+  function deleteDraftComment() {
+    const id = commentDraft?.editingId ?? commentDraft?.threadId ?? null;
+    const found = id !== null ? findComment(id) : null;
+    if (!found || found.comment.existing) return;
+    comments = { ...comments, [found.pageIndex]: (comments[found.pageIndex] ?? []).filter((comment) => comment.id !== id) };
+    commentDraft = null;
+  }
+
+  /** @param {KeyboardEvent} event */
+  function handleCommentKeydown(event) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeCommentDraft();
+    } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      saveCommentDraft();
+    }
+  }
+
+  /**
+   * Places each card right next to its pin: below-right, below-left, above-right
+   * or above-left, whichever is free first. Only when all four collide is the
+   * card pushed further down, and then a thin line ties it back to its pin.
+   * @param {PageComment[]} list @param {{ width: number; height: number } | undefined} size
+   */
+  function commentCardLayout(list, size) {
+    const width = 250;
+    const height = 86;
+    const gap = 6;
+    const pageWidth = size?.width ?? width;
+    const pageHeight = size?.height ?? height;
+    /** @type {{ left: number; top: number; right: number; bottom: number }[]} */
+    const placed = [];
+    /** @param {number} left @param {number} top */
+    const box = (left, top) => ({
+      left: Math.max(4, Math.min(pageWidth - width - 4, left)),
+      top: Math.max(4, Math.min(pageHeight - height - 4, top))
+    });
+    /** @param {{ left: number; top: number }} candidate */
+    const free = (candidate) => placed.every((other) =>
+      candidate.left + width + gap <= other.left || other.right + gap <= candidate.left ||
+      candidate.top + height + gap <= other.top || other.bottom + gap <= candidate.top);
+    return [...list].sort((left, right) => left.y - right.y || left.x - right.x).map((comment) => {
+      const pinX = comment.x;
+      const pinY = comment.y;
+      const candidates = [
+        box(pinX - 6, pinY + 6),
+        box(pinX - width + 22, pinY + 6),
+        box(pinX - 6, pinY - 30 - height),
+        box(pinX - width + 22, pinY - 30 - height)
+      ];
+      let spot = candidates.find(free);
+      let tethered = false;
+      if (!spot) {
+        spot = { ...candidates[0] };
+        while (!free(spot) && spot.top < pageHeight) spot.top += 12;
+        tethered = true;
+      }
+      placed.push({ left: spot.left, top: spot.top, right: spot.left + width, bottom: spot.top + height });
+      return { comment, top: spot.top, left: spot.left, tethered, pinX, pinY };
+    });
+  }
+
+  /** Lets the card animate to its real content height instead of a fixed max-height guess. @param {HTMLElement} card */
+  function measureCommentCard(card) {
+    card.style.setProperty('--comment-card-full', `${card.scrollHeight}px`);
+  }
+
+  function formatCommentDate(/** @type {number} */ time) {
+    if (!time) return '';
+    return new Date(time).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  }
+
+  /** New comments for export, normalized to the page like the other annotations. */
+  function exportableComments() {
+    return Object.entries(comments).flatMap(([page, pageComments]) => {
+      const size = pageSizes[Number(page)];
+      if (!size?.width || !size.height) return [];
+      return pageComments.map((comment) => ({
+        page: Number(page),
+        x: comment.x / size.width,
+        y: comment.y / size.height,
+        text: comment.text,
+        author: comment.author,
+        rects: comment.rects.map((rect) => ({
+          x: rect.x / size.width,
+          y: rect.y / size.height,
+          width: rect.width / size.width,
+          height: rect.height / size.height
+        })),
+        replies: (comment.replies ?? []).map((reply) => ({ author: reply.author, text: reply.text }))
+      }));
+    });
+  }
+
+  /** New replies to comments already in the PDF, attached to them by object ref on export. */
+  function exportableCommentReplies() {
+    return Object.entries(commentReplies).flatMap(([page, replies]) =>
+      replies.map((reply) => ({ page: Number(page), ref: reply.ref, author: reply.author, text: reply.text })));
+  }
+
+  $: if (!commentMode) {
+    commentDraft = null;
+    hoveredCommentId = null;
   }
 
   function showWatermarkPanel() {
@@ -2325,6 +2656,19 @@
         Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) < 4;
       pointerStart = null;
       if (
+        commentMode &&
+        wasStationaryClick &&
+        target instanceof Element &&
+        !target.closest('.comment-card, .comment-pin, input, textarea, button, select, [contenteditable="true"]')
+      ) {
+        const shell = target.closest('.pdf-page');
+        const pageIndex = shell && viewer ? [...viewer.querySelectorAll('.pdf-page')].indexOf(shell) : -1;
+        const selection = window.getSelection();
+        if (shell instanceof HTMLElement && pageIndex >= 0 && (!selection || selection.isCollapsed)) {
+          openCommentDraft(pageIndex, pointOnPage(/** @type {PointerEvent} */ (event), shell));
+        }
+      }
+      if (
         activeTool === 'select' &&
         wasStationaryClick &&
         target instanceof Element &&
@@ -2667,6 +3011,17 @@
         }));
         if (rects.length) pagesByIndex[pageIndex] = mergeTextHighlightRects(rects);
       });
+      if (Object.keys(pagesByIndex).length && commentMode) {
+        // In comment view a selection starts a comment on that text instead
+        // of opening the highlight tools.
+        const pageIndex = Number(Object.keys(pagesByIndex)[0]);
+        const rects = pagesByIndex[pageIndex];
+        const last = rects[0];
+        openCommentDraft(pageIndex, { x: last.x + last.width, y: last.y }, rects, selection.toString().trim());
+        pdfTextSelection = null;
+        selection.removeAllRanges();
+        return;
+      }
       if (Object.keys(pagesByIndex).length) {
         setShapeSelection(0, []);
         const existing = existingTextMarkState(pagesByIndex);
@@ -5286,7 +5641,10 @@
       annotations = {};
       textHighlights = {};
       shapes = {};
+      comments = {};
+      commentReplies = {};
     }
+    pdfComments = {};
     selectedShape = null;
     editingTextShape = null;
     selectedShapeIds = new Set();
@@ -5358,6 +5716,7 @@
         editFillAllowed = !Array.isArray(permissions) ||
           permissions.includes(pdfjs.PermissionFlag.FILL_INTERACTIVE_FORMS) ||
           permissions.includes(pdfjs.PermissionFlag.MODIFY_ANNOTATIONS);
+        editAnnotationsAllowed = !Array.isArray(permissions) || permissions.includes(pdfjs.PermissionFlag.MODIFY_ANNOTATIONS);
         editLockedSourceFile = editLocked ? workingFile : null;
       } catch {
         editLocked = false;
@@ -5402,8 +5761,10 @@
       shell.style.height = `${viewport.height}px`;
       shell.dataset.pageRotation = `${((viewport.rotation % 360) + 360) % 360}`;
       pageSizes = { ...pageSizes, [index]: { width: viewport.width, height: viewport.height } };
+      const pageAnnotations = await page.getAnnotations({ intent: 'display' });
+      const existingComments = readPdfComments(pageAnnotations, viewport);
+      if (existingComments.length) pdfComments = { ...pdfComments, [index]: existingComments };
       if (loadFormWidgets) {
-        const pageAnnotations = await page.getAnnotations({ intent: 'display' });
         const formShapes = pageAnnotations.flatMap((/** @type {any} */ annotation) => {
           if (annotation.subtype !== 'Widget' || !Array.isArray(annotation.rect)) return [];
           const isCheckbox = annotation.fieldType === 'Btn' && Boolean(annotation.checkBox);
@@ -5867,6 +6228,8 @@
       annotations = reorderPageRecords(annotations, order);
       shapes = reorderPageRecords(shapes, order);
       textHighlights = reorderPageRecords(textHighlights, order);
+      comments = reorderPageRecords(comments, order);
+      commentReplies = reorderPageRecords(commentReplies, order);
       workingFile = new File([result], workingFile.name, { type: 'application/pdf', lastModified: Date.now() });
       htmlEditorStarted = false;
       htmlTextEditBaseFile = null;
@@ -5957,6 +6320,8 @@
       annotations = insertPageRecords(annotations, insertAt, pageClipboard.annotations);
       shapes = insertPageRecords(shapes, insertAt, pageClipboard.shapes);
       textHighlights = insertPageRecords(textHighlights, insertAt, pageClipboard.textHighlights);
+      comments = insertPageRecords(comments, insertAt, pageClipboard.textHighlights.map(() => []));
+      commentReplies = insertPageRecords(commentReplies, insertAt, pageClipboard.textHighlights.map(() => []));
       const insertedCount = pageClipboard.annotations.length;
       const nextPageCount = pageCount + insertedCount;
       workingFile = new File([result], workingFile.name, { type: 'application/pdf', lastModified: Date.now() });
@@ -6039,6 +6404,8 @@
       annotations = insertPageRecords(annotations, insertAt, emptyInsertedRecords);
       shapes = insertPageRecords(shapes, insertAt, emptyInsertedRecords);
       textHighlights = insertPageRecords(textHighlights, insertAt, emptyInsertedRecords);
+      comments = insertPageRecords(comments, insertAt, emptyInsertedRecords);
+      commentReplies = insertPageRecords(commentReplies, insertAt, emptyInsertedRecords);
       const nextPageCount = pageCount + insertedCount;
       workingFile = new File([result], workingFile.name, { type: 'application/pdf', lastModified: Date.now() });
       htmlEditorStarted = false;
@@ -6133,6 +6500,19 @@
           })
         }))];
       }));
+      comments = Object.fromEntries(Object.entries(comments).map(([page, pageComments]) => {
+        const pageIndex = Number(page);
+        const size = pageSizes[pageIndex];
+        if (!selected.has(pageIndex) || !size) return [page, pageComments];
+        return [page, pageComments.map((comment) => ({
+          ...comment,
+          ...rotatePoint({ x: comment.x, y: comment.y }, size),
+          rects: comment.rects.map((rect) => {
+            const center = rotatePoint({ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }, size);
+            return { x: center.x - rect.height / 2, y: center.y - rect.width / 2, width: rect.height, height: rect.width };
+          })
+        }))];
+      }));
       workingFile = new File([result], workingFile.name, { type: 'application/pdf', lastModified: Date.now() });
       htmlEditorStarted = false;
       htmlTextEditBaseFile = null;
@@ -6163,7 +6543,8 @@
       const annotatedResponse = await fetch('/api/pdf/export', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pdfBase64: arrayBufferToBase64(sourcePdf), annotations: exportableAnnotations(), encryptionPassword: '' })
+        body: JSON.stringify({ pdfBase64: arrayBufferToBase64(sourcePdf), annotations: exportableAnnotations(), comments: exportableComments(),
+          commentReplies: exportableCommentReplies(), encryptionPassword: '' })
       });
       if (!annotatedResponse.ok) throw new Error('Could not prepare the selected pages for export.');
       const result = await requestPageOperation('extract', { pages }, await annotatedResponse.arrayBuffer());
@@ -6354,14 +6735,17 @@
       }
       // Nothing the owner forbade was touched: keep the file exactly as it was,
       // with filled-in field values appended the way Preview saves forms.
-      if (!allowed.length) return new Blob([await readWorkingPdf()], { type: 'application/pdf' });
+      if (!allowed.formValues.length && !allowed.comments.length && !allowed.commentReplies.length) return new Blob([await readWorkingPdf()], { type: 'application/pdf' });
       const response = await fetch('/api/pdf/export', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           pdfBase64: arrayBufferToBase64(await readWorkingPdf()),
           annotations: [],
-          formValues: allowed
+          formValues: allowed.formValues,
+          comments: allowed.comments,
+          commentReplies: allowed.commentReplies,
+          incremental: true
         })
       });
       if (!response.ok) {
@@ -6380,6 +6764,8 @@
       body: JSON.stringify({
         pdfBase64: arrayBufferToBase64(sourcePdf),
         annotations: exportableAnnotations(),
+        comments: exportableComments(),
+          commentReplies: exportableCommentReplies(),
         encryptionPassword: encryptionEnabled ? protectionPassword : ''
       })
     });
@@ -6412,7 +6798,7 @@
    * For an edit-protected file, returns the filled-in form values when every
    * change is one the owner permits (only form filling), or null when anything
    * else changed and the PDF Edit Locked dialog has to take over.
-   * @returns {{ fieldName: string; value: string | boolean }[] | null}
+   * @returns {{ formValues: { fieldName: string; value: string | boolean }[]; comments: ReturnType<typeof exportableComments>; commentReplies: ReturnType<typeof exportableCommentReplies> } | null}
    */
   function allowedEditLockedChanges() {
     if (workingFile !== editLockedSourceFile || htmlEditorStarted || encryptionEnabled || appliedWatermarkText) return null;
@@ -6431,7 +6817,11 @@
       if (!editFillAllowed) return null;
       values.push({ fieldName: shape.fieldName, value: shape.fieldValue ?? '' });
     }
-    return values;
+    // Comments are annotations; Acrobat's "commenting allowed" lock permits them.
+    const newComments = exportableComments();
+    const newReplies = exportableCommentReplies();
+    if ((newComments.length || newReplies.length) && !editAnnotationsAllowed) return null;
+    return { formValues: values, comments: newComments, commentReplies: newReplies };
   }
 
   /** Shows the app's standard dark error toast (handled by DocuflexApp). @param {string} title @param {unknown} error */
@@ -6521,6 +6911,8 @@
         body: JSON.stringify({
           pdfBase64: arrayBufferToBase64(sourcePdf),
           annotations: exportableAnnotations(),
+          comments: exportableComments(),
+          commentReplies: exportableCommentReplies(),
           encryptionPassword: encryptionEnabled ? protectionPassword : '',
           printCopy: true
         })
@@ -7501,6 +7893,77 @@
               {/each}
             </svg>
           {/if}
+          {#if commentMode && pageSizes[index]}
+            {@const pageCommentList = [...(pdfComments[index] ?? []), ...(comments[index] ?? [])]}
+            {@const draftHere = commentDraft?.pageIndex === index ? commentDraft : null}
+            <svg
+              class="annotation-layer comment-quote-layer"
+              viewBox={`0 0 ${pageSizes[index].width} ${pageSizes[index].height}`}
+              preserveAspectRatio="none"
+              aria-hidden="true"
+            >
+              {#each pageCommentList as comment (comment.id)}
+                {#each comment.rects as rect}
+                  <rect class:hovered={hoveredCommentId === comment.id} x={rect.x} y={rect.y} width={rect.width} height={rect.height} />
+                {/each}
+              {/each}
+              {#if draftHere}
+                {#each draftHere.rects as rect}
+                  <rect class="hovered" x={rect.x} y={rect.y} width={rect.width} height={rect.height} />
+                {/each}
+              {/if}
+            </svg>
+            {#if draftHere && draftHere.editingId === null}
+              <span class="comment-pin draft" style:left={`${draftHere.x}px`} style:top={`${draftHere.y}px`} aria-hidden="true">
+                <img src="/comments.svg" alt="" />
+              </span>
+            {/if}
+            {@const cardLayout = commentCardLayout(pageCommentList, pageSizes[index])}
+            <svg
+              class="annotation-layer comment-tether-layer"
+              viewBox={`0 0 ${pageSizes[index].width} ${pageSizes[index].height}`}
+              preserveAspectRatio="none"
+              aria-hidden="true"
+            >
+              {#each cardLayout.filter((entry) => entry.tethered) as entry (entry.comment.id)}
+                <line class:hovered={hoveredCommentId === entry.comment.id} x1={entry.pinX + 9} y1={entry.pinY} x2={entry.left + 18} y2={entry.top} />
+              {/each}
+            </svg>
+            {#each cardLayout as { comment, top, left } (comment.id)}
+              <span
+                class="comment-pin"
+                class:hovered={hoveredCommentId === comment.id}
+                style:left={`${comment.x}px`}
+                style:top={`${comment.y}px`}
+                aria-hidden="true"
+              >
+                <img src="/comments.svg" alt="" />
+              </span>
+              <button
+                class="comment-card"
+                class:hovered={hoveredCommentId === comment.id}
+                class:editable={!comment.existing}
+                type="button"
+                style:left={`${left}px`}
+                style:top={`${top}px`}
+                aria-label={`Comment by ${comment.author || 'Unknown'}: ${comment.text}`}
+                onmouseenter={(event) => { measureCommentCard(event.currentTarget); hoveredCommentId = comment.id; }}
+                onmouseleave={() => { if (hoveredCommentId === comment.id) hoveredCommentId = null; }}
+                onfocus={(event) => { measureCommentCard(event.currentTarget); hoveredCommentId = comment.id; }}
+                onblur={() => { if (hoveredCommentId === comment.id) hoveredCommentId = null; }}
+                onpointerdown={(event) => event.stopPropagation()}
+                onclick={() => openCommentThread(index, comment)}
+                transition:scale={{ duration: 150, easing: cubicOut, start: 0.96, opacity: 0 }}
+              >
+                <strong>{comment.author || 'Unknown'}{#if comment.createdAt}<em>{formatCommentDate(comment.createdAt)}</em>{/if}</strong>
+                <span class="comment-card-text">{comment.text}</span>
+                {#if comment.quote}<span class="comment-card-quote">“{comment.quote}”</span>{/if}
+                {#each commentThreadReplies(comment, index, commentReplies) as reply}
+                  <span class="comment-card-reply"><b>{reply.author || 'Unknown'}</b> {reply.text}</span>
+                {/each}
+              </button>
+            {/each}
+          {/if}
         </div>
       {/each}
     </div>
@@ -8025,6 +8488,84 @@
           <button class:encrypted={encryptionEnabled} class="protect-submit" type="submit">
             <img src="/lock.svg" alt="" />
             <span>{encryptionEnabled ? 'Disable Encryption' : 'Enable Encryption'}</span>
+          </button>
+        </footer>
+      </form>
+    </div>
+  {/if}
+  {#if commentMode && commentDraft}
+    {@const thread = commentDraft.threadId !== null ? findComment(commentDraft.threadId, [comments, pdfComments]) : null}
+    {@const isEditing = commentDraft.editingId !== null}
+    {@const isNew = !thread && !isEditing}
+    {@const panelTitle = isEditing ? 'Edit Comment' : thread ? 'Comment' : 'New Comment'}
+    <div
+      class="protect-panel comment-panel"
+      class:editing={isEditing}
+      role="dialog"
+      aria-label={panelTitle}
+      transition:fly={{ x: 18, duration: 240, easing: cubicOut }}
+    >
+      <header class="protect-panel-header">
+        <img src="/comments.svg" alt="" />
+        <h2>{panelTitle}</h2>
+        <button class="protect-panel-close" type="button" aria-label="Close comment" onclick={closeCommentDraft}>
+          <span></span>
+          <span></span>
+        </button>
+      </header>
+      <form class="comment-panel-content" onsubmit={(event) => { event.preventDefault(); saveCommentDraft(); }}>
+        <div class="comment-panel-body">
+          {#if thread && !isEditing}
+            <div class="comment-thread">
+              <article class="comment-thread-entry">
+                <header>
+                  <strong>{thread.comment.author || 'Unknown'}</strong>
+                  {#if thread.comment.createdAt}<time>{formatCommentDate(thread.comment.createdAt)}</time>{/if}
+                </header>
+                <p>{thread.comment.text}</p>
+                {#if thread.comment.quote}<p class="comment-quote">“{thread.comment.quote}”</p>{/if}
+                {#if !thread.comment.existing}
+                  <div class="comment-thread-tools">
+                    <button type="button" onclick={startEditingComment}>Edit</button>
+                    <button type="button" class="danger" onclick={deleteDraftComment}>Delete</button>
+                  </div>
+                {/if}
+              </article>
+              {#each commentThreadReplies(thread.comment, thread.pageIndex, commentReplies) as reply}
+                <article class="comment-thread-entry reply">
+                  <header>
+                    <strong>{reply.author || 'Unknown'}</strong>
+                    {#if reply.createdAt}<time>{formatCommentDate(reply.createdAt)}</time>{/if}
+                  </header>
+                  <p>{reply.text}</p>
+                </article>
+              {/each}
+            </div>
+          {:else if commentDraft.quote}
+            <p class="comment-quote">“{commentDraft.quote}”</p>
+          {:else if isNew}
+            <p class="comment-hint">Page {commentDraft.pageIndex + 1}. Select text to comment on it instead.</p>
+          {/if}
+          <textarea
+            bind:this={commentInput}
+            bind:value={commentDraft.text}
+            placeholder={thread && !isEditing ? 'Write a reply…' : 'Write a comment…'}
+            aria-label={thread && !isEditing ? 'Reply' : 'Comment'}
+            rows={thread && !isEditing ? 2 : 4}
+            onkeydown={handleCommentKeydown}
+          ></textarea>
+          <label class="comment-author-row">
+            <span>Name</span>
+            <input bind:value={commentAuthor} placeholder="Docuflex" aria-label="Comment author" autocomplete="name" onkeydown={handleCommentKeydown} />
+          </label>
+        </div>
+        <footer class="comment-actions">
+          {#if isEditing}
+            <button class="signature-action secondary" type="button" onclick={() => { if (commentDraft) commentDraft = { ...commentDraft, editingId: null, text: '' }; }}>Cancel</button>
+          {/if}
+          <button class="signature-action primary" type="submit" disabled={!commentDraft.text.trim()}>
+            <img src="/comments.svg" alt="" />
+            <span>{isEditing ? 'Save' : thread ? 'Reply' : 'Add Comment'}</span>
           </button>
         </footer>
       </form>
@@ -9766,6 +10307,371 @@
     width: 24px;
     height: 24px;
     filter: brightness(0) invert(1);
+  }
+
+  .comment-quote-layer {
+    z-index: 6;
+  }
+
+  .comment-quote-layer rect {
+    fill: rgba(255, 214, 10, 0.22);
+    transition: fill 140ms ease;
+  }
+
+  .comment-quote-layer rect.hovered {
+    fill: rgba(255, 196, 0, 0.5);
+  }
+
+  .comment-pin {
+    position: absolute;
+    z-index: 7;
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 8px 8px 8px 2px;
+    background: #222222;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.22);
+    transform: translate(-4px, -100%);
+    pointer-events: none;
+    transition: transform 140ms ease;
+  }
+
+  .comment-pin img {
+    width: 16px;
+    height: 16px;
+    filter: brightness(0) invert(1);
+  }
+
+  .comment-pin.hovered,
+  .comment-pin.draft {
+    background: #0878f9;
+  }
+
+  .comment-card {
+    position: absolute;
+    z-index: 8;
+    display: grid;
+    gap: 3px;
+    box-sizing: border-box;
+    width: 250px;
+    max-height: 82px;
+    padding: 9px 12px 12px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 9px;
+    background: #222222;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.2), 0 2px 7px rgba(0, 0, 0, 0.12);
+    color: #ffffff;
+    font-family: Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 15px;
+    font-weight: 400;
+    line-height: 1.25;
+    letter-spacing: -0.15px;
+    text-align: left;
+    cursor: default;
+    transition: max-height 320ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 220ms ease;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Collapsed cards fade their last line into the card instead of cutting it. */
+  .comment-card::after {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    height: 30px;
+    border-radius: 0 0 9px 9px;
+    background: linear-gradient(to bottom, rgba(34, 34, 34, 0), #222222 78%);
+    content: '';
+    pointer-events: none;
+    transition: opacity 240ms ease;
+  }
+
+  .comment-card.hovered::after,
+  .comment-card:focus-visible::after {
+    opacity: 0;
+  }
+
+  .comment-card.editable {
+    cursor: pointer;
+  }
+
+  .comment-card.hovered,
+  .comment-card:focus-visible {
+    z-index: 9;
+    max-height: var(--comment-card-full, 420px);
+    outline: none;
+    box-shadow: 0 14px 34px rgba(0, 0, 0, 0.28), 0 0 0 2px rgba(8, 120, 249, 0.55);
+  }
+
+  .comment-card strong {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    color: #ffffff;
+    font: inherit;
+  }
+
+  .comment-card strong em {
+    color: #7d7d7d;
+    font-size: 13px;
+    font-style: normal;
+    white-space: nowrap;
+  }
+
+  .comment-card-text {
+    color: #aaaaaa;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .comment-card-quote {
+    margin-top: 4px;
+    padding-left: 8px;
+    border-left: 2px solid #ffd60a;
+    color: #d6d6d6;
+    font-style: italic;
+  }
+
+  .comment-card-reply {
+    margin-top: 4px;
+    padding-top: 6px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    color: #aaaaaa;
+  }
+
+  .comment-card-reply b {
+    color: #ffffff;
+    font-weight: 400;
+  }
+
+  .protect-panel.comment-panel {
+    height: auto;
+    max-height: calc(100% - 40px);
+    grid-template-rows: 50px minmax(0, 1fr);
+  }
+
+  .comment-panel-content {
+    display: grid;
+    grid-template-rows: minmax(0, 1fr) auto;
+    min-height: 0;
+    background: #fafafa;
+  }
+
+  .comment-panel-body {
+    display: grid;
+    gap: 12px;
+    min-height: 0;
+    padding: 16px 18px;
+    overflow-y: auto;
+    border-bottom: 1px solid #cacaca;
+  }
+
+  .comment-quote,
+  .comment-hint {
+    margin: 0;
+    color: #7a7a7a;
+    font-size: 16px;
+    line-height: 1.38;
+    letter-spacing: -0.2px;
+  }
+
+  .comment-quote {
+    display: -webkit-box;
+    max-height: 120px;
+    padding: 9px 12px;
+    overflow: hidden;
+    border: 1px solid #d7d7d7;
+    border-left: 3px solid #ffd60a;
+    border-radius: 8px;
+    background: #f3f3f3;
+    color: #3f3f3f;
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
+    -webkit-box-orient: vertical;
+  }
+
+  .comment-panel-body textarea {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 64px;
+    padding: 10px 12px;
+    border: 1px solid #d7d7d7;
+    border-radius: 8px;
+    outline: none;
+    background: #f3f3f3;
+    color: #000;
+    font: inherit;
+    font-size: 18px;
+    line-height: 1.35;
+    letter-spacing: -0.25px;
+    resize: vertical;
+    transition: border-color 160ms ease, background-color 160ms ease;
+  }
+
+  .comment-thread {
+    display: grid;
+    max-height: 320px;
+    overflow-y: auto;
+    border: 1px solid #d7d7d7;
+    border-radius: 8px;
+    background: #f3f3f3;
+    scrollbar-width: thin;
+  }
+
+  .comment-thread-entry {
+    display: grid;
+    gap: 4px;
+    padding: 10px 12px 11px;
+  }
+
+  .comment-thread-entry + .comment-thread-entry {
+    border-top: 1px solid #dedede;
+  }
+
+  .comment-thread-entry.reply {
+    padding-left: 24px;
+  }
+
+  .comment-thread-entry header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .comment-thread-entry strong {
+    overflow: hidden;
+    color: #000;
+    font-size: 16px;
+    font-weight: 400;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .comment-thread-entry time {
+    flex: none;
+    color: #9a9a9a;
+    font-size: 13px;
+  }
+
+  .comment-thread-entry p {
+    margin: 0;
+    color: #4a4a4a;
+    font-size: 16px;
+    line-height: 1.35;
+    letter-spacing: -0.2px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .comment-thread-entry .comment-quote {
+    margin-top: 4px;
+    font-size: 15px;
+  }
+
+  .comment-thread-tools {
+    display: flex;
+    gap: 6px;
+    margin-top: 4px;
+  }
+
+  .comment-thread-tools button {
+    height: 28px;
+    padding: 0 10px;
+    border: 1px solid #d7d7d7;
+    border-radius: 7px;
+    background: #fafafa;
+    color: #4a4a4a;
+    font: inherit;
+    font-size: 14px;
+    cursor: pointer;
+    transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
+  }
+
+  .comment-thread-tools button:hover {
+    border-color: #c8c8c8;
+    background: #eeeeee;
+    color: #000;
+  }
+
+  .comment-thread-tools button.danger:hover {
+    border-color: #e3b4b4;
+    background: #fbeaea;
+    color: #c83e3e;
+  }
+
+  .comment-tether-layer {
+    z-index: 7;
+  }
+
+  .comment-tether-layer line {
+    stroke: rgba(34, 34, 34, 0.45);
+    stroke-width: 1.5;
+    stroke-dasharray: 3 3;
+    transition: stroke 140ms ease;
+  }
+
+  .comment-tether-layer line.hovered {
+    stroke: #0878f9;
+    stroke-dasharray: none;
+  }
+
+  .comment-author-row {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    min-height: 39px;
+    overflow: hidden;
+    border: 1px solid #d7d7d7;
+    border-radius: 8px;
+    background: #f3f3f3;
+    font-size: 18px;
+  }
+
+  .comment-author-row span {
+    padding-left: 12px;
+    color: #7a7a7a;
+  }
+
+  .comment-author-row input {
+    min-width: 0;
+    height: 37px;
+    padding: 0 12px;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: #111;
+    font: inherit;
+    text-align: right;
+  }
+
+  .comment-panel-body textarea::placeholder {
+    color: #8a8a8a;
+  }
+
+  .comment-panel-body textarea:focus {
+    border-color: #b8b8b8;
+    background: #f7f7f7;
+  }
+
+  .comment-actions {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
+    gap: 10px;
+    padding: 17px 18px;
+  }
+
+  .comment-panel.editing .comment-actions {
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.4fr);
+  }
+
+  .comment-actions .signature-action.primary:disabled {
+    cursor: default;
+    opacity: 0.45;
   }
 
   .raster-filter-defs {
