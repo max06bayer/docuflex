@@ -4,6 +4,8 @@ set -euo pipefail
 if [[ "$(uname -s)" == "Linux" && "$(id -u)" == "0" ]]; then
   runtime_home="/tmp/docuflex-home"
   install -d -o 65532 -g 65532 "$runtime_home"
+  # Persistent analytics and GeoIP data (a mounted volume in production).
+  install -d -o 65532 -g 65532 -m 700 data data/analytics data/geoip
   profile_path="$(readlink -f /root/.nix-profile)"
   export PATH="$profile_path/bin:$PATH"
   export HOME="$runtime_home"

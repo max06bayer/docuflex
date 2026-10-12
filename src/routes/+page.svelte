@@ -1,7 +1,11 @@
 <script>
   // @ts-ignore Fontsource exposes CSS through package exports without JS type declarations.
   import '@fontsource-variable/geist/wght.css';
+  import { onMount } from 'svelte';
   import SettingsPanel from '$lib/SettingsPanel.svelte';
+  import { trackPage } from '$lib/analytics.js';
+
+  onMount(() => trackPage('/'));
 
   const landingAssets = '/landing-page';
   const featureCardAssets = `${landingAssets}/feature-cards`;
@@ -65,7 +69,7 @@
       <div class="hero-actions">
         <a
           class="download-button animated-button"
-          href="https://github.com/max06bayer/docuflex/releases/latest"
+          href="/download"
           target="_blank"
           rel="noreferrer"
         >

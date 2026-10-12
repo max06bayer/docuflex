@@ -12,6 +12,7 @@ backend/out/
 
 # Local runtime and test artifacts
 tmp/
+data/
 *.log
 .pdf2htmlex/
 .ocr/

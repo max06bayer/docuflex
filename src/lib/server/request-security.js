@@ -18,6 +18,7 @@ const API_POLICIES = new Map([
   // actions with a misleading 429 while one document is being processed.
   ['/api/pdf/ocr', { group: 'ocr', concurrency: 3, requests: 10, windowMs: 10 * 60_000 }],
   ['/api/translate', { group: 'translate', concurrency: 1, requests: 8, windowMs: 30 * 60_000 }],
+  ['/api/analytics/collect', { group: 'analytics', concurrency: 50, requests: 240, windowMs: 60_000 }],
   ['/api/pdf/decrypt', { group: 'pdfbox', concurrency: 4, requests: 90, windowMs: 5 * 60_000 }],
   ['/api/pdf/edit', { group: 'pdfbox', concurrency: 4, requests: 90, windowMs: 5 * 60_000 }],
   ['/api/pdf/export', { group: 'pdfbox', concurrency: 4, requests: 90, windowMs: 5 * 60_000 }],

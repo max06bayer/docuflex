@@ -79,7 +79,7 @@
 
       <div class="legal-content" bind:this={legalContentElement}>
         <div class="legal-intro">
-          <p>Docuflex is a free and open-source PDF app licensed under the GNU Affero General Public License version 3. It has no user accounts, subscriptions, advertising, or built-in analytics.</p>
+          <p>Docuflex is a free and open-source PDF app licensed under the GNU Affero General Public License version 3. It has no user accounts, subscriptions, or advertising. The web editor and landing page use basic, cookie-free page analytics; the desktop app sends none.</p>
           <p class="updated">Last updated: July 26, 2026</p>
         </div>
 
@@ -89,7 +89,8 @@
           <p><strong>Files you open.</strong> Recent documents are stored in your browser using IndexedDB so they can appear on the home screen. Saved signatures are stored in your browser using local storage. They remain on that browser until you delete them in Docuflex, clear the browser’s site data, or the browser removes them.</p>
           <p><strong>Hosting.</strong> Docuflex runs on infrastructure supplied by netcup GmbH at the Vienna, Austria server location. The deployment is managed with a self-hosted Coolify installation and its Traefik reverse proxy. Cloudflare is not used.</p>
           <p><strong>Document processing.</strong> When you use conversion, compression, translation, OCR, protection, flattening, text editing, or export, the document is sent to the Docuflex server serving this app. OCR and PDF conversion run locally on that server. Temporary processing files are removed after the operation and are not used for advertising, profiling, or model training.</p>
-          <p><strong>Operational logs.</strong> The application does not use analytics, visitor tracking, third-party error reporting, or external log drains. Application errors and container events may appear in local Coolify and Docker console logs for troubleshooting and security. The app does not create a separate document or visitor database from these logs. Logs remain until the relevant container is replaced or removed, server cleanup runs, or longer retention is necessary to investigate a security incident.</p>
+          <p><strong>Web analytics.</strong> The web editor and landing page record page views, approximate time on page, scroll depth, release downloads, and coarse device, browser, and operating-system type. IP addresses are never stored. They are used briefly in memory to derive country and region from a database on our own server, and to compute a visitor hash that changes daily. No IP address is sent to a third party. <a href="https://db-ip.com" target="_blank" rel="noreferrer">IP Geolocation by DB-IP</a> (CC BY 4.0). No cookies or browser storage are used for this. Requests with Do Not Track or Global Privacy Control are not measured. The desktop app sends no analytics.</p>
+          <p><strong>Operational logs.</strong> The application does not use third-party error reporting or external log drains. Application errors and container events may appear in local Coolify and Docker console logs for troubleshooting and security. The app does not create a separate document or visitor database from these logs. Logs remain until the relevant container is replaced or removed, server cleanup runs, or longer retention is necessary to investigate a security incident.</p>
           <p><strong>No sale or advertising sharing.</strong> Docuflex does not sell personal information or share it for cross-context behavioral advertising.</p>
         </section>
 

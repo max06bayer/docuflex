@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { delimiter, join } from 'node:path';
+import { updateGeoip } from './update-geoip.mjs';
 
 const javaEnvironment = {
   ...process.env,
@@ -30,6 +31,14 @@ const backend = spawn(
 );
 const frontend = spawn(process.execPath, ['build'], { stdio: 'inherit', env: frontendEnvironment });
 const children = [backend, frontend];
+
+// Refresh the analytics GeoIP database in the background; checked daily,
+// downloaded at most every 30 days. Failures only affect location fields.
+if (process.env.ANALYTICS_ENABLED !== 'false' && process.env.GEOIP_AUTO_UPDATE !== 'false') {
+  const refreshGeoip = () => updateGeoip().catch((error) => console.error('GeoIP update failed:', error));
+  refreshGeoip();
+  setInterval(refreshGeoip, 86_400_000).unref();
+}
 let shuttingDown = false;
 
 function shutdown(signal) {

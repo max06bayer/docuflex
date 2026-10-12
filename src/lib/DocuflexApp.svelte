@@ -3,6 +3,7 @@
   import { cubicOut } from 'svelte/easing';
   import { scale } from 'svelte/transition';
   import PdfEditor from '$lib/PdfEditor.svelte';
+  import { trackEvent } from '$lib/analytics.js';
   import CompressFilesPanel from '$lib/CompressFilesPanel.svelte';
   import ConvertFilesPanel from '$lib/ConvertFilesPanel.svelte';
   import FlattenFilesPanel from '$lib/FlattenFilesPanel.svelte';
@@ -355,6 +356,7 @@
   /** @param {{ name: string }} tool */
   function openQuickTool(tool) {
     const toolName = tool.name.toLowerCase();
+    trackEvent('tool_open', { tool: toolName.replace(/[^a-z0-9-]/g, '').slice(0, 40) });
     if (toolName === 'merge' || toolName === 'split') {
       activePagesQuickTool = /** @type {'merge' | 'split'} */ (toolName);
       convertPanelOpen = false;
@@ -553,6 +555,7 @@
   async function downloadActiveDocument() {
     if (!pdfEditor || isDownloading) return;
     isDownloading = true;
+    trackEvent('export');
     try {
       await pdfEditor.downloadPdf();
     } catch (error) {
@@ -610,6 +613,7 @@
     const input = /** @type {HTMLInputElement} */ (event.currentTarget);
     const file = input.files?.[0];
     if (!file || (!file.name.toLowerCase().endsWith('.pdf') && file.type !== 'application/pdf')) return;
+    trackEvent('file_open');
     addFileTab(file, { enabled: false, password: '' }, undefined, pendingInitialTool);
     pendingInitialTool = 'select';
     input.value = '';

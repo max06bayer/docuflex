@@ -31,6 +31,7 @@
   "dependencies": {
     "@fontsource-variable/geist": "^5.2.9",
     "@fontsource-variable/inter": "^5.2.8",
+    "maxmind": "^4.3.29",
     "pdfjs-dist": "^6.2.108"
   },
   "overrides": {

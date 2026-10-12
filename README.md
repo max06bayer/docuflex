@@ -28,7 +28,7 @@
 
 ## Privacy
 
-Docuflex is designed to minimize document exposure. Files are processed only as needed to perform the action requested by the user. The application does not use advertising trackers or behavioral analytics, and document-processing routes do not send uploaded files to third-party conversion or OCR services.
+Docuflex is designed to minimize document exposure. Files are processed only as needed to perform the action requested by the user. The web editor and landing page use basic, cookie-free analytics: page views, time on page, scroll depth, coarse device and browser type, country and region, and release-download counts. IP addresses are never stored: they are used in memory only, to look up country and region in a local [DB-IP](https://db-ip.com) database (CC BY 4.0) and to compute a daily visitor hash. The desktop app sends no analytics. The application does not use advertising trackers, and document-processing routes do not send uploaded files to third-party conversion or OCR services. Visitors who send Do Not Track or Global Privacy Control are not measured.
 
 Some operations run entirely in the browser. Operations that need server-side PDF or Office tooling are processed by Docuflex infrastructure and use temporary working files. Do not use the public beta for irreplaceable or exceptionally sensitive documents without first assessing whether it meets your requirements.
 
