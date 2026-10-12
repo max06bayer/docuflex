@@ -71,6 +71,7 @@ import org.apache.pdfbox.pdmodel.interactive.annotation.PDAnnotationWidget;
 import org.apache.pdfbox.pdmodel.interactive.form.PDAcroForm;
 import org.apache.pdfbox.pdmodel.interactive.form.PDCheckBox;
 import org.apache.pdfbox.pdmodel.interactive.form.PDField;
+import org.apache.pdfbox.pdmodel.interactive.form.PDTerminalField;
 import org.apache.pdfbox.pdmodel.interactive.form.PDTextField;
 import org.apache.pdfbox.pdmodel.graphics.color.PDColor;
 import org.apache.pdfbox.pdmodel.graphics.color.PDDeviceRGB;
@@ -197,9 +198,16 @@ public class DocuflexPdfServer {
       if (encryptionPassword.getBytes(StandardCharsets.UTF_8).length > 32) {
         throw new IllegalArgumentException("Encryption password must be 32 bytes or fewer.");
       }
-      byte[] exported = annotations.isEmpty() && sourcePassword.isEmpty() && encryptionPassword.isEmpty()
-          ? pdfBytes
-          : applyAnnotations(pdfBytes, annotations, sourcePassword, encryptionPassword);
+      boolean printCopy = Boolean.TRUE.equals(payload.get("printCopy"));
+      List<Object> formValues = payload.get("formValues") instanceof List<?> ? asArray(payload.get("formValues")) : List.of();
+      byte[] exported;
+      if (!formValues.isEmpty()) {
+        exported = fillFormFieldsIncremental(pdfBytes, formValues);
+      } else if (annotations.isEmpty() && sourcePassword.isEmpty() && encryptionPassword.isEmpty() && !printCopy) {
+        exported = pdfBytes;
+      } else {
+        exported = applyAnnotations(pdfBytes, annotations, sourcePassword, encryptionPassword, printCopy);
+      }
       sendPdf(exchange, exported);
     } catch (Exception error) {
       sendFailure(exchange, error, "Could not export this PDF.");
@@ -314,14 +322,15 @@ public class DocuflexPdfServer {
     try {
       String body = readRequestBody(exchange);
       Map<String, Object> payload = asObject(new JsonParser(body).parse());
-      byte[] pdfBytes = decodePdf(asString(payload.get("pdfBase64")));
       String operation = asString(payload.get("operation"));
+      byte[] pdfBytes = decodePdf(asString(payload.get("pdfBase64")));
       byte[] result;
 
       if ("rotate".equals(operation)) {
         List<Integer> pages = integerList(asArray(payload.get("pages")));
         int rotation = ((int) asDouble(payload.get("rotation")) % 360 + 360) % 360;
         try (PDDocument document = loadPdf(pdfBytes)) {
+          assertEditable(document);
           validatePageIndexes(pages, document.getNumberOfPages());
           for (int pageIndex : pages) {
             PDPage page = document.getPage(pageIndex);
@@ -337,6 +346,8 @@ public class DocuflexPdfServer {
         try (PDDocument source = loadPdf(pdfBytes);
              PDDocument inserted = loadPdf(insertedBytes);
              PDDocument outputDocument = new PDDocument()) {
+          assertEditable(source);
+          assertEditable(inserted);
           if (insertAt < 0 || insertAt > source.getNumberOfPages()) {
             throw new IllegalArgumentException("Invalid page insertion position.");
           }
@@ -356,6 +367,7 @@ public class DocuflexPdfServer {
             : integerList(asArray(payload.get("pages")));
         try (PDDocument source = loadPdf(pdfBytes);
              PDDocument outputDocument = new PDDocument()) {
+          assertEditable(source);
           validatePageIndexes(order, source.getNumberOfPages());
           if (order.isEmpty()) throw new IllegalArgumentException("At least one page is required.");
           for (int pageIndex : order) outputDocument.importPage(source.getPage(pageIndex));
@@ -366,6 +378,7 @@ public class DocuflexPdfServer {
       } else if ("rasterize".equals(operation)) {
         List<Object> rasterPages = asArray(payload.get("rasterPages"));
         try (PDDocument document = loadPdf(pdfBytes)) {
+          assertEditable(document);
           for (Object entry : rasterPages) {
             Map<String, Object> rasterPage = asObject(entry);
             int pageIndex = (int) asDouble(rasterPage.get("index"));
@@ -459,12 +472,26 @@ public class DocuflexPdfServer {
       byte[] pdfBytes,
       List<AnnotationStroke> annotations,
       String sourcePassword,
-      String encryptionPassword) throws IOException {
+      String encryptionPassword,
+      boolean printCopy) throws IOException {
     try (PDDocument document = loadPdf(pdfBytes, sourcePassword)) {
+      // Exporting rewrites the file without its security settings, so a file
+      // whose owner restricted editing must not get through here. The one
+      // exception is a print copy, which the owner allows by allowing printing:
+      // the same thing "Print to PDF" in Preview or Chrome produces.
+      if (isEditRestricted(document)) {
+        if (!printCopy) {
+          throw new IllegalArgumentException("This PDF is edit protected. Remove the protection or download a flattened copy.");
+        }
+        if (!document.getCurrentAccessPermission().canPrint()) {
+          throw new IllegalArgumentException("This PDF's owner disabled printing, so it can't be flattened.");
+        }
+      }
       document.setAllSecurityToBeRemoved(true);
       List<Integer> redactedPages = new ArrayList<>();
       List<AnnotationStroke> formFields = new ArrayList<>();
       List<AnnotationStroke> pageCrops = new ArrayList<>();
+      Set<String> flattenedFieldNames = new java.util.HashSet<>();
       for (int pageIndex = 0; pageIndex < document.getNumberOfPages(); pageIndex += 1) {
         List<AnnotationStroke> markers = new ArrayList<>();
         List<AnnotationStroke> textMarks = new ArrayList<>();
@@ -494,6 +521,19 @@ public class DocuflexPdfServer {
         }
 
         PDPage page = document.getPage(pageIndex);
+        // Viewers like Chrome and pdf.js always paint form fields above the page
+        // content, whatever the annotation order. An original field the editor's
+        // additions cover (e.g. an image box) is therefore baked into the page
+        // first, as printing would, so the additions drawn next end up on top.
+        // Fields that are not covered stay interactive.
+        if (redactions.isEmpty() && pageHasFormWidgets(page)) {
+          List<AnnotationStroke> covering = new ArrayList<>(markers);
+          covering.addAll(pens);
+          for (AnnotationStroke shape : shapes) {
+            if (!"watermark".equals(shape.type)) covering.add(shape);
+          }
+          flattenCoveredFields(document, page, covering, flattenedFieldNames);
+        }
         if (!markers.isEmpty()) {
           drawAnnotationLayer(document, page, markers, true);
         }
@@ -515,6 +555,8 @@ public class DocuflexPdfServer {
         flattenRedactedPages(document, redactedPages);
       }
       if (!formFields.isEmpty()) {
+        // A field baked into the page above must not be recreated as a new one.
+        formFields.removeIf((field) -> field.existingField && flattenedFieldNames.contains(field.fieldName == null ? "" : field.fieldName.trim()));
         applyFormFields(document, formFields);
       }
       if (!pageCrops.isEmpty()) {
@@ -696,6 +738,7 @@ public class DocuflexPdfServer {
           widget.setPage(page);
         }
         if ("checkbox".equals(annotation.type) && existing instanceof PDCheckBox checkbox) {
+          ensureCheckboxStates(document, checkbox);
           if (annotation.fieldChecked) checkbox.check();
           else checkbox.unCheck();
         } else if ("input".equals(annotation.type) && existing instanceof PDTextField textField) {
@@ -787,6 +830,181 @@ public class DocuflexPdfServer {
     dictionary.setNormalAppearance(new PDAppearanceEntry(normal));
     widget.setAppearance(dictionary);
     widget.setAppearanceState("Off");
+  }
+
+  private static boolean pageHasFormWidgets(PDPage page) throws IOException {
+    for (PDAnnotation annotation : page.getAnnotations()) {
+      if (annotation instanceof PDAnnotationWidget) return true;
+    }
+    return false;
+  }
+
+  /** Page-space bounding box of one addition, slightly padded for its stroke. */
+  private static PDRectangle overlayRectangle(PDPage page, AnnotationStroke overlay) {
+    List<PdfPoint> points = new ArrayList<>();
+    if (overlay.points() != null && !overlay.points().isEmpty()) {
+      for (NormalizedPoint point : overlay.points()) points.add(normalizedToPdfPoint(page, point));
+    } else {
+      points.add(shapePoint(page, overlay, 0, 0));
+      points.add(shapePoint(page, overlay, 1, 0));
+      points.add(shapePoint(page, overlay, 0, 1));
+      points.add(shapePoint(page, overlay, 1, 1));
+    }
+    float left = Float.MAX_VALUE;
+    float bottom = Float.MAX_VALUE;
+    float right = -Float.MAX_VALUE;
+    float top = -Float.MAX_VALUE;
+    for (PdfPoint point : points) {
+      left = Math.min(left, point.x());
+      bottom = Math.min(bottom, point.y());
+      right = Math.max(right, point.x());
+      top = Math.max(top, point.y());
+    }
+    float padding = overlay.points() != null && !overlay.points().isEmpty() ? 6 : 1;
+    return new PDRectangle(left - padding, bottom - padding, right - left + 2 * padding, top - bottom + 2 * padding);
+  }
+
+  /** Fields covered by this share or less are only grazed by an addition and stay interactive. */
+  private static final double FIELD_COVER_THRESHOLD = 0.10;
+
+  /**
+   * Fraction of a field's area under the additions, sampled on a grid so that
+   * additions overlapping each other are not counted twice.
+   */
+  private static double coveredFraction(PDRectangle field, List<PDRectangle> covered) {
+    int samples = 32;
+    int hits = 0;
+    for (int row = 0; row < samples; row += 1) {
+      float y = field.getLowerLeftY() + (row + 0.5f) / samples * field.getHeight();
+      for (int column = 0; column < samples; column += 1) {
+        float x = field.getLowerLeftX() + (column + 0.5f) / samples * field.getWidth();
+        for (PDRectangle area : covered) {
+          if (x >= area.getLowerLeftX() && x <= area.getUpperRightX() && y >= area.getLowerLeftY() && y <= area.getUpperRightY()) {
+            hits += 1;
+            break;
+          }
+        }
+      }
+    }
+    return hits / (double) (samples * samples);
+  }
+
+  /** Bakes every original form field on this page that the additions cover by more than 10% into the page content. */
+  private static void flattenCoveredFields(
+      PDDocument document,
+      PDPage page,
+      List<AnnotationStroke> overlays,
+      Set<String> flattenedFieldNames) throws IOException {
+    if (overlays.isEmpty()) return;
+    PDAcroForm acroForm = document.getDocumentCatalog().getAcroForm();
+    if (acroForm == null) return;
+    List<PDRectangle> covered = new ArrayList<>();
+    for (AnnotationStroke overlay : overlays) covered.add(overlayRectangle(page, overlay));
+
+    List<PDField> fields = new ArrayList<>();
+    for (PDField field : acroForm.getFieldTree()) {
+      if (!(field instanceof PDTerminalField terminal)) continue;
+      for (PDAnnotationWidget widget : terminal.getWidgets()) {
+        PDRectangle rectangle = widget.getRectangle();
+        boolean onPage = widget.getPage() == null
+            ? page.getAnnotations().stream().anyMatch((annotation) -> annotation.getCOSObject() == widget.getCOSObject())
+            : widget.getPage().getCOSObject() == page.getCOSObject();
+        if (rectangle == null || !onPage) continue;
+        if (coveredFraction(rectangle, covered) > FIELD_COVER_THRESHOLD) {
+          fields.add(field);
+          break;
+        }
+      }
+    }
+    if (fields.isEmpty()) return;
+    for (PDField field : fields) flattenedFieldNames.add(field.getFullyQualifiedName());
+    acroForm.flatten(fields, false);
+  }
+
+  private static boolean isEditRestricted(PDDocument document) {
+    if (!document.isEncrypted()) return false;
+    AccessPermission access = document.getCurrentAccessPermission();
+    return !access.isOwnerPermission() && (!access.canModify() || !access.canModifyAnnotations());
+  }
+
+  private static void assertEditable(PDDocument document) {
+    if (isEditRestricted(document)) {
+      throw new IllegalArgumentException("This PDF is edit protected. Remove the protection to change its pages.");
+    }
+  }
+
+  /**
+   * Form filling on an edit-protected file, saved the way Preview and Acrobat
+   * do it: only the changed fields are appended as an incremental update, so
+   * the original bytes, encryption and permissions stay untouched.
+   */
+  private static byte[] fillFormFieldsIncremental(byte[] pdfBytes, List<Object> formValues) throws IOException {
+    try (PDDocument document = loadPdf(pdfBytes)) {
+      AccessPermission access = document.getCurrentAccessPermission();
+      if (!access.isOwnerPermission() && !access.canFillInForm() && !access.canModifyAnnotations()) {
+        throw new IllegalArgumentException("This PDF's owner disabled filling in its form fields.");
+      }
+      PDAcroForm acroForm = document.getDocumentCatalog().getAcroForm();
+      if (acroForm == null) throw new IllegalArgumentException("This PDF has no form fields.");
+      acroForm.setNeedAppearances(false);
+      Set<org.apache.pdfbox.cos.COSDictionary> changed = new java.util.HashSet<>();
+      changed.add(document.getDocumentCatalog().getCOSObject());
+      changed.add(acroForm.getCOSObject());
+      for (Object entry : formValues) {
+        Map<String, Object> formValue = asObject(entry);
+        PDField field = acroForm.getField(asString(formValue.get("fieldName")));
+        if (field == null) continue;
+        Object value = formValue.get("value");
+        if (field instanceof PDCheckBox checkbox) {
+          ensureCheckboxStates(document, checkbox);
+          if (Boolean.TRUE.equals(value)) checkbox.check();
+          else checkbox.unCheck();
+        } else if (field instanceof PDTextField textField) {
+          String text = value instanceof String string ? string : "";
+          try {
+            textField.setValue(text);
+          } catch (IOException fontError) {
+            textField.setDefaultAppearance("/Helv 0 Tf 0 g");
+            textField.setValue(text);
+          }
+        } else {
+          continue;
+        }
+        changed.add(field.getCOSObject());
+        for (PDAnnotationWidget widget : field.getWidgets()) {
+          changed.add(widget.getCOSObject());
+          if (widget.getAppearance() != null) changed.add(widget.getAppearance().getCOSObject());
+        }
+      }
+      ByteArrayOutputStream output = new ByteArrayOutputStream();
+      document.saveIncremental(output, changed);
+      byte[] appended = output.toByteArray();
+      // saveIncremental writes original bytes plus the update section.
+      return appended.length >= pdfBytes.length ? appended : concat(pdfBytes, appended);
+    }
+  }
+
+  private static byte[] concat(byte[] first, byte[] second) {
+    byte[] result = Arrays.copyOf(first, first.length + second.length);
+    System.arraycopy(second, 0, result, first.length, second.length);
+    return result;
+  }
+
+  /**
+   * check()/unCheck() need every widget's normal appearance to be an on/off
+   * state dictionary. Some real-world forms store a single stream instead,
+   * which makes PDFBox throw "This entry is not an appearance subdictionary";
+   * give those widgets a regular two-state appearance first.
+   */
+  private static void ensureCheckboxStates(PDDocument document, PDCheckBox checkbox) throws IOException {
+    for (PDAnnotationWidget widget : checkbox.getWidgets()) {
+      PDAppearanceDictionary appearance = widget.getAppearance();
+      PDAppearanceEntry normal = appearance == null ? null : appearance.getNormalAppearance();
+      if (normal != null && normal.isSubDictionary()) continue;
+      PDRectangle rectangle = widget.getRectangle();
+      if (rectangle == null) continue;
+      setCheckboxAppearance(document, widget, rectangle.getWidth(), rectangle.getHeight());
+    }
   }
 
   private static PDAppearanceStream checkboxAppearanceStream(

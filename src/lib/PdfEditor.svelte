@@ -9,7 +9,7 @@
   /** @typedef {{ x: number; y: number; pressure: number }} StrokePoint */
   /** @typedef {{ id: number; type: 'marker' | 'pen'; points: StrokePoint[]; rawPoints?: StrokePoint[]; color?: string; thickness?: number; opacity?: number; falloff?: number; smoothing?: number }} AnnotationStroke */
   /** @typedef {{ start: number; end: number; color?: string; fontFamily?: string; fontSize?: number; fontWeight?: number; letterSpacing?: number; textAlign?: 'left' | 'center' | 'right'; italic?: boolean; underline?: boolean; strikethrough?: boolean }} TextStyleRange */
-  /** @typedef {{ id: number; type: 'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'measure' | 'crop' | 'textfield' | 'signature' | 'image' | 'checkbox' | 'input'; x: number; y: number; width: number; height: number; rotation: number; text?: string; textColor?: string; fontFamily?: string; fontSize?: number; fontWeight?: number; letterSpacing?: number; lineHeight?: number; textAlign?: 'left' | 'center' | 'right'; verticalAlign?: 'top' | 'middle' | 'bottom'; italic?: boolean; underline?: boolean; strikethrough?: boolean; textStyleRanges?: TextStyleRange[]; imageData?: string; fieldName?: string; fieldValue?: string | boolean; existingField?: boolean; readOnly?: boolean; opacity?: number; cornerRadius?: number; fillPresent?: boolean; fillEnabled?: boolean; fillColor?: string; fillAlpha?: number; strokePresent?: boolean; strokeEnabled?: boolean; strokeColor?: string; strokeAlpha?: number; strokeWidth?: number; shadowPresent?: boolean; shadowEnabled?: boolean; shadowOpacity?: number; shadowBlur?: number; shadowX?: number; shadowY?: number; backgroundBlurPresent?: boolean; backgroundBlurEnabled?: boolean; backgroundBlur?: number }} AnnotationShape */
+  /** @typedef {{ id: number; type: 'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'measure' | 'crop' | 'textfield' | 'signature' | 'image' | 'checkbox' | 'input'; x: number; y: number; width: number; height: number; rotation: number; text?: string; textColor?: string; fontFamily?: string; fontSize?: number; fontWeight?: number; letterSpacing?: number; lineHeight?: number; textAlign?: 'left' | 'center' | 'right'; verticalAlign?: 'top' | 'middle' | 'bottom'; italic?: boolean; underline?: boolean; strikethrough?: boolean; textStyleRanges?: TextStyleRange[]; imageData?: string; fieldName?: string; fieldValue?: string | boolean; existingField?: boolean; originalFieldValue?: string | boolean; originalFrame?: { x: number; y: number; width: number; height: number }; readOnly?: boolean; opacity?: number; cornerRadius?: number; fillPresent?: boolean; fillEnabled?: boolean; fillColor?: string; fillAlpha?: number; strokePresent?: boolean; strokeEnabled?: boolean; strokeColor?: string; strokeAlpha?: number; strokeWidth?: number; shadowPresent?: boolean; shadowEnabled?: boolean; shadowOpacity?: number; shadowBlur?: number; shadowX?: number; shadowY?: number; backgroundBlurPresent?: boolean; backgroundBlurEnabled?: boolean; backgroundBlur?: number }} AnnotationShape */
   /** @typedef {{ id: number; type: 'highlight' | 'underline' | 'crossout' | 'blackout' | 'whiteout'; rects: { x: number; y: number; width: number; height: number; color?: [number, number, number]; thickness?: number }[] }} TextHighlight */
 
   /** @type {File} */
@@ -77,6 +77,9 @@
   let htmlTextEditBaseFile = null;
   /** @type {ArrayBuffer | null} */
   let workingPdfBytes = null;
+  /** The File that workingPdfBytes was read from. */
+  /** @type {File | null} */
+  let workingPdfBytesFile = null;
   let htmlEditorReady = false;
   let htmlViewportMode = false;
   let htmlViewportVisible = false;
@@ -172,6 +175,14 @@
   let unlockingPdf = false;
   /** True when the PDF's owner-password permissions disallow modifying annotations/contents. */
   let editLocked = false;
+  /** Edit-protected files can still be "printed" to a flattened copy when the owner allows printing. */
+  let editPrintAllowed = false;
+  /** Whether the owner still allows filling in form fields on an edit-protected file. */
+  let editFillAllowed = false;
+  /** The file as loaded; any later rewrite (page operations, text edits) is a disallowed change. */
+  /** @type {File | null} */
+  let editLockedSourceFile = null;
+  let flatteningPdf = false;
   let editLockedPanelOpen = false;
   let editLockedPassword = '';
   let editLockedError = '';
@@ -185,6 +196,13 @@
   let rasterPanelOpen = false;
   let rasterizing = false;
   let rasterAdjust = { ...RASTER_DEFAULTS };
+  /** Main pages preview through capped-size JS canvases; a CSS filter on a zoomed page outgrows GPU limits and turns white. */
+  const RASTER_PREVIEW_MAX_PIXELS = 4_000_000;
+  /** @type {Map<number, ImageData>} */
+  let rasterPreviewSources = new Map();
+  let rasterPreviewFrame = 0;
+  let rasterPreviewRunning = false;
+  let rasterPreviewQueued = false;
   let signPanelOpen = false;
   let addSignaturePanelOpen = false;
   /** @type {'draw' | 'image'} */
@@ -262,6 +280,12 @@
     ? new Set(selectedPages.size ? selectedPages : Array.from({ length: pageCount }, (_, index) => index))
     : new Set();
   $: rasterPreviewActive = rasterPanelOpen && !rasterPipeline.identity;
+  $: {
+    rasterPreviewActive;
+    rasterPipeline;
+    rasterTargetPages;
+    scheduleRasterPreview();
+  }
 
   $: if (activeTool !== 'eraser') eraserCursorVisible = false;
   $: if (activeTool !== observedTool) {
@@ -474,6 +498,17 @@
     return htmlViewportVisible;
   }
 
+  /**
+   * The current PDF bytes. WebKit can refuse a second read of a File restored
+   * from IndexedDB ("The object can not be found here."), so the copy kept by
+   * loadPdf() is used whenever it belongs to the current file.
+   * @returns {Promise<ArrayBuffer>}
+   */
+  async function readWorkingPdf() {
+    if (workingPdfBytes && workingPdfBytesFile === workingFile) return workingPdfBytes.slice(0);
+    return workingFile.arrayBuffer();
+  }
+
   /** @param {string} previousTool @param {string} nextTool */
   async function handleToolTransition(previousTool, nextTool) {
     const generation = ++editorTransitionGeneration;
@@ -514,7 +549,7 @@
       // blob resource. Safari may render that resource once, then reject a
       // second arrayBuffer() read when the text editor mounts. Build the text
       // editor's file from the durable byte snapshot retained by loadPdf().
-      const textEditBytes = workingPdfBytes?.slice(0) ?? await workingFile.arrayBuffer();
+      const textEditBytes = workingPdfBytes?.slice(0) ?? await readWorkingPdf();
       htmlTextEditBaseFile = new File([textEditBytes], workingFile.name, {
         type: workingFile.type || 'application/pdf',
         lastModified: workingFile.lastModified
@@ -629,6 +664,114 @@
     if (rasterizing) return;
     rasterPanelOpen = false;
     rasterAdjust = { ...RASTER_DEFAULTS };
+    clearRasterPreview();
+    if (zoomLevel !== 1) scheduleSharpRender(0);
+  }
+
+  function scheduleRasterPreview() {
+    if (typeof window === 'undefined') return;
+    if (rasterPreviewFrame) return;
+    rasterPreviewFrame = requestAnimationFrame(() => {
+      rasterPreviewFrame = 0;
+      void updateRasterPreview();
+    });
+  }
+
+  function clearRasterPreview() {
+    rasterPreviewSources = new Map();
+    viewer?.querySelectorAll('.pdf-page').forEach((shell) => {
+      shell.querySelector('canvas.raster-proxy')?.remove();
+      shell.classList.remove('raster-proxied');
+    });
+  }
+
+  /**
+   * Draws the adjusted preview of each visible target page into a proxy canvas
+   * of bounded resolution, using the exact pixel pass the final rasterize uses.
+   * Pages outside the viewport are processed once they scroll in.
+   */
+  async function updateRasterPreview() {
+    if (!viewer) return;
+    if (!rasterPreviewActive) {
+      if (viewer.querySelector('canvas.raster-proxy')) clearRasterPreview();
+      return;
+    }
+    if (rasterPreviewRunning) {
+      rasterPreviewQueued = true;
+      return;
+    }
+    rasterPreviewRunning = true;
+    try {
+      const pipeline = rasterPipeline;
+      const targets = rasterTargetPages;
+      const viewerRect = viewer.getBoundingClientRect();
+      const shells = [...viewer.querySelectorAll('.pdf-page')];
+      for (const [index, shell] of shells.entries()) {
+        if (!(shell instanceof HTMLElement)) continue;
+        const proxy = shell.querySelector('canvas.raster-proxy');
+        if (!targets.has(index)) {
+          proxy?.remove();
+          shell.classList.remove('raster-proxied');
+          continue;
+        }
+        const rect = shell.getBoundingClientRect();
+        const visible = rect.bottom >= viewerRect.top - viewerRect.height * 0.5 && rect.top <= viewerRect.bottom + viewerRect.height * 0.5;
+        if (!visible) continue;
+        const source = rasterPreviewSource(index, shell);
+        if (!source) continue;
+
+        let target = proxy instanceof HTMLCanvasElement ? proxy : null;
+        if (!target) {
+          target = document.createElement('canvas');
+          target.className = 'raster-proxy';
+          shell.querySelector('canvas')?.after(target);
+        }
+        if (target.width !== source.width || target.height !== source.height) {
+          target.width = source.width;
+          target.height = source.height;
+        }
+        const pixels = new ImageData(new Uint8ClampedArray(source.data), source.width, source.height);
+        const cssWidth = pageSizes[index]?.width || source.width;
+        applyRasterPixels(pixels, pipeline, Math.max(1, Math.round(source.width / cssWidth)));
+        target.getContext('2d')?.putImageData(pixels, 0, 0);
+        const zoom = pipeline.fillEdges ? rasterCoverScale(source.width, source.height, pipeline.absAngle) : 1;
+        target.style.transform = pipeline.angle === 0 ? '' : `rotate(${pipeline.angle}rad) scale(${zoom})`;
+        shell.classList.add('raster-proxied');
+        // Yield so dragging a slider stays responsive with many pages on screen.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        if (!rasterPreviewActive) break;
+      }
+    } finally {
+      rasterPreviewRunning = false;
+    }
+    if (!rasterPreviewActive) clearRasterPreview();
+    if (rasterPreviewQueued) {
+      rasterPreviewQueued = false;
+      scheduleRasterPreview();
+    }
+  }
+
+  /** Downscaled snapshot of the rendered page, cached for the panel's lifetime. @param {number} index @param {HTMLElement} shell */
+  function rasterPreviewSource(index, shell) {
+    const cached = rasterPreviewSources.get(index);
+    if (cached) return cached;
+    const canvas = shell.querySelector('canvas:not(.raster-proxy)');
+    if (!(canvas instanceof HTMLCanvasElement) || !canvas.width || !canvas.height) return null;
+    const fit = Math.min(1, Math.sqrt(RASTER_PREVIEW_MAX_PIXELS / (canvas.width * canvas.height)));
+    const width = Math.max(1, Math.round(canvas.width * fit));
+    const height = Math.max(1, Math.round(canvas.height * fit));
+    const scratch = document.createElement('canvas');
+    scratch.width = width;
+    scratch.height = height;
+    const context = scratch.getContext('2d', { willReadFrequently: true });
+    if (!context) return null;
+    context.fillStyle = '#fff';
+    context.fillRect(0, 0, width, height);
+    context.imageSmoothingQuality = 'high';
+    context.drawImage(canvas, 0, 0, width, height);
+    const data = context.getImageData(0, 0, width, height);
+    rasterPreviewSources.set(index, data);
+    return data;
   }
 
   /** @param {keyof typeof RASTER_DEFAULTS} key */
@@ -825,7 +968,7 @@
     pageOperationBusy = true;
     editorTransition = pages.length === 1 ? 'Rasterizing Page' : `Rasterizing ${pages.length} Pages`;
     try {
-      let bytes = await workingFile.arrayBuffer();
+      let bytes = await readWorkingPdf();
       /** @type {{ index: number; imageBase64: string }[]} */
       let batch = [];
       let batchBytes = 0;
@@ -851,6 +994,7 @@
       htmlViewportMode = false;
       rasterPanelOpen = false;
       rasterAdjust = { ...RASTER_DEFAULTS };
+      clearRasterPreview();
       await loadPdf(false, true, pageCount);
       await restorePageScrollState(scrollState);
       selectedPages = selectionBefore;
@@ -1043,7 +1187,7 @@
       // Files restored from homepage recents can be backed by a temporary
       // WebKit blob resource that is valid for the initial render but gone by
       // the time OCR starts. Use the durable snapshot retained by loadPdf().
-      const sourceBytes = workingPdfBytes?.slice(0) ?? await workingFile.arrayBuffer();
+      const sourceBytes = workingPdfBytes?.slice(0) ?? await readWorkingPdf();
       const languages = navigator.language.toLowerCase().startsWith('de') ? 'deu+eng' : 'eng';
       const response = await fetch('/api/pdf/ocr', {
         method: 'POST',
@@ -1763,7 +1907,7 @@
     if (unlockingPdf) return;
     unlockingPdf = true;
     try {
-      const encryptedBytes = await workingFile.arrayBuffer();
+      const encryptedBytes = await readWorkingPdf();
       const response = await fetch('/api/pdf/decrypt', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -4004,7 +4148,7 @@
 
   async function expandCroppedPagesForEditing() {
     const oldPageSizes = { ...pageSizes };
-    const sourceBytes = await workingFile.arrayBuffer();
+    const sourceBytes = await readWorkingPdf();
     const response = await fetch('/api/pdf/uncrop', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -5044,12 +5188,15 @@
   }
 
   function handleViewerScroll() {
+    if (rasterPanelOpen) scheduleRasterPreview();
     if (zoomLevel > 1) scheduleSharpRender(100);
   }
 
   /** @param {number} [delay] */
   function scheduleSharpRender(delay = 160) {
-    if (!pdfReady || !pdfDocument || !viewer) return;
+    // The raster preview snapshots page canvases; re-rendering them sharper at
+    // high zoom while it runs only costs memory and stalls the sliders.
+    if (!pdfReady || !pdfDocument || !viewer || rasterPanelOpen) return;
     if (sharpRenderTimer) clearTimeout(sharpRenderTimer);
     sharpRenderTimer = setTimeout(() => {
       sharpRenderTimer = undefined;
@@ -5134,6 +5281,7 @@
     status = 'Rendering PDF…';
     pdfReady = false;
     cancelSharpRenders();
+    clearRasterPreview();
     if (resetAnnotations) {
       annotations = {};
       textHighlights = {};
@@ -5177,6 +5325,7 @@
       // the worker. This remains readable even when an IndexedDB-backed WebKit
       // blob URL becomes invalid after the initial document load.
       workingPdfBytes = bytes.slice(0);
+      workingPdfBytesFile = workingFile;
       const loadingTask = pdfjs.getDocument({ data: bytes });
       pdfLoadingTask = loadingTask;
       loadingTask.onPassword = () => {
@@ -5198,9 +5347,21 @@
       pageCount = document.numPages;
       try {
         const permissions = await document.getPermissions();
-        editLocked = Array.isArray(permissions) && !permissions.includes(pdfjs.PermissionFlag.MODIFY_ANNOTATIONS);
+        // Acrobat's common "commenting, filling in forms and signing" setting
+        // keeps annotations allowed but forbids changing the content, so both
+        // flags count as edit protection.
+        editLocked = Array.isArray(permissions) && (
+          !permissions.includes(pdfjs.PermissionFlag.MODIFY_CONTENTS) ||
+          !permissions.includes(pdfjs.PermissionFlag.MODIFY_ANNOTATIONS)
+        );
+        editPrintAllowed = !Array.isArray(permissions) || permissions.includes(pdfjs.PermissionFlag.PRINT);
+        editFillAllowed = !Array.isArray(permissions) ||
+          permissions.includes(pdfjs.PermissionFlag.FILL_INTERACTIVE_FORMS) ||
+          permissions.includes(pdfjs.PermissionFlag.MODIFY_ANNOTATIONS);
+        editLockedSourceFile = editLocked ? workingFile : null;
       } catch {
         editLocked = false;
+        editPrintAllowed = true;
       }
       await tick();
       await Promise.all([
@@ -5271,6 +5432,10 @@
             rotation: 0,
             fieldName: String(annotation.fieldName ?? annotation.id ?? `Field${nextAnnotationId}`),
             fieldValue: isCheckbox ? Boolean(rawValue && rawValue !== 'Off') : String(rawValue ?? ''),
+            // Kept so edit-protected files can tell plain form filling (allowed)
+            // apart from moving or resizing the field (not allowed).
+            originalFieldValue: isCheckbox ? Boolean(rawValue && rawValue !== 'Off') : String(rawValue ?? ''),
+            originalFrame: { x, y, width, height },
             existingField: true,
             readOnly: Boolean(annotation.readOnly)
           }];
@@ -5655,7 +5820,7 @@
 
   /** @param {string} operation @param {Record<string, unknown>} details @param {ArrayBuffer | null} [source] */
   async function requestPageOperation(operation, details, source = null) {
-    const bytes = source ?? await workingFile.arrayBuffer();
+    const bytes = source ?? await readWorkingPdf();
     const response = await fetch('/api/pdf/pages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -5993,7 +6158,7 @@
     pageOperationBusy = true;
     editorTransition = 'Exporting Pages';
     try {
-      let sourcePdf = await workingFile.arrayBuffer();
+      let sourcePdf = await readWorkingPdf();
       if (htmlEditorStarted && htmlEditor?.applyTextEdits) sourcePdf = await htmlEditor.applyTextEdits(sourcePdf);
       const annotatedResponse = await fetch('/api/pdf/export', {
         method: 'POST',
@@ -6181,11 +6346,31 @@
       throw new Error('Unlock this password-protected PDF before downloading.');
     }
     if (editLocked) {
-      editLockedPanelOpen = true;
-      editLockedError = '';
-      throw new Error('EDIT_LOCKED');
+      const allowed = allowedEditLockedChanges();
+      if (!allowed) {
+        editLockedPanelOpen = true;
+        editLockedError = '';
+        throw new Error('EDIT_LOCKED');
+      }
+      // Nothing the owner forbade was touched: keep the file exactly as it was,
+      // with filled-in field values appended the way Preview saves forms.
+      if (!allowed.length) return new Blob([await readWorkingPdf()], { type: 'application/pdf' });
+      const response = await fetch('/api/pdf/export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pdfBase64: arrayBufferToBase64(await readWorkingPdf()),
+          annotations: [],
+          formValues: allowed
+        })
+      });
+      if (!response.ok) {
+        const error = await response.json().catch(() => null);
+        throw new Error(error?.error ?? `PDF export failed (${response.status}).`);
+      }
+      return response.blob();
     }
-    let sourcePdf = await workingFile.arrayBuffer();
+    let sourcePdf = await readWorkingPdf();
     if (htmlEditorStarted && htmlEditor?.applyTextEdits) {
       sourcePdf = await htmlEditor.applyTextEdits(sourcePdf);
     }
@@ -6223,14 +6408,63 @@
     return { blob, suggestedName: `${baseName}.pdf` };
   }
 
+  /**
+   * For an edit-protected file, returns the filled-in form values when every
+   * change is one the owner permits (only form filling), or null when anything
+   * else changed and the PDF Edit Locked dialog has to take over.
+   * @returns {{ fieldName: string; value: string | boolean }[] | null}
+   */
+  function allowedEditLockedChanges() {
+    if (workingFile !== editLockedSourceFile || htmlEditorStarted || encryptionEnabled || appliedWatermarkText) return null;
+    if (Object.values(annotations).some((strokes) => strokes.length)) return null;
+    if (Object.values(textHighlights).some((highlights) => highlights.length)) return null;
+    /** @type {{ fieldName: string; value: string | boolean }[]} */
+    const values = [];
+    for (const shape of Object.values(shapes).flat()) {
+      if (shape.type === 'measure') continue;
+      if (!shape.existingField || !shape.fieldName || !shape.originalFrame) return null;
+      const frame = shape.originalFrame;
+      const moved = Math.abs(shape.x - frame.x) > 0.5 || Math.abs(shape.y - frame.y) > 0.5 ||
+        Math.abs(shape.width - frame.width) > 0.5 || Math.abs(shape.height - frame.height) > 0.5 || shape.rotation !== 0;
+      if (moved) return null;
+      if (shape.fieldValue === shape.originalFieldValue) continue;
+      if (!editFillAllowed) return null;
+      values.push({ fieldName: shape.fieldName, value: shape.fieldValue ?? '' });
+    }
+    return values;
+  }
+
+  /** Shows the app's standard dark error toast (handled by DocuflexApp). @param {string} title @param {unknown} error */
+  function showExportError(title, error) {
+    window.dispatchEvent(new CustomEvent('docuflex:error', {
+      detail: { title, message: error instanceof Error ? error.message : 'Could not export this PDF.' }
+    }));
+  }
+
   function closeEditLockedPanel() {
+    if (flatteningPdf || unlockingForExport) return;
     editLockedPanelOpen = false;
     editLockedPassword = '';
     editLockedError = '';
     showEditLockedPassword = false;
   }
 
-  async function unlockForExport() {
+  /** Once decrypted it's a normal export; while still locked it's the flattened copy. */
+  async function downloadFromEditLockedPanel() {
+    if (unlockingForExport || flatteningPdf) return;
+    if (editLocked) {
+      if (await downloadFlattened()) closeEditLockedPanel();
+      return;
+    }
+    try {
+      await downloadPdf();
+      closeEditLockedPanel();
+    } catch (error) {
+      showExportError('Could not download this PDF', error);
+    }
+  }
+
+  async function disableEditProtection() {
     editLockedError = '';
     if (!editLockedPassword) {
       editLockedError = 'Enter the password.';
@@ -6239,7 +6473,7 @@
     if (unlockingForExport) return;
     unlockingForExport = true;
     try {
-      const encryptedBytes = await workingFile.arrayBuffer();
+      const encryptedBytes = await readWorkingPdf();
       const response = await fetch('/api/pdf/decrypt', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -6261,19 +6495,54 @@
     } catch (error) {
       editLockedError = error instanceof Error && /password/i.test(error.message)
         ? 'Incorrect password.'
-        : error instanceof Error ? error.message : 'Could not decrypt this PDF.';
+        : error instanceof Error ? error.message : 'Could not remove the edit protection.';
     } finally {
       unlockingForExport = false;
     }
   }
 
-  async function downloadAfterEditUnlock() {
-    if (editLocked || unlockingForExport) return;
+  /**
+   * "Print to PDF" for edit-protected files whose owner allows printing: the
+   * backend writes an unrestricted copy with the original vector content and
+   * the form fields kept as real fields, and the editor's additions are placed
+   * on top exactly as in a normal export.
+   */
+  async function downloadFlattened() {
+    if (!editLocked || !editPrintAllowed || flatteningPdf || editorTransition) return false;
+    editLockedError = '';
+    flatteningPdf = true;
+    editorTransition = 'Flattening PDF';
     try {
-      await downloadPdf();
-      closeEditLockedPanel();
+      let sourcePdf = await readWorkingPdf();
+      if (htmlEditorStarted && htmlEditor?.applyTextEdits) sourcePdf = await htmlEditor.applyTextEdits(sourcePdf);
+      const response = await fetch('/api/pdf/export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pdfBase64: arrayBufferToBase64(sourcePdf),
+          annotations: exportableAnnotations(),
+          encryptionPassword: encryptionEnabled ? protectionPassword : '',
+          printCopy: true
+        })
+      });
+      if (!response.ok) {
+        const error = await response.json().catch(() => null);
+        throw new Error(error?.error ?? `PDF export failed (${response.status}).`);
+      }
+      const url = URL.createObjectURL(await response.blob());
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `${workingFile.name.replace(/\.pdf$/i, '') || 'document'}-flattened.pdf`;
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      return true;
     } catch (error) {
-      editLockedError = error instanceof Error ? error.message : 'Could not export this PDF.';
+      console.error(error);
+      showExportError('Could not flatten this PDF', error);
+      return false;
+    } finally {
+      flatteningPdf = false;
+      editorTransition = '';
     }
   }
 
@@ -6490,11 +6759,7 @@
           ? (shapes[index] ?? []).find((shape) => shape.id === editingTextShape?.id) ?? null
           : null}
         <div class="pdf-page" aria-label={`Page ${index + 1}`}>
-          <canvas
-            class:raster-preview={rasterPanelOpen}
-            style:filter={rasterPreviewFilter(rasterPreviewActive, rasterTargetPages, index)}
-            style:transform={rasterPreviewTransform(rasterPreviewActive, rasterTargetPages, rasterPipeline, index, pageSizes[index])}
-          ></canvas>
+          <canvas></canvas>
           {#if appliedWatermarkText && pageSizes[index]}
             <svg
               class="annotation-layer watermark-layer"
@@ -8081,7 +8346,7 @@
           <span></span>
         </button>
       </header>
-      <form class="protect-panel-form" onsubmit={(event) => { event.preventDefault(); void unlockForExport(); }}>
+      <form class="protect-panel-form" onsubmit={(event) => { event.preventDefault(); void disableEditProtection(); }}>
         <div class:has-error={Boolean(editLockedError)} class="protect-fields">
           <div class="password-field" class:error={Boolean(editLockedError)}>
             <input
@@ -8106,17 +8371,30 @@
           <p class:visible={Boolean(editLockedError)} class="protection-error" aria-live="polite">{editLockedError}</p>
         </div>
         <div class="protect-warning">
-          <h3>Locked:</h3>
-          <p>This PDF's owner disabled editing. Enter the <span>owner password</span> to unlock it for this export.</p>
+          {#if !editLocked}
+            <h3>Unlocked:</h3>
+            <p>Protection removed. <span>Download</span> to export with your edits.</p>
+          {:else if editPrintAllowed}
+            <h3>Locked:</h3>
+            <p>Enter the <span>owner password</span>, or download a <span>flattened copy</span> with your edits.</p>
+          {:else}
+            <h3>Locked:</h3>
+            <p>Enter the <span>owner password</span>. Printing is also disabled, so it can't be flattened.</p>
+          {/if}
         </div>
         <footer class="protect-actions">
-          <button class="protect-submit encrypted" type="submit" disabled={unlockingForExport || !editLocked}>
+          <button class="protect-submit encrypted" type="submit" disabled={unlockingForExport || flatteningPdf || !editLocked}>
             <img src="/lock.svg" alt="" />
             <span>{unlockingForExport ? 'Decrypting…' : editLocked ? 'Decrypt' : 'Decrypted'}</span>
           </button>
-          <button class="protect-submit" type="button" disabled={editLocked || unlockingForExport} onclick={downloadAfterEditUnlock}>
+          <button
+            class="protect-submit"
+            type="button"
+            disabled={unlockingForExport || flatteningPdf || (editLocked && !editPrintAllowed)}
+            onclick={downloadFromEditLockedPanel}
+          >
             <img src="/download.svg" alt="" />
-            <span>Download</span>
+            <span>{flatteningPdf ? 'Flattening…' : editLocked ? 'Download Flattened' : 'Download'}</span>
           </button>
         </footer>
       </form>
@@ -8477,6 +8755,10 @@
 
   .protect-panel.edit-locked-panel {
     height: 396px;
+  }
+
+  .protect-panel.edit-locked-panel.has-error {
+    height: 432px;
   }
 
   .protect-panel.edit-locked-panel .protect-panel-form {
@@ -9500,7 +9782,20 @@
 
   canvas.raster-preview {
     transform-origin: center center;
-    will-change: transform, filter;
+  }
+
+  .pdf-page :global(canvas.raster-proxy) {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    transform-origin: center center;
+    pointer-events: none;
+  }
+
+  .pdf-page:global(.raster-proxied) > canvas:not(:global(.raster-proxy)) {
+    visibility: hidden;
   }
 
   .protect-panel.raster-panel {
