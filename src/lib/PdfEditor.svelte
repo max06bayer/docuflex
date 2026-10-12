@@ -170,6 +170,13 @@
   let passwordUnlockError = '';
   let showPasswordUnlockValue = false;
   let unlockingPdf = false;
+  /** True when the PDF's owner-password permissions disallow modifying annotations/contents. */
+  let editLocked = false;
+  let editLockedPanelOpen = false;
+  let editLockedPassword = '';
+  let editLockedError = '';
+  let showEditLockedPassword = false;
+  let unlockingForExport = false;
   let signPanelOpen = false;
   let addSignaturePanelOpen = false;
   /** @type {'draw' | 'image'} */
@@ -4905,12 +4912,19 @@
       };
       const document = await loadingTask.promise;
       if (generation !== loadGeneration) {
-        document.destroy();
+        // pdfjs-dist dropped PDFDocumentProxy.destroy(); only the loading task has one.
+        void loadingTask.destroy();
         return;
       }
       pdfLoadingTask = null;
       pdfDocument = document;
       pageCount = document.numPages;
+      try {
+        const permissions = await document.getPermissions();
+        editLocked = Array.isArray(permissions) && !permissions.includes(pdfjs.PermissionFlag.MODIFY_ANNOTATIONS);
+      } catch {
+        editLocked = false;
+      }
       await tick();
       await Promise.all([
         renderPages(pdfViewer, document, generation, resetAnnotations),
@@ -4957,7 +4971,13 @@
           const isCheckbox = annotation.fieldType === 'Btn' && Boolean(annotation.checkBox);
           const isTextInput = annotation.fieldType === 'Tx';
           if (!isCheckbox && !isTextInput) return [];
-          const converted = viewport.convertToViewportRectangle(annotation.rect);
+          // pdfjs-dist dropped PageViewport.convertToViewportRectangle; reimplement
+          // it via the two remaining corner-point transforms it used to wrap.
+          const [rectX0, rectY0, rectX1, rectY1] = annotation.rect;
+          const converted = [
+            ...viewport.convertToViewportPoint(rectX0, rectY0),
+            ...viewport.convertToViewportPoint(rectX1, rectY1)
+          ];
           const x = Math.min(converted[0], converted[2]);
           const y = Math.min(converted[1], converted[3]);
           const width = Math.abs(converted[2] - converted[0]);
@@ -5565,7 +5585,8 @@
       const inspectionTask = pdfjs.getDocument({ data: droppedBytes.slice(0) });
       const droppedDocument = await inspectionTask.promise;
       const insertedCount = droppedDocument.numPages;
-      await droppedDocument.destroy();
+      // pdfjs-dist dropped PDFDocumentProxy.destroy(); only the loading task has one.
+      await inspectionTask.destroy();
       if (!insertedCount) throw new Error('The dropped PDF does not contain any pages.');
 
       const result = await requestPageOperation('insert', {
@@ -5882,6 +5903,11 @@
     if (passwordUnlockOpen || unlockingPdf) {
       throw new Error('Unlock this password-protected PDF before downloading.');
     }
+    if (editLocked) {
+      editLockedPanelOpen = true;
+      editLockedError = '';
+      throw new Error('EDIT_LOCKED');
+    }
     let sourcePdf = await workingFile.arrayBuffer();
     if (htmlEditorStarted && htmlEditor?.applyTextEdits) {
       sourcePdf = await htmlEditor.applyTextEdits(sourcePdf);
@@ -5918,6 +5944,60 @@
     const blob = await exportEditedPdfBlob();
     const baseName = workingFile.name.replace(/\.pdf$/i, '') || 'document';
     return { blob, suggestedName: `${baseName}.pdf` };
+  }
+
+  function closeEditLockedPanel() {
+    editLockedPanelOpen = false;
+    editLockedPassword = '';
+    editLockedError = '';
+    showEditLockedPassword = false;
+  }
+
+  async function unlockForExport() {
+    editLockedError = '';
+    if (!editLockedPassword) {
+      editLockedError = 'Enter the password.';
+      return;
+    }
+    if (unlockingForExport) return;
+    unlockingForExport = true;
+    try {
+      const encryptedBytes = await workingFile.arrayBuffer();
+      const response = await fetch('/api/pdf/decrypt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pdfBase64: arrayBufferToBase64(encryptedBytes),
+          password: editLockedPassword
+        })
+      });
+      if (!response.ok) {
+        const error = await response.json().catch(() => null);
+        throw new Error(error?.error ?? 'Incorrect password.');
+      }
+      const decryptedBytes = await response.arrayBuffer();
+      workingFile = new File([decryptedBytes], workingFile.name, {
+        type: 'application/pdf',
+        lastModified: Date.now()
+      });
+      editLocked = false;
+    } catch (error) {
+      editLockedError = error instanceof Error && /password/i.test(error.message)
+        ? 'Incorrect password.'
+        : error instanceof Error ? error.message : 'Could not decrypt this PDF.';
+    } finally {
+      unlockingForExport = false;
+    }
+  }
+
+  async function downloadAfterEditUnlock() {
+    if (editLocked || unlockingForExport) return;
+    try {
+      await downloadPdf();
+      closeEditLockedPanel();
+    } catch (error) {
+      editLockedError = error instanceof Error ? error.message : 'Could not export this PDF.';
+    }
   }
 
   onDestroy(() => {
@@ -7564,6 +7644,63 @@
       </div>
     </div>
   {/if}
+  {#if editLockedPanelOpen}
+    <div
+      class:has-error={Boolean(editLockedError)}
+      class="protect-panel edit-locked-panel"
+      role="dialog"
+      aria-label="PDF Edit Locked"
+      transition:fly={{ x: 18, duration: 240, easing: cubicOut }}
+    >
+      <header class="protect-panel-header">
+        <img src="/lock.svg" alt="" />
+        <h2>PDF Edit Locked</h2>
+        <button class="protect-panel-close" type="button" aria-label="Close" onclick={closeEditLockedPanel}>
+          <span></span>
+          <span></span>
+        </button>
+      </header>
+      <form class="protect-panel-form" onsubmit={(event) => { event.preventDefault(); void unlockForExport(); }}>
+        <div class:has-error={Boolean(editLockedError)} class="protect-fields">
+          <div class="password-field" class:error={Boolean(editLockedError)}>
+            <input
+              type={showEditLockedPassword ? 'text' : 'password'}
+              placeholder="Password"
+              aria-label="Password"
+              autocomplete="current-password"
+              bind:value={editLockedPassword}
+              oninput={() => editLockedError = ''}
+            />
+            <button
+              class="password-visibility"
+              type="button"
+              aria-label={showEditLockedPassword ? 'Hide password' : 'Show password'}
+              aria-pressed={showEditLockedPassword}
+              onclick={() => showEditLockedPassword = !showEditLockedPassword}
+            >
+              <img class:visible={!showEditLockedPassword} src="/eye.svg" alt="" />
+              <img class:visible={showEditLockedPassword} src="/eye-off.svg" alt="" />
+            </button>
+          </div>
+          <p class:visible={Boolean(editLockedError)} class="protection-error" aria-live="polite">{editLockedError}</p>
+        </div>
+        <div class="protect-warning">
+          <h3>Locked:</h3>
+          <p>This PDF's owner disabled editing. Enter the <span>owner password</span> to unlock it for this export.</p>
+        </div>
+        <footer class="protect-actions">
+          <button class="protect-submit encrypted" type="submit" disabled={unlockingForExport || !editLocked}>
+            <img src="/lock.svg" alt="" />
+            <span>{unlockingForExport ? 'Decrypting…' : editLocked ? 'Decrypt' : 'Decrypted'}</span>
+          </button>
+          <button class="protect-submit" type="button" disabled={editLocked || unlockingForExport} onclick={downloadAfterEditUnlock}>
+            <img src="/download.svg" alt="" />
+            <span>Download</span>
+          </button>
+        </footer>
+      </form>
+    </div>
+  {/if}
   {#if editorTransition}
     <div class="preparation-overlay" role="presentation">
       <div class="preparation-dialog" role="dialog" aria-modal="true" aria-label={editorTransition}>
@@ -7915,6 +8052,18 @@
 
   .protect-panel.encrypted {
     height: 342px;
+  }
+
+  .protect-panel.edit-locked-panel {
+    height: 396px;
+  }
+
+  .protect-panel.edit-locked-panel .protect-panel-form {
+    grid-template-rows: 74px 140px 132px;
+  }
+
+  .protect-panel.edit-locked-panel.has-error .protect-panel-form {
+    grid-template-rows: 110px 140px 132px;
   }
 
   .protect-panel.search-panel {
@@ -8858,11 +9007,16 @@
 
   .protect-actions {
     display: grid;
+    gap: 10px;
     place-items: center;
     box-sizing: border-box;
     min-height: 0;
     padding: 17px 18px;
     background: #fafafa;
+  }
+
+  .protect-actions .protect-submit {
+    width: 100%;
   }
 
   .protect-submit {

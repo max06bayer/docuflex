@@ -91,7 +91,11 @@ export function applySecurityHeaders(response, url) {
     'Content-Security-Policy',
     "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'self'; form-action 'self'; "
       + "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; "
-      + "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; "
+      // The desktop shell's Tauri IPC bridge posts through the custom ipc:
+      // scheme (macOS/iOS) or the https://ipc.localhost reserved host
+      // (Windows/Linux); without allowing those, invoke() calls like
+      // take_pending_pdf/docuflex_save_prompt get silently CSP-blocked.
+      + "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: https://ipc.localhost; worker-src 'self' blob:; "
       + "frame-src 'self' blob: https://www.youtube.com"
   );
   if (url.protocol === 'https:' || env.NODE_ENV === 'production') {

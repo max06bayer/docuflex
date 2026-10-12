@@ -101,7 +101,9 @@
   async function renderPages() {
     if (!workingFile) return;
     const generation = ++renderGeneration;
-    await renderedDocument?.destroy().catch(() => {});
+    // pdfjs-dist dropped PDFDocumentProxy.destroy(); only the loading task that
+    // produced it still has one, so destroy that instead of renderedDocument.
+    await loadingTask?.destroy?.()?.catch(() => {});
     renderedDocument = null;
     const [pdfjs, worker] = await Promise.all([
       import('pdfjs-dist'),
@@ -111,7 +113,7 @@
     loadingTask = pdfjs.getDocument({ data: await workingFile.arrayBuffer() });
     const document = await loadingTask.promise;
     if (generation !== renderGeneration) {
-      await document.destroy();
+      await loadingTask.destroy();
       return;
     }
     renderedDocument = document;
@@ -528,8 +530,8 @@
     pageDragCleanup?.();
     window.removeEventListener('pointerdown', closeContextMenu);
     window.removeEventListener('keydown', handleKeydown);
-    void renderedDocument?.destroy().catch(() => {});
-    if (!renderedDocument) void loadingTask?.destroy().catch(() => {});
+    // pdfjs-dist dropped PDFDocumentProxy.destroy(); only the loading task has one.
+    void loadingTask?.destroy?.()?.catch(() => {});
   });
 </script>
 

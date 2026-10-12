@@ -367,6 +367,8 @@
     try {
       await pdfEditor.downloadPdf();
     } catch (error) {
+      // PdfEditor already opened its own "PDF Edit Locked" panel to handle this.
+      if (error instanceof Error && error.message === 'EDIT_LOCKED') return;
       console.error(error);
       showErrorToast('Could not download this PDF', error instanceof Error ? error.message : 'Could not export this PDF.');
     } finally {
@@ -401,6 +403,8 @@
         if (savedPath) tabs = tabs.map((entry) => (entry.id === tab.id ? { ...entry, sourcePath: savedPath } : entry));
       }
     } catch (error) {
+      // PdfEditor already opened its own "PDF Edit Locked" panel to handle this.
+      if (error instanceof Error && error.message === 'EDIT_LOCKED') return;
       if (error !== 'cancelled') {
         console.error(error);
         // The native save bridge (desktop/src-tauri) rejects with a plain string, not an Error.
@@ -471,8 +475,8 @@
     } catch (error) {
       console.warn(`Could not render a thumbnail for ${file.name}:`, error);
     } finally {
-      await document?.destroy().catch(() => {});
-      if (!document) await loadingTask?.destroy().catch(() => {});
+      // pdfjs-dist dropped PDFDocumentProxy.destroy(); only the loading task has one.
+      await loadingTask?.destroy?.()?.catch(() => {});
     }
   }
 
