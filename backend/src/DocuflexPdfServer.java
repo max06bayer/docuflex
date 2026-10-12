@@ -56,6 +56,7 @@ import org.apache.pdfbox.pdmodel.encryption.StandardProtectionPolicy;
 import org.apache.pdfbox.pdmodel.font.encoding.Encoding;
 import org.apache.pdfbox.pdmodel.font.encoding.GlyphList;
 import org.apache.pdfbox.pdmodel.graphics.PDXObject;
+import org.apache.pdfbox.pdmodel.graphics.image.JPEGFactory;
 import org.apache.pdfbox.pdmodel.graphics.image.LosslessFactory;
 import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
 import org.apache.pdfbox.pdmodel.graphics.form.PDFormXObject;
@@ -65,6 +66,7 @@ import org.apache.pdfbox.pdmodel.interactive.annotation.PDAppearanceCharacterist
 import org.apache.pdfbox.pdmodel.interactive.annotation.PDAppearanceDictionary;
 import org.apache.pdfbox.pdmodel.interactive.annotation.PDAppearanceEntry;
 import org.apache.pdfbox.pdmodel.interactive.annotation.PDAppearanceStream;
+import org.apache.pdfbox.pdmodel.interactive.annotation.PDAnnotation;
 import org.apache.pdfbox.pdmodel.interactive.annotation.PDAnnotationWidget;
 import org.apache.pdfbox.pdmodel.interactive.form.PDAcroForm;
 import org.apache.pdfbox.pdmodel.interactive.form.PDCheckBox;
@@ -361,6 +363,19 @@ public class DocuflexPdfServer {
           outputDocument.save(output);
           result = output.toByteArray();
         }
+      } else if ("rasterize".equals(operation)) {
+        List<Object> rasterPages = asArray(payload.get("rasterPages"));
+        try (PDDocument document = loadPdf(pdfBytes)) {
+          for (Object entry : rasterPages) {
+            Map<String, Object> rasterPage = asObject(entry);
+            int pageIndex = (int) asDouble(rasterPage.get("index"));
+            validatePageIndexes(List.of(pageIndex), document.getNumberOfPages());
+            replacePageWithImage(document, document.getPage(pageIndex), asString(rasterPage.get("imageBase64")));
+          }
+          ByteArrayOutputStream output = new ByteArrayOutputStream();
+          document.save(output);
+          result = output.toByteArray();
+        }
       } else {
         throw new IllegalArgumentException("Unsupported page operation.");
       }
@@ -368,6 +383,48 @@ public class DocuflexPdfServer {
       sendPdf(exchange, result);
     } catch (Exception error) {
       sendFailure(exchange, error, "Could not apply the requested page operation.");
+    }
+  }
+
+  /**
+   * Replaces everything drawn on a page with one full-page JPEG rendered by the
+   * editor. The page boxes and rotation stay as they are so existing form
+   * widgets keep their positions; the image is mapped onto the visible crop box
+   * in display orientation. Markup annotations are dropped because the editor
+   * already baked them into the image.
+   */
+  private static void replacePageWithImage(PDDocument document, PDPage page, String imageData) throws IOException {
+    if (imageData == null || imageData.isBlank()) throw new IllegalArgumentException("Missing raster image.");
+    int comma = imageData.indexOf(',');
+    byte[] imageBytes;
+    try {
+      imageBytes = Base64.getDecoder().decode(comma >= 0 ? imageData.substring(comma + 1) : imageData);
+    } catch (IllegalArgumentException error) {
+      throw new IllegalArgumentException("Invalid raster image data.", error);
+    }
+    if (imageBytes.length > 48 * 1024 * 1024) throw new IllegalArgumentException("Raster image is too large.");
+    PDImageXObject image = JPEGFactory.createFromByteArray(document, imageBytes);
+
+    List<PDAnnotation> widgets = new ArrayList<>();
+    for (PDAnnotation annotation : page.getAnnotations()) {
+      if (annotation instanceof PDAnnotationWidget) widgets.add(annotation);
+    }
+    page.setAnnotations(widgets);
+    page.setResources(new PDResources());
+    page.setContents(new PDStream(document));
+
+    PdfPoint bottomLeft = normalizedToPdfPoint(page, new NormalizedPoint(0, 1));
+    PdfPoint bottomRight = normalizedToPdfPoint(page, new NormalizedPoint(1, 1));
+    PdfPoint topLeft = normalizedToPdfPoint(page, new NormalizedPoint(0, 0));
+    try (PDPageContentStream content = new PDPageContentStream(
+        document, page, PDPageContentStream.AppendMode.OVERWRITE, true, false)) {
+      content.drawImage(image, new Matrix(
+          bottomRight.x - bottomLeft.x,
+          bottomRight.y - bottomLeft.y,
+          topLeft.x - bottomLeft.x,
+          topLeft.y - bottomLeft.y,
+          bottomLeft.x,
+          bottomLeft.y));
     }
   }
 

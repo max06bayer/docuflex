@@ -177,6 +177,14 @@
   let editLockedError = '';
   let showEditLockedPassword = false;
   let unlockingForExport = false;
+  const RASTER_DEFAULTS = { rotation: 0, fillEdges: true, exposure: 0, contrast: 0, saturation: 0, hue: 0, temperature: 0, sharpness: 0 };
+  const RASTER_DPI = 300;
+  const RASTER_MAX_PIXELS = 16_000_000;
+  const RASTER_BATCH_BYTES = 60 * 1024 * 1024;
+  const rasterFilterId = `raster-preview-${Math.random().toString(36).slice(2, 9)}`;
+  let rasterPanelOpen = false;
+  let rasterizing = false;
+  let rasterAdjust = { ...RASTER_DEFAULTS };
   let signPanelOpen = false;
   let addSignaturePanelOpen = false;
   /** @type {'draw' | 'image'} */
@@ -248,6 +256,12 @@
   const HTML_VIEW_TOOLS = new Set(['edit', 'pan', 'zoom']);
   const TEXT_MARK_TOOLS = new Set(['highlight', 'underline', 'crossout', 'blackout', 'whiteout']);
   const MIN_SHAPE_SIZE = 8;
+
+  $: rasterPipeline = rasterPipelineFor(rasterAdjust);
+  $: rasterTargetPages = rasterPanelOpen
+    ? new Set(selectedPages.size ? selectedPages : Array.from({ length: pageCount }, (_, index) => index))
+    : new Set();
+  $: rasterPreviewActive = rasterPanelOpen && !rasterPipeline.identity;
 
   $: if (activeTool !== 'eraser') eraserCursorVisible = false;
   $: if (activeTool !== observedTool) {
@@ -588,6 +602,267 @@
   export function openSearchPanel() {
     activeTool = 'search';
     showSearchPanel();
+  }
+
+  /** Pages the raster adjustments apply to: the sidebar selection, otherwise every page. */
+  function rasterPageIndexes() {
+    const selected = selectedPageIndexes();
+    return selected.length ? selected : Array.from({ length: pageCount }, (_, index) => index);
+  }
+
+  export function openRasterPanel() {
+    if (rasterPanelOpen) {
+      closeRasterPanel();
+      return;
+    }
+    // Leaving the text editor bakes pending edits into the PDF, and other tool
+    // panels share the same corner, so fall back to the select tool first.
+    activeTool = 'select';
+    colorPicker = null;
+    if (selectedShape) setShapeSelection(selectedShape.pageIndex, []);
+    rasterAdjust = { ...RASTER_DEFAULTS };
+    rasterPanelOpen = true;
+  }
+
+  /** Closing without rasterizing drops the live preview, so the page reverts. */
+  function closeRasterPanel() {
+    if (rasterizing) return;
+    rasterPanelOpen = false;
+    rasterAdjust = { ...RASTER_DEFAULTS };
+  }
+
+  /** @param {keyof typeof RASTER_DEFAULTS} key */
+  function resetRasterValue(key) {
+    rasterAdjust = { ...rasterAdjust, [key]: RASTER_DEFAULTS[key] };
+  }
+
+  /** @param {keyof typeof RASTER_DEFAULTS} key @param {number | boolean} value */
+  function setRasterValue(key, value) {
+    rasterAdjust = { ...rasterAdjust, [key]: value };
+  }
+
+  /**
+   * Turns the slider values into one shared set of coefficients. The live CSS
+   * preview (an SVG filter) and the final pixel pass both read from this, so
+   * what you see while dragging is what gets rasterized.
+   * @param {typeof RASTER_DEFAULTS} adjust
+   */
+  function rasterPipelineFor(adjust) {
+    const exposure = 2 ** (adjust.exposure / 100);
+    const contrast = adjust.contrast >= 0 ? 1 + adjust.contrast / 100 : 1 + adjust.contrast / 100 * 0.75;
+    const saturation = 1 + adjust.saturation / 100;
+    const hue = adjust.hue * Math.PI / 180;
+    const warmth = adjust.temperature / 100;
+    const sharpen = adjust.sharpness / 100 * 1.4;
+
+    // Same luminance weights as the SVG saturate and hueRotate primitives.
+    const sat = [
+      0.213 + 0.787 * saturation, 0.715 - 0.715 * saturation, 0.072 - 0.072 * saturation,
+      0.213 - 0.213 * saturation, 0.715 + 0.285 * saturation, 0.072 - 0.072 * saturation,
+      0.213 - 0.213 * saturation, 0.715 - 0.715 * saturation, 0.072 + 0.928 * saturation
+    ];
+    const cos = Math.cos(hue);
+    const sin = Math.sin(hue);
+    const rot = [
+      0.213 + cos * 0.787 - sin * 0.213, 0.715 - cos * 0.715 - sin * 0.715, 0.072 - cos * 0.072 + sin * 0.928,
+      0.213 - cos * 0.213 + sin * 0.143, 0.715 + cos * 0.285 + sin * 0.140, 0.072 - cos * 0.072 - sin * 0.283,
+      0.213 - cos * 0.213 - sin * 0.787, 0.715 - cos * 0.715 + sin * 0.715, 0.072 + cos * 0.928 + sin * 0.072
+    ];
+    const temp = [1 + 0.2 * warmth, 1 + 0.04 * warmth, 1 - 0.2 * warmth];
+    /** @param {number[]} a @param {number[]} b */
+    const multiply = (a, b) => Array.from({ length: 9 }, (_, index) => {
+      const row = Math.floor(index / 3);
+      const column = index % 3;
+      return a[row * 3] * b[column] + a[row * 3 + 1] * b[3 + column] + a[row * 3 + 2] * b[6 + column];
+    });
+    const colorMatrix = multiply(rot, sat).map((value, index) => value * temp[Math.floor(index / 3)]);
+
+    const angle = Math.abs(adjust.rotation) * Math.PI / 180;
+    const identity = adjust.exposure === 0 && adjust.contrast === 0 && adjust.saturation === 0 &&
+      adjust.hue === 0 && adjust.temperature === 0 && adjust.sharpness === 0 && adjust.rotation === 0;
+    return { exposure, contrast, colorMatrix, sharpen, angle: adjust.rotation * Math.PI / 180, absAngle: angle, fillEdges: adjust.fillEdges, identity };
+  }
+
+  /** Smallest zoom that keeps a rotated page covering its own frame (no white corners). @param {number} width @param {number} height @param {number} angle */
+  function rasterCoverScale(width, height, angle) {
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    return Math.max((width * cos + height * sin) / width, (width * sin + height * cos) / height);
+  }
+
+  /**
+   * Dependencies are passed in explicitly so the template re-evaluates on change.
+   * @param {boolean} active @param {Set<number>} targets @param {ReturnType<typeof rasterPipelineFor>} pipeline
+   * @param {number} index @param {{ width: number; height: number } | undefined} size
+   */
+  function rasterPreviewTransform(active, targets, pipeline, index, size) {
+    if (!active || !targets.has(index) || pipeline.angle === 0) return undefined;
+    const zoom = pipeline.fillEdges && size ? rasterCoverScale(size.width, size.height, pipeline.absAngle) : 1;
+    return `rotate(${pipeline.angle}rad) scale(${zoom})`;
+  }
+
+  /** @param {boolean} active @param {Set<number>} targets @param {number} index */
+  function rasterPreviewFilter(active, targets, index) {
+    if (!active || !targets.has(index)) return undefined;
+    return `url(#${rasterFilterId})`;
+  }
+
+  /**
+   * Applies exposure, contrast, the combined color matrix and sharpening to raw
+   * RGBA pixels, clamping between steps the same way SVG filter primitives do.
+   * @param {ImageData} imageData @param {ReturnType<typeof rasterPipelineFor>} pipeline @param {number} stride
+   */
+  function applyRasterPixels(imageData, pipeline, stride) {
+    const { data, width, height } = imageData;
+    const lut = new Float32Array(256);
+    for (let value = 0; value < 256; value += 1) {
+      const exposed = Math.min(1, value / 255 * pipeline.exposure);
+      lut[value] = clamp(exposed * pipeline.contrast + 0.5 - 0.5 * pipeline.contrast, 0, 1);
+    }
+    const [m0, m1, m2, m3, m4, m5, m6, m7, m8] = pipeline.colorMatrix;
+    for (let offset = 0; offset < data.length; offset += 4) {
+      const red = lut[data[offset]];
+      const green = lut[data[offset + 1]];
+      const blue = lut[data[offset + 2]];
+      data[offset] = (m0 * red + m1 * green + m2 * blue) * 255 + 0.5;
+      data[offset + 1] = (m3 * red + m4 * green + m5 * blue) * 255 + 0.5;
+      data[offset + 2] = (m6 * red + m7 * green + m8 * blue) * 255 + 0.5;
+    }
+    if (pipeline.sharpen <= 0) return;
+
+    // Cross-shaped unsharp kernel, spaced by `stride` so the effect at print
+    // resolution matches what the on-screen preview shows.
+    const source = new Uint8ClampedArray(data);
+    const amount = pipeline.sharpen;
+    const center = 1 + 4 * amount;
+    const rowBytes = width * 4;
+    for (let y = 0; y < height; y += 1) {
+      const up = Math.max(0, y - stride) * rowBytes;
+      const down = Math.min(height - 1, y + stride) * rowBytes;
+      const row = y * rowBytes;
+      for (let x = 0; x < width; x += 1) {
+        const left = Math.max(0, x - stride) * 4;
+        const right = Math.min(width - 1, x + stride) * 4;
+        const at = row + x * 4;
+        for (let channel = 0; channel < 3; channel += 1) {
+          data[at + channel] = center * source[at + channel] - amount * (
+            source[up + x * 4 + channel] + source[down + x * 4 + channel] + source[row + left + channel] + source[row + right + channel]
+          );
+        }
+      }
+    }
+  }
+
+  /** @param {Blob} blob @returns {Promise<string>} */
+  function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(reader.error ?? new Error('Could not read the rendered page.'));
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  /** Renders one page at print resolution with the current adjustments baked in. @param {number} pageIndex */
+  async function renderRasterPage(pageIndex) {
+    if (!pdfDocument) throw new Error('The document is not ready yet.');
+    const page = await pdfDocument.getPage(pageIndex + 1);
+    const pointViewport = page.getViewport({ scale: 1 });
+    const pixelScale = Math.min(RASTER_DPI / 72, Math.sqrt(RASTER_MAX_PIXELS / (pointViewport.width * pointViewport.height)));
+    const viewport = page.getViewport({ scale: pixelScale });
+    const width = Math.max(1, Math.floor(viewport.width));
+    const height = Math.max(1, Math.floor(viewport.height));
+
+    const source = document.createElement('canvas');
+    source.width = width;
+    source.height = height;
+    const sourceContext = source.getContext('2d', { willReadFrequently: true });
+    if (!sourceContext) throw new Error('Could not prepare the page canvas.');
+    sourceContext.fillStyle = '#fff';
+    sourceContext.fillRect(0, 0, width, height);
+    await page.render({ canvas: source, canvasContext: sourceContext, viewport, annotationMode: 2 }).promise;
+
+    const pipeline = rasterPipeline;
+    const imageData = sourceContext.getImageData(0, 0, width, height);
+    applyRasterPixels(imageData, pipeline, Math.max(1, Math.round(pixelScale / BASE_PAGE_SCALE)));
+    sourceContext.putImageData(imageData, 0, 0);
+
+    let output = source;
+    if (pipeline.angle !== 0) {
+      output = document.createElement('canvas');
+      output.width = width;
+      output.height = height;
+      const context = output.getContext('2d');
+      if (!context) throw new Error('Could not prepare the page canvas.');
+      context.fillStyle = '#fff';
+      context.fillRect(0, 0, width, height);
+      context.imageSmoothingEnabled = true;
+      context.imageSmoothingQuality = 'high';
+      const zoom = pipeline.fillEdges ? rasterCoverScale(width, height, pipeline.absAngle) : 1;
+      context.translate(width / 2, height / 2);
+      context.rotate(pipeline.angle);
+      context.scale(zoom, zoom);
+      context.drawImage(source, -width / 2, -height / 2);
+      source.width = 0;
+    }
+
+    const blob = await new Promise((resolve, reject) => output.toBlob(
+      (result) => result ? resolve(result) : reject(new Error('Could not encode the rendered page.')),
+      'image/jpeg',
+      0.93
+    ));
+    output.width = 0;
+    return blobToDataUrl(/** @type {Blob} */ (blob));
+  }
+
+  async function rasterizePages() {
+    if (rasterizing || pageOperationBusy || editorTransition || !pdfDocument) return;
+    const pages = rasterPageIndexes();
+    if (!pages.length) return;
+    const scrollState = capturePageScrollState();
+    const selectionBefore = new Set(selectedPages);
+    rasterizing = true;
+    pageOperationBusy = true;
+    editorTransition = pages.length === 1 ? 'Rasterizing Page' : `Rasterizing ${pages.length} Pages`;
+    try {
+      let bytes = await workingFile.arrayBuffer();
+      /** @type {{ index: number; imageBase64: string }[]} */
+      let batch = [];
+      let batchBytes = 0;
+      const flush = async () => {
+        if (!batch.length) return;
+        bytes = await requestPageOperation('rasterize', { rasterPages: batch }, bytes);
+        batch = [];
+        batchBytes = 0;
+      };
+      for (const [position, pageIndex] of pages.entries()) {
+        if (pages.length > 1) editorTransition = `Rasterizing Page ${position + 1} of ${pages.length}`;
+        const imageBase64 = await renderRasterPage(pageIndex);
+        batch.push({ index: pageIndex, imageBase64 });
+        batchBytes += imageBase64.length;
+        if (batchBytes >= RASTER_BATCH_BYTES) await flush();
+      }
+      await flush();
+
+      workingFile = new File([bytes], workingFile.name, { type: 'application/pdf', lastModified: Date.now() });
+      htmlEditorStarted = false;
+      htmlTextEditBaseFile = null;
+      htmlEditorReady = false;
+      htmlViewportMode = false;
+      rasterPanelOpen = false;
+      rasterAdjust = { ...RASTER_DEFAULTS };
+      await loadPdf(false, true, pageCount);
+      await restorePageScrollState(scrollState);
+      selectedPages = selectionBefore;
+      selectionAnchor = [...selectionBefore][0] ?? null;
+    } catch (error) {
+      console.error(error);
+      window.alert(error instanceof Error ? error.message : 'Could not rasterize the pages.');
+    } finally {
+      rasterizing = false;
+      pageOperationBusy = false;
+      editorTransition = '';
+    }
   }
 
   function showWatermarkPanel() {
@@ -1895,7 +2170,9 @@
     function clearPageSelection(event) {
       const target = event.target;
       if (target instanceof Element && target.closest('.page-context-menu')) return;
-      if (!(target instanceof Element) || !target.closest('.thumbnail-page')) {
+      // The rasterize panel works on the selected pages, so using it (or its
+      // top-bar button) must not drop the selection.
+      if (!(target instanceof Element) || !target.closest('.thumbnail-page, .raster-panel, [data-keeps-page-selection]')) {
         selectedPages = new Set();
         selectionAnchor = null;
       }
@@ -6043,7 +6320,11 @@
           onpointerdown={(event) => beginPagePointerDrag(event, index)}
         >
           <span class="page-pill">{index + 1}/{pageCount}</span>
-          <canvas></canvas>
+          <canvas
+            class:raster-preview={rasterPanelOpen}
+            style:filter={rasterPreviewFilter(rasterPreviewActive, rasterTargetPages, index)}
+            style:transform={rasterPreviewTransform(rasterPreviewActive, rasterTargetPages, rasterPipeline, index, pageSizes[index])}
+          ></canvas>
           {#if appliedWatermarkText}
             <span class="thumbnail-watermark">{appliedWatermarkText}</span>
           {/if}
@@ -6209,7 +6490,11 @@
           ? (shapes[index] ?? []).find((shape) => shape.id === editingTextShape?.id) ?? null
           : null}
         <div class="pdf-page" aria-label={`Page ${index + 1}`}>
-          <canvas></canvas>
+          <canvas
+            class:raster-preview={rasterPanelOpen}
+            style:filter={rasterPreviewFilter(rasterPreviewActive, rasterTargetPages, index)}
+            style:transform={rasterPreviewTransform(rasterPreviewActive, rasterTargetPages, rasterPipeline, index, pageSizes[index])}
+          ></canvas>
           {#if appliedWatermarkText && pageSizes[index]}
             <svg
               class="annotation-layer watermark-layer"
@@ -7478,6 +7763,142 @@
           </button>
         </footer>
       </form>
+    </div>
+  {/if}
+  {#snippet rasterSlider(/** @type {'rotation' | 'exposure' | 'contrast' | 'saturation' | 'hue' | 'temperature' | 'sharpness'} */ key, /** @type {string} */ label, /** @type {number} */ min, /** @type {number} */ max, /** @type {number} */ step, /** @type {string} */ track, /** @type {string | undefined} */ display = undefined)}
+    {@const value = rasterAdjust[key]}
+    {@const neutral = RASTER_DEFAULTS[key]}
+    {@const position = (value - min) / (max - min)}
+    {@const origin = (neutral - min) / (max - min)}
+    <div class="raster-slider" class:changed={value !== neutral}>
+      <div class="raster-slider-label">
+        <span>{label}</span>
+        <button
+          type="button"
+          aria-label={`Reset ${label}`}
+          title="Reset"
+          disabled={value === neutral}
+          onclick={() => resetRasterValue(key)}
+        >{display ?? `${value > 0 && min < 0 ? '+' : ''}${value}`}</button>
+      </div>
+      <div
+        class={`raster-track ${track}`}
+        style:--raster-position={`${position * 100}%`}
+        style:--raster-fill-start={`${Math.min(position, origin) * 100}%`}
+        style:--raster-fill-end={`${(1 - Math.max(position, origin)) * 100}%`}
+        style:--raster-hue={`hsl(${(value + 360) % 360} 92% 55%)`}
+        style:--raster-temp={value >= 0 ? `color-mix(in srgb, #ff9a3c ${value}%, #ffffff)` : `color-mix(in srgb, #4a8dff ${-value}%, #ffffff)`}
+        style:--raster-exposure={`hsl(0 0% ${50 + value * 0.5}%)`}
+      >
+        <span class="raster-track-fill" aria-hidden="true"></span>
+        {#if min < 0}<span class="raster-track-origin" aria-hidden="true"></span>{/if}
+        <input
+          type="range"
+          aria-label={label}
+          {min}
+          {max}
+          {step}
+          {value}
+          disabled={rasterizing}
+          ondblclick={() => resetRasterValue(key)}
+          oninput={(event) => setRasterValue(key, Number(event.currentTarget.value))}
+        />
+      </div>
+    </div>
+  {/snippet}
+  {#if rasterPanelOpen}
+    {@const sharpKernel = rasterPipeline.sharpen}
+    <svg class="raster-filter-defs" width="0" height="0" aria-hidden="true">
+      <filter id={rasterFilterId} x="0" y="0" width="1" height="1" color-interpolation-filters="sRGB">
+        <feComponentTransfer>
+          <feFuncR type="linear" slope={rasterPipeline.exposure} />
+          <feFuncG type="linear" slope={rasterPipeline.exposure} />
+          <feFuncB type="linear" slope={rasterPipeline.exposure} />
+        </feComponentTransfer>
+        <feComponentTransfer>
+          <feFuncR type="linear" slope={rasterPipeline.contrast} intercept={0.5 - 0.5 * rasterPipeline.contrast} />
+          <feFuncG type="linear" slope={rasterPipeline.contrast} intercept={0.5 - 0.5 * rasterPipeline.contrast} />
+          <feFuncB type="linear" slope={rasterPipeline.contrast} intercept={0.5 - 0.5 * rasterPipeline.contrast} />
+        </feComponentTransfer>
+        <feColorMatrix
+          type="matrix"
+          values={`${rasterPipeline.colorMatrix.slice(0, 3).join(' ')} 0 0 ${rasterPipeline.colorMatrix.slice(3, 6).join(' ')} 0 0 ${rasterPipeline.colorMatrix.slice(6, 9).join(' ')} 0 0 0 0 0 1 0`}
+        />
+        {#if sharpKernel > 0}
+          <feConvolveMatrix
+            order="3"
+            kernelMatrix={`0 ${-sharpKernel} 0 ${-sharpKernel} ${1 + 4 * sharpKernel} ${-sharpKernel} 0 ${-sharpKernel} 0`}
+            divisor="1"
+            edgeMode="duplicate"
+            preserveAlpha="true"
+          />
+        {/if}
+      </filter>
+    </svg>
+    <div
+      class="protect-panel raster-panel"
+      role="dialog"
+      aria-label="Rasterize"
+      transition:fly={{ x: 18, duration: 240, easing: cubicOut }}
+    >
+      <header class="protect-panel-header">
+        <img src="/color.svg" alt="" />
+        <h2>Rasterize</h2>
+        <button class="protect-panel-close" type="button" aria-label="Close and discard adjustments" onclick={closeRasterPanel}>
+          <span></span>
+          <span></span>
+        </button>
+      </header>
+      <div class="raster-panel-content">
+        <div class="raster-scroll">
+          <p class="raster-scope">
+            {#if selectedPages.size}
+              Applies to <strong>{selectedPages.size} selected {selectedPages.size === 1 ? 'page' : 'pages'}</strong>.
+            {:else}
+              Applies to <strong>all {pageCount} {pageCount === 1 ? 'page' : 'pages'}</strong>. Select pages in the sidebar to limit it.
+            {/if}
+          </p>
+
+          <section class="raster-section" aria-label="Rotation">
+            {@render rasterSlider('rotation', 'Rotation', -45, 45, 0.5, 'rotation-track', `${rasterAdjust.rotation > 0 ? '+' : ''}${rasterAdjust.rotation}°`)}
+            <button
+              class:active={rasterAdjust.fillEdges}
+              class="drawing-toggle raster-toggle"
+              type="button"
+              aria-pressed={rasterAdjust.fillEdges}
+              onclick={() => setRasterValue('fillEdges', !rasterAdjust.fillEdges)}
+            ><span>Zoom to Fill Edges</span><em>{rasterAdjust.fillEdges ? 'On' : 'Off'}</em></button>
+          </section>
+
+          <section class="raster-section" aria-label="Light">
+            {@render rasterSlider('exposure', 'Exposure', -100, 100, 1, 'exposure-track')}
+            {@render rasterSlider('contrast', 'Contrast', -100, 100, 1, 'contrast-track')}
+          </section>
+
+          <section class="raster-section" aria-label="Color">
+            {@render rasterSlider('saturation', 'Saturation', -100, 100, 1, 'saturation-track')}
+            {@render rasterSlider('hue', 'Hue', -180, 180, 1, 'hue-track', `${rasterAdjust.hue > 0 ? '+' : ''}${rasterAdjust.hue}°`)}
+            {@render rasterSlider('temperature', 'Temperature', -100, 100, 1, 'temperature-track')}
+          </section>
+
+          <section class="raster-section" aria-label="Detail">
+            {@render rasterSlider('sharpness', 'Sharpness', 0, 100, 1, 'sharpness-track')}
+          </section>
+        </div>
+
+        <footer class="raster-actions">
+          <button
+            class="signature-action secondary"
+            type="button"
+            disabled={rasterizing || rasterPipeline.identity}
+            onclick={() => rasterAdjust = { ...RASTER_DEFAULTS, fillEdges: rasterAdjust.fillEdges }}
+          >Reset</button>
+          <button class="signature-action primary" type="button" disabled={rasterizing || !pdfReady} onclick={rasterizePages}>
+            <img src="/color.svg" alt="" />
+            <span>{rasterizing ? 'Rasterizing…' : 'Rasterize'}</span>
+          </button>
+        </footer>
+      </div>
     </div>
   {/if}
   {#if signPanelOpen}
@@ -9063,6 +9484,291 @@
     width: 24px;
     height: 24px;
     filter: brightness(0) invert(1);
+  }
+
+  .raster-filter-defs {
+    position: absolute;
+    width: 0;
+    height: 0;
+    overflow: hidden;
+    pointer-events: none;
+  }
+
+  .thumbnail-page:has(> canvas.raster-preview) {
+    overflow: hidden;
+  }
+
+  canvas.raster-preview {
+    transform-origin: center center;
+    will-change: transform, filter;
+  }
+
+  .protect-panel.raster-panel {
+    height: auto;
+    max-height: calc(100% - 40px);
+    grid-template-rows: 50px minmax(0, 1fr);
+  }
+
+  .raster-panel-content {
+    display: grid;
+    grid-template-rows: minmax(0, 1fr) auto;
+    min-height: 0;
+    overflow: hidden;
+    background: #fafafa;
+  }
+
+  .raster-scroll {
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: none;
+  }
+
+  .raster-scroll::-webkit-scrollbar {
+    display: none;
+  }
+
+  .raster-scope {
+    margin: 0;
+    padding: 14px 18px 13px;
+    border-bottom: 1px solid #dedede;
+    color: #7a7a7a;
+    font-size: 16px;
+    line-height: 1.38;
+    letter-spacing: -0.2px;
+  }
+
+  .raster-scope strong {
+    color: #000;
+    font-weight: 400;
+  }
+
+  .raster-section {
+    display: grid;
+    gap: 14px;
+    padding: 15px 18px 16px;
+    border-bottom: 1px solid #dedede;
+  }
+
+  .raster-section:last-child {
+    border-bottom: 0;
+  }
+
+  .raster-slider {
+    display: grid;
+    gap: 8px;
+  }
+
+  .raster-slider-label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 22px;
+    color: #000;
+    font-size: 18px;
+    line-height: 1;
+    letter-spacing: -0.25px;
+  }
+
+  .raster-slider-label button {
+    min-width: 46px;
+    height: 24px;
+    padding: 0 7px;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    background: transparent;
+    color: #7a7a7a;
+    font: inherit;
+    font-size: 16px;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+    cursor: pointer;
+    transition: color 160ms ease, background-color 160ms ease, border-color 160ms ease;
+  }
+
+  .raster-slider.changed .raster-slider-label button {
+    color: #0878f9;
+  }
+
+  .raster-slider-label button:not(:disabled):hover {
+    border-color: #d7d7d7;
+    background: #f3f3f3;
+  }
+
+  .raster-slider-label button:disabled {
+    cursor: default;
+  }
+
+  .raster-track {
+    position: relative;
+    box-sizing: border-box;
+    height: 18px;
+    border-radius: 999px;
+    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
+    background: #f3f3f3;
+  }
+
+  .raster-track-fill {
+    position: absolute;
+    top: 50%;
+    left: var(--raster-fill-start);
+    right: var(--raster-fill-end);
+    height: 4px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.42);
+    transform: translateY(-50%);
+    pointer-events: none;
+  }
+
+  .raster-track-origin {
+    position: absolute;
+    top: 3px;
+    bottom: 3px;
+    left: 50%;
+    width: 1.5px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.32);
+    transform: translateX(-50%);
+    pointer-events: none;
+  }
+
+  /* Each track previews its own effect from left to right. */
+  .rotation-track {
+    background:
+      repeating-linear-gradient(90deg, transparent 0 calc(10% - 1px), rgba(0, 0, 0, 0.13) calc(10% - 1px) 10%) 9px 50% / calc(100% - 18px) 8px no-repeat,
+      #f3f3f3;
+  }
+
+  .exposure-track {
+    background: linear-gradient(90deg, #1b1b1b, #8c8c8c 50%, #ffffff);
+  }
+
+  .contrast-track {
+    background:
+      linear-gradient(90deg, #a3a3a3, rgba(163, 163, 163, 0)),
+      linear-gradient(180deg, #ffffff 50%, #111111 50%);
+  }
+
+  .saturation-track {
+    background:
+      linear-gradient(90deg, #9b9b9b, rgba(155, 155, 155, 0)),
+      linear-gradient(90deg, #ff3b30, #ff9500, #ffcc00, #34c759, #0a84ff, #af52de);
+  }
+
+  .hue-track {
+    background: linear-gradient(90deg, #0ff, #00f, #f0f, #f00, #ff0, #0f0, #0ff);
+  }
+
+  .temperature-track {
+    background: linear-gradient(90deg, #3d86ff, #f4f4f4 50%, #ff9a3c);
+  }
+
+  .sharpness-track {
+    background:
+      linear-gradient(90deg, rgba(243, 243, 243, 0.94), rgba(243, 243, 243, 0) 85%),
+      repeating-linear-gradient(90deg, #1a1a1a 0 2px, #f3f3f3 2px 5px);
+  }
+
+  .exposure-track .raster-track-fill,
+  .contrast-track .raster-track-fill,
+  .saturation-track .raster-track-fill,
+  .hue-track .raster-track-fill,
+  .temperature-track .raster-track-fill,
+  .sharpness-track .raster-track-fill,
+  .exposure-track .raster-track-origin,
+  .contrast-track .raster-track-origin,
+  .saturation-track .raster-track-origin,
+  .hue-track .raster-track-origin,
+  .temperature-track .raster-track-origin {
+    display: none;
+  }
+
+  .raster-track input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    background: transparent;
+    cursor: ew-resize;
+    -webkit-appearance: none;
+    appearance: none;
+    touch-action: none;
+  }
+
+  .raster-track input:focus-visible {
+    outline: none;
+  }
+
+  .raster-track input::-webkit-slider-runnable-track {
+    height: 18px;
+    background: transparent;
+  }
+
+  .raster-track input::-moz-range-track {
+    height: 18px;
+    background: transparent;
+  }
+
+  .raster-track input::-webkit-slider-thumb {
+    box-sizing: border-box;
+    width: 20px;
+    height: 20px;
+    margin-top: -1px;
+    border: 3px solid #fff;
+    border-radius: 50%;
+    background: var(--raster-thumb, #fff);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+    -webkit-appearance: none;
+    appearance: none;
+    transition: transform 140ms ease;
+  }
+
+  .raster-track input::-moz-range-thumb {
+    box-sizing: border-box;
+    width: 20px;
+    height: 20px;
+    border: 3px solid #fff;
+    border-radius: 50%;
+    background: var(--raster-thumb, #fff);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  }
+
+  .raster-track input:active::-webkit-slider-thumb {
+    transform: scale(1.12);
+  }
+
+  .raster-track input:focus-visible::-webkit-slider-thumb {
+    box-shadow: 0 0 0 3px rgba(8, 120, 249, 0.35), 0 1px 4px rgba(0, 0, 0, 0.5);
+  }
+
+  .exposure-track { --raster-thumb: var(--raster-exposure); }
+  .hue-track { --raster-thumb: var(--raster-hue); }
+  .temperature-track { --raster-thumb: var(--raster-temp); }
+
+  .raster-toggle {
+    width: 100%;
+  }
+
+  .raster-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.4fr);
+    gap: 10px;
+    box-sizing: border-box;
+    padding: 17px 18px;
+    border-top: 1px solid #cacaca;
+    background: #fafafa;
+  }
+
+  .raster-actions .signature-action:disabled {
+    cursor: default;
+    opacity: 0.5;
+  }
+
+  .raster-actions .signature-action.primary:disabled {
+    cursor: progress;
+    opacity: 0.72;
   }
 
   .protect-panel.sign-panel {

@@ -87,7 +87,7 @@
   $: sortModeText = sortMode === 'size' ? 'Size' : sortMode === 'name' ? 'Name' : 'Recent';
   /** @type {HTMLInputElement | undefined} */
   let fileInput;
-  /** @type {{ downloadPdf: () => Promise<void>; exportPdfForSave: () => Promise<{ blob: Blob; suggestedName: string }>; openSearchPanel: () => void; undo: () => Promise<void>; redo: () => Promise<void> } | undefined} */
+  /** @type {{ downloadPdf: () => Promise<void>; exportPdfForSave: () => Promise<{ blob: Blob; suggestedName: string }>; openSearchPanel: () => void; openRasterPanel: () => void; undo: () => Promise<void>; redo: () => Promise<void> } | undefined} */
   let pdfEditor;
   let isDownloading = false;
   let isSaving = false;
@@ -678,6 +678,20 @@
 
     <nav class="utilities" aria-label="Editor utilities">
       {#if activeTab !== null}
+        {@const rasterUtility = { label: 'Adjust & Rasterize', description: 'Rotate, color-correct and rasterize pages.' }}
+        <button
+          class="utility-button"
+          data-keeps-page-selection
+          aria-label={rasterUtility.label}
+          aria-describedby={utilityTooltip?.label === rasterUtility.label ? 'utility-tooltip' : undefined}
+          onmouseenter={(event) => scheduleUtilityTooltip(rasterUtility, event.currentTarget)}
+          onmouseleave={hideUtilityTooltip}
+          onfocus={(event) => scheduleUtilityTooltip(rasterUtility, event.currentTarget)}
+          onblur={hideUtilityTooltip}
+          onclick={() => { hideUtilityTooltip(); pdfEditor?.openRasterPanel(); }}
+        >
+          <img src="/color.svg" alt="" />
+        </button>
         <button
           class="utility-button"
           aria-label={isSaving ? 'Saving PDF' : 'Save'}
