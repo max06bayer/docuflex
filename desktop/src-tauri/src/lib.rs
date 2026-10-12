@@ -314,6 +314,9 @@ fn spawn_services(
             format!("http://127.0.0.1:{BACKEND_PORT}"),
         )
         .env("BODY_SIZE_LIMIT", (230_u64 * 1024 * 1024).to_string())
+        // Turns on the local MCP server (/mcp) so AI agents on this computer
+        // can drive the editor. The hosted web build never sets this.
+        .env("DOCUFLEX_MCP", "1")
         // The desktop invokes only its checksum-pinned bundled tools. Linux's
         // RLIMIT_NPROC counts every process owned by the logged-in user, so the
         // server profile's limit can prevent pdf2htmlEX from forking on a
@@ -527,7 +530,10 @@ pub fn run() {
                     .title("Docuflex")
                     .inner_size(1440.0, 920.0)
                     .min_inner_size(960.0, 640.0)
-                    .center();
+                    .center()
+                    // MCP agents drive the editor while the window is behind
+                    // their terminal; a throttled webview would stall rendering.
+                    .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled);
             #[cfg(target_os = "macos")]
             let window_builder = window_builder
                 .title_bar_style(TitleBarStyle::Overlay)

@@ -2224,6 +2224,9 @@ public class DocuflexPdfServer {
       List<ImageEdit> imageEdits) throws IOException {
     EditResult result = new EditResult();
     try (PDDocument document = loadPdf(pdfBytes)) {
+      if (isEditRestricted(document)) {
+        throw new IllegalArgumentException("This PDF is edit protected. Remove the protection to edit its text.");
+      }
       document.setAllSecurityToBeRemoved(true);
       for (int editIndex = 0; editIndex < edits.size(); editIndex++) {
         TextEdit edit = edits.get(editIndex);

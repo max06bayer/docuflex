@@ -21,6 +21,18 @@
   export let file;
   /** Comment view toggled from the top bar: shows comments and turns clicks / text selection into new comments. */
   export let commentMode = false;
+  /** Tab id this editor belongs to; captured once so a tab switch can't relabel the state it saves. */
+  /** @type {number | null} */
+  export let documentId = null;
+  /**
+   * The tab's editor state from the last time it was shown. Switching tabs
+   * rebuilds the editor, so without it all unsaved edits would be lost.
+   * @type {any}
+   */
+  export let savedState = null;
+  /** @type {(documentId: number | null, state: any) => void} */
+  export let onSaveState = () => {};
+  const ownDocumentId = documentId;
   /** @type {{ enabled: boolean; password: string }} */
   export let protection = { enabled: false, password: '' };
   /** @type {(protection: { enabled: boolean; password: string }) => void} */
@@ -1045,7 +1057,7 @@
       selectionAnchor = [...selectionBefore][0] ?? null;
     } catch (error) {
       console.error(error);
-      window.alert(error instanceof Error ? error.message : 'Could not rasterize the pages.');
+      reportEditorError(error instanceof Error ? error.message : 'Could not rasterize the pages.');
     } finally {
       rasterizing = false;
       pageOperationBusy = false;
@@ -1546,7 +1558,7 @@
       await loadPdf(false);
     } catch (error) {
       console.error(error);
-      window.alert(error instanceof Error ? error.message : 'Could not recognize text in this PDF.');
+      reportEditorError(error instanceof Error ? error.message : 'Could not recognize text in this PDF.');
     } finally {
       editorTransition = '';
       if (activeTool === 'ocr') activeTool = 'select';
@@ -2131,7 +2143,7 @@
       }
     } catch (error) {
       console.error(error);
-      window.alert(error instanceof Error ? error.message : 'Could not import this image.');
+      reportEditorError(error instanceof Error ? error.message : 'Could not import this image.');
     } finally {
       input.value = '';
     }
@@ -2286,7 +2298,8 @@
     } catch (error) {
       console.warn('Could not restore saved signatures:', error);
     }
-    loadPdf();
+    if (savedState) restoreEditorState(savedState);
+    else loadPdf();
     /** @type {{ x: number; y: number } | null} */
     let pointerStart = null;
     /** @type {{ node: Text; start: number; end: number } | null} */
@@ -4566,7 +4579,7 @@
         await expandCroppedPagesForEditing();
       } catch (error) {
         console.error(error);
-        window.alert(error instanceof Error ? error.message : 'Could not prepare the full page for cropping.');
+        reportEditorError(error instanceof Error ? error.message : 'Could not prepare the full page for cropping.');
       } finally {
         if (generation === editorTransitionGeneration) editorTransition = '';
       }
@@ -6276,7 +6289,7 @@
     } catch (error) {
       console.error(error);
       pageDragPreviewOrder = [];
-      window.alert(error instanceof Error ? error.message : 'Could not reorder the pages.');
+      reportEditorError(error instanceof Error ? error.message : 'Could not reorder the pages.');
     } finally {
       pageOperationBusy = false;
       editorTransition = '';
@@ -6298,7 +6311,7 @@
       pageContextMenu = null;
     } catch (error) {
       console.error(error);
-      window.alert(error instanceof Error ? error.message : 'Could not copy the pages.');
+      reportEditorError(error instanceof Error ? error.message : 'Could not copy the pages.');
     } finally {
       pageOperationBusy = false;
     }
@@ -6335,7 +6348,7 @@
       selectionAnchor = insertAt;
     } catch (error) {
       console.error(error);
-      window.alert(error instanceof Error ? error.message : 'Could not paste the pages.');
+      reportEditorError(error instanceof Error ? error.message : 'Could not paste the pages.');
     } finally {
       pageOperationBusy = false;
       editorTransition = '';
@@ -6418,7 +6431,7 @@
       selectionAnchor = insertAt;
     } catch (error) {
       console.error(error);
-      window.alert(error instanceof Error ? error.message : 'Could not add the dropped PDF.');
+      reportEditorError(error instanceof Error ? error.message : 'Could not add the dropped PDF.');
     } finally {
       externalPdfDropIndex = null;
       pageOperationBusy = false;
@@ -6524,7 +6537,7 @@
       selectionAnchor = pages[0] ?? null;
     } catch (error) {
       console.error(error);
-      window.alert(error instanceof Error ? error.message : 'Could not rotate the pages.');
+      reportEditorError(error instanceof Error ? error.message : 'Could not rotate the pages.');
     } finally {
       pageOperationBusy = false;
       editorTransition = '';
@@ -6557,7 +6570,7 @@
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (error) {
       console.error(error);
-      window.alert(error instanceof Error ? error.message : 'Could not export the pages.');
+      reportEditorError(error instanceof Error ? error.message : 'Could not export the pages.');
     } finally {
       pageOperationBusy = false;
       editorTransition = '';
@@ -6897,31 +6910,36 @@
    * the form fields kept as real fields, and the editor's additions are placed
    * on top exactly as in a normal export.
    */
+  /** The print copy of an edit-protected file, with the editor's additions on top. */
+  async function exportFlattenedBlob() {
+    let sourcePdf = await readWorkingPdf();
+    if (htmlEditorStarted && htmlEditor?.applyTextEdits) sourcePdf = await htmlEditor.applyTextEdits(sourcePdf);
+    const response = await fetch('/api/pdf/export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        pdfBase64: arrayBufferToBase64(sourcePdf),
+        annotations: exportableAnnotations(),
+        comments: exportableComments(),
+        commentReplies: exportableCommentReplies(),
+        encryptionPassword: encryptionEnabled ? protectionPassword : '',
+        printCopy: true
+      })
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => null);
+      throw new Error(error?.error ?? `PDF export failed (${response.status}).`);
+    }
+    return response.blob();
+  }
+
   async function downloadFlattened() {
     if (!editLocked || !editPrintAllowed || flatteningPdf || editorTransition) return false;
     editLockedError = '';
     flatteningPdf = true;
     editorTransition = 'Flattening PDF';
     try {
-      let sourcePdf = await readWorkingPdf();
-      if (htmlEditorStarted && htmlEditor?.applyTextEdits) sourcePdf = await htmlEditor.applyTextEdits(sourcePdf);
-      const response = await fetch('/api/pdf/export', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          pdfBase64: arrayBufferToBase64(sourcePdf),
-          annotations: exportableAnnotations(),
-          comments: exportableComments(),
-          commentReplies: exportableCommentReplies(),
-          encryptionPassword: encryptionEnabled ? protectionPassword : '',
-          printCopy: true
-        })
-      });
-      if (!response.ok) {
-        const error = await response.json().catch(() => null);
-        throw new Error(error?.error ?? `PDF export failed (${response.status}).`);
-      }
-      const url = URL.createObjectURL(await response.blob());
+      const url = URL.createObjectURL(await exportFlattenedBlob());
       const anchor = document.createElement('a');
       anchor.href = url;
       anchor.download = `${workingFile.name.replace(/\.pdf$/i, '') || 'document'}-flattened.pdf`;
@@ -6938,7 +6956,988 @@
     }
   }
 
+  // ---------------------------------------------------------------------
+  // MCP tools. DocuflexApp relays tool calls from the local MCP server here.
+  // Agents speak PDF points from the page's top-left and 1-based page
+  // numbers; the editor works in CSS pixels at BASE_PAGE_SCALE.
+  // ---------------------------------------------------------------------
+
+  /** Set while an MCP call runs, so editor errors go back to the agent instead of a blocking alert. */
+  /** @type {string[] | null} */
+  let mcpErrors = null;
+
+  /** @param {string} message */
+  function reportEditorError(message) {
+    if (mcpErrors) mcpErrors.push(message);
+    else window.alert(message);
+  }
+
+  /** @param {number} value */
+  const toPx = (value) => value * BASE_PAGE_SCALE;
+  /** @param {number} value */
+  const toPt = (value) => Math.round((value / BASE_PAGE_SCALE) * 100) / 100;
+
+  /** @param {unknown} value */
+  function mcpPageIndex(value) {
+    const number = Number(value);
+    if (!Number.isInteger(number) || number < 1 || number > pageCount) {
+      throw new Error(`Page ${value} does not exist. The document has ${pageCount} page${pageCount === 1 ? '' : 's'}.`);
+    }
+    return number - 1;
+  }
+
+  /** @param {unknown} value @param {string} fallback */
+  function mcpColor(value, fallback) {
+    if (typeof value !== 'string') return fallback;
+    const hex = value.trim().replace(/^#/, '');
+    if (!/^[0-9a-f]{6}$/i.test(hex)) throw new Error(`Invalid color "${value}". Use a hex color like "#1a73e8".`);
+    return `#${hex.toUpperCase()}`;
+  }
+
+  async function mcpWaitUntilReady() {
+    for (let attempt = 0; attempt < 600; attempt += 1) {
+      if (pdfReady && !editorTransition && !pageOperationBusy && !passwordUnlockOpen) return;
+      if (passwordUnlockOpen) throw new Error('This PDF needs its password before it can be edited. Enter it in the Docuflex window.');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error('The document is still loading.');
+  }
+
+  /** Leaves the text editor (which bakes its edits) so object tools act on the normal page view. */
+  async function mcpEnsureSelectTool() {
+    if (activeTool !== 'select') {
+      activeTool = 'select';
+      await tick();
+    }
+    await mcpWaitUntilReady();
+  }
+
+  /** @param {{ x: number; y: number; width: number; height: number }} rect */
+  const rectToPt = (rect) => ({ x: toPt(rect.x), y: toPt(rect.y), width: toPt(rect.width), height: toPt(rect.height) });
+
+  /**
+   * Text runs of a page in points (top-left origin), with per-character
+   * offsets so substrings can be located.
+   * @param {number} pageIndex
+   */
+  async function mcpTextRuns(pageIndex) {
+    if (!pdfDocument) throw new Error('No document is open.');
+    const { Util } = await import('pdfjs-dist');
+    const page = await pdfDocument.getPage(pageIndex + 1);
+    const viewport = page.getViewport({ scale: 1 });
+    const content = await page.getTextContent();
+    /** @type {{ text: string; x: number; y: number; width: number; height: number; font?: string }[]} */
+    const runs = [];
+    for (const item of content.items) {
+      if (!('str' in item) || !item.str) continue;
+      const font = /** @type {any} */ (content.styles)?.[item.fontName]?.fontFamily;
+      const transform = Util.transform(viewport.transform, item.transform);
+      const fontHeight = Math.hypot(transform[2], transform[3]);
+      const runWidth = item.width * viewport.scale;
+      runs.push({
+        text: item.str,
+        x: Math.round(transform[4] * 100) / 100,
+        y: Math.round((transform[5] - fontHeight) * 100) / 100,
+        width: Math.round(runWidth * 100) / 100,
+        height: Math.round(fontHeight * 100) / 100,
+        ...(font ? { font } : {})
+      });
+    }
+    return { runs, width: viewport.width, height: viewport.height };
+  }
+
+  /** @type {CanvasRenderingContext2D | null} */
+  let mcpMeasureContext = null;
+
+  /**
+   * Horizontal offset of a character inside a text run. Proportional fonts
+   * make character counting drift, so the prefix is measured in the run's
+   * font family and scaled to the run's real width.
+   * @param {{ text: string; width: number; height: number; font?: string }} run @param {number} index
+   */
+  function mcpTextOffset(run, index) {
+    if (index <= 0) return 0;
+    if (index >= run.text.length) return run.width;
+    mcpMeasureContext ??= document.createElement('canvas').getContext('2d');
+    if (!mcpMeasureContext) return (run.width * index) / run.text.length;
+    mcpMeasureContext.font = `100px ${run.font || 'sans-serif'}`;
+    const full = mcpMeasureContext.measureText(run.text).width;
+    if (!full) return (run.width * index) / run.text.length;
+    return (run.width * mcpMeasureContext.measureText(run.text.slice(0, index)).width) / full;
+  }
+
+  /**
+   * Finds text on pages. Matches inside one run get a proportional box;
+   * matches spanning runs on the same line are joined.
+   * @param {string} query @param {{ pageIndex?: number; caseSensitive?: boolean }} [options]
+   */
+  async function mcpFindText(query, options = {}) {
+    const needle = options.caseSensitive ? query : query.toLowerCase();
+    /** @type {{ page: number; text: string; rects: { x: number; y: number; width: number; height: number }[] }[]} */
+    const matches = [];
+    const indexes = options.pageIndex === undefined ? Array.from({ length: pageCount }, (_, index) => index) : [options.pageIndex];
+    for (const pageIndex of indexes) {
+      const { runs } = await mcpTextRuns(pageIndex);
+      // Join runs into lines so phrases split across runs are still found.
+      /** @type {{ text: string; parts: { start: number; run: typeof runs[number] }[] }[]} */
+      const lines = [];
+      for (const run of runs) {
+        const line = lines.at(-1);
+        const lastPart = line?.parts.at(-1)?.run;
+        if (line && lastPart && Math.abs(lastPart.y - run.y) < Math.max(2, run.height * 0.4) && run.x >= lastPart.x) {
+          const gap = run.x - (lastPart.x + lastPart.width) > run.height * 0.15 && !line.text.endsWith(' ') && !run.text.startsWith(' ') ? ' ' : '';
+          line.text += gap;
+          line.parts.push({ start: line.text.length, run });
+          line.text += run.text;
+        } else {
+          lines.push({ text: run.text, parts: [{ start: 0, run }] });
+        }
+      }
+      for (const line of lines) {
+        const haystack = options.caseSensitive ? line.text : line.text.toLowerCase();
+        let from = 0;
+        while (from <= haystack.length - needle.length) {
+          const at = haystack.indexOf(needle, from);
+          if (at < 0) break;
+          const end = at + needle.length;
+          /** @type {{ x: number; y: number; width: number; height: number }[]} */
+          const pieces = [];
+          for (const part of line.parts) {
+            const partEnd = part.start + part.run.text.length;
+            const overlapStart = Math.max(at, part.start);
+            const overlapEnd = Math.min(end, partEnd);
+            if (overlapEnd <= overlapStart) continue;
+            const from = mcpTextOffset(part.run, overlapStart - part.start);
+            const to = mcpTextOffset(part.run, overlapEnd - part.start);
+            pieces.push({ x: part.run.x + from, y: part.run.y, width: to - from, height: part.run.height });
+          }
+          if (pieces.length) {
+            const left = Math.min(...pieces.map((piece) => piece.x));
+            const top = Math.min(...pieces.map((piece) => piece.y));
+            const right = Math.max(...pieces.map((piece) => piece.x + piece.width));
+            const bottom = Math.max(...pieces.map((piece) => piece.y + piece.height));
+            matches.push({
+              page: pageIndex + 1,
+              text: line.text.slice(at, end),
+              rects: [{ x: Math.round(left * 100) / 100, y: Math.round(top * 100) / 100, width: Math.round((right - left) * 100) / 100, height: Math.round((bottom - top) * 100) / 100 }]
+            });
+          }
+          from = at + Math.max(1, needle.length);
+        }
+      }
+    }
+    return matches;
+  }
+
+  /** @param {AnnotationShape} shape @param {number} pageIndex */
+  function mcpDescribeShape(shape, pageIndex) {
+    const kind = shape.existingField ? 'form-field' : shape.type === 'textfield' ? 'text' : shape.type === 'input' || shape.type === 'checkbox' ? 'form-field' : shape.type;
+    return {
+      objectId: shape.id,
+      kind,
+      type: shape.type,
+      page: pageIndex + 1,
+      x: toPt(shape.x),
+      y: toPt(shape.y),
+      width: toPt(shape.width),
+      height: toPt(shape.height),
+      rotation: Math.round(shape.rotation * 100) / 100,
+      ...(shape.type === 'textfield' ? { text: shape.text ?? '', fontSize: toPt(shape.fontSize ?? 16), fontFamily: shape.fontFamily ?? 'Helvetica', color: shape.textColor ?? '#171717' } : {}),
+      ...(shape.type === 'input' || shape.type === 'checkbox' ? { name: shape.fieldName ?? '', value: shape.fieldValue ?? '', existingField: Boolean(shape.existingField) } : {}),
+      ...(shapeHasFill(shape) ? { fillColor: shapePropertyEnabled(shape, 'fill') ? (shape.fillColor ?? '#ff4d55') : null } : {}),
+      ...(shapeSupportsStroke(shape) ? { strokeColor: shapePropertyEnabled(shape, 'stroke') ? (shape.strokeColor ?? (shapeHasFill(shape) ? '#de3542' : '#ff4d55')) : null } : {})
+    };
+  }
+
+  /** @param {number} id */
+  function mcpFindObject(id) {
+    for (const [page, list] of Object.entries(shapes)) {
+      const shape = list.find((entry) => entry.id === id);
+      if (shape) return { kind: /** @type {const} */ ('shape'), pageIndex: Number(page), shape };
+    }
+    for (const [page, list] of Object.entries(annotations)) {
+      const stroke = list.find((entry) => entry.id === id);
+      if (stroke) return { kind: /** @type {const} */ ('stroke'), pageIndex: Number(page), stroke };
+    }
+    for (const [page, list] of Object.entries(textHighlights)) {
+      const mark = list.find((entry) => entry.id === id);
+      if (mark) return { kind: /** @type {const} */ ('mark'), pageIndex: Number(page), mark };
+    }
+    throw new Error(`No object with id ${id}. Use list_objects to see the ids.`);
+  }
+
+  /** @param {number} pageIndex @param {AnnotationShape} shape */
+  function mcpAddShape(pageIndex, shape) {
+    shapes = { ...shapes, [pageIndex]: [...(shapes[pageIndex] ?? []), shape] };
+    setShapeSelection(pageIndex, [shape.id]);
+    return mcpDescribeShape(shape, pageIndex);
+  }
+
+  /** Applies style props shared by add_shape and update_object (in px where needed). @param {AnnotationShape} shape @param {Record<string, any>} args */
+  function mcpStyleShape(shape, args) {
+    const next = { ...shape };
+    if (args.fillColor !== undefined) { next.fillColor = mcpColor(args.fillColor, '#FF4D55'); next.fillEnabled = true; next.fillPresent = true; }
+    if (args.fillOpacity !== undefined) next.fillAlpha = clamp(Number(args.fillOpacity), 0, 1);
+    if (args.noFill !== undefined) { next.fillEnabled = !args.noFill; next.fillPresent = true; }
+    if (args.strokeColor !== undefined) { next.strokeColor = mcpColor(args.strokeColor, '#DE3542'); next.strokeEnabled = true; next.strokePresent = true; }
+    if (args.strokeWidth !== undefined) next.strokeWidth = toPx(Math.max(0, Number(args.strokeWidth)));
+    if (args.noStroke !== undefined) { next.strokeEnabled = !args.noStroke; next.strokePresent = true; }
+    if (args.cornerRadius !== undefined) next.cornerRadius = toPx(Math.max(0, Number(args.cornerRadius)));
+    if (args.opacity !== undefined) next.opacity = clamp(Number(args.opacity), 0, 1);
+    if (args.rotation !== undefined) next.rotation = Number(args.rotation) || 0;
+    if (next.type === 'textfield') {
+      if (args.text !== undefined) next.text = String(args.text);
+      if (args.fontSize !== undefined) next.fontSize = toPx(clamp(Number(args.fontSize), 2, 400));
+      if (args.fontFamily !== undefined) next.fontFamily = String(args.fontFamily);
+      if (args.color !== undefined) next.textColor = mcpColor(args.color, '#171717');
+      if (args.bold !== undefined) next.fontWeight = args.bold ? 700 : 400;
+      if (args.italic !== undefined) next.italic = Boolean(args.italic);
+      if (args.underline !== undefined) next.underline = Boolean(args.underline);
+      if (args.align !== undefined) next.textAlign = args.align;
+      if (next.fontSize) next.lineHeight = next.fontSize * 1.2;
+      // A restyled text keeps its explicit ranges consistent with the new base style.
+      if (args.fontSize !== undefined || args.fontFamily !== undefined || args.color !== undefined || args.bold !== undefined || args.italic !== undefined) next.textStyleRanges = [];
+    } else if (args.color !== undefined && shapeSupportsStroke(next)) {
+      next.strokeColor = mcpColor(args.color, '#DE3542');
+      next.strokeEnabled = true;
+    }
+    return next;
+  }
+
+  /** Measures text so add_text can size its box to fit. @param {string} text @param {number} fontSizePx @param {string} family @param {boolean} bold @param {boolean} italic */
+  function mcpMeasureText(text, fontSizePx, family, bold, italic) {
+    const context = document.createElement('canvas').getContext('2d');
+    const lines = text.split('\n');
+    let widest = 0;
+    if (context) {
+      context.font = `${italic ? 'italic ' : ''}${bold ? 700 : 400} ${fontSizePx}px ${textFontStack(family)}`;
+      for (const line of lines) widest = Math.max(widest, context.measureText(line || ' ').width);
+    } else {
+      widest = Math.max(...lines.map((line) => line.length)) * fontSizePx * 0.55;
+    }
+    // Generous slack: the exported PDF font can run slightly wider than the
+    // browser's, and a box that is a hair too narrow wraps the last word.
+    return { width: widest * 1.08 + fontSizePx * 1.4 + 6, height: lines.length * fontSizePx * 1.2 + fontSizePx * 0.5 };
+  }
+
+  /** PDF bytes as they would be exported now, without opening any dialog. */
+  async function mcpPreviewBytes() {
+    if (editLocked && !allowedEditLockedChanges()) {
+      if (!editPrintAllowed) return { bytes: await readWorkingPdf(), note: 'Edit-protected file without print permission: showing the original without your additions' };
+      return { bytes: await (await exportFlattenedBlob()).arrayBuffer(), note: 'Edit-protected file: showing the flattened copy' };
+    }
+    return { bytes: await (await exportEditedPdfBlob()).arrayBuffer(), note: '' };
+  }
+
+  /** @param {Blob} blob */
+  async function blobToBase64(blob) {
+    const dataUrl = await blobToDataUrl(blob);
+    return dataUrl.slice(dataUrl.indexOf(',') + 1);
+  }
+
+  const MCP_READ_ONLY_TOOLS = new Set(['get_document_info', 'get_page_text', 'search_text', 'render_page', 'list_objects', 'list_comments', 'list_form_fields', 'extract_pages', 'save_document', 'set_view', 'undo', 'redo']);
+
+  /** Commits any pending undo step now instead of after the usual debounce. */
+  async function mcpFlushHistory() {
+    await tick();
+    if (historyCommitTimer) clearTimeout(historyCommitTimer);
+    historyCommitTimer = undefined;
+    commitHistoryState();
+  }
+
+  /**
+   * Entry point for MCP tool calls on this document.
+   * @param {string} name @param {Record<string, any>} args
+   * @returns {Promise<any>}
+   */
+  export async function mcpCall(name, args = {}) {
+    if (name === 'unlock_document') return mcpUnlock(String(args.password ?? ''));
+    await mcpWaitUntilReady();
+    const changesDocument = !MCP_READ_ONLY_TOOLS.has(name);
+    // Each agent edit becomes its own undo step; the normal debounce would
+    // merge a burst of tool calls into one.
+    if (changesDocument) await mcpFlushHistory();
+    mcpErrors = [];
+    try {
+      const result = await mcpRun(name, args);
+      if (mcpErrors.length) throw new Error(mcpErrors.join(' '));
+      return result;
+    } finally {
+      mcpErrors = null;
+      if (changesDocument) {
+        await mcpWaitUntilReady().catch(() => {});
+        await mcpFlushHistory();
+      }
+    }
+  }
+
+  /**
+   * Opens a password-protected PDF with its password, through the same
+   * decrypt flow as the password window.
+   * @param {string} password
+   * @returns {Promise<any>}
+   */
+  async function mcpUnlock(password) {
+    for (let attempt = 0; attempt < 300 && !passwordUnlockOpen && !pdfReady; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (!passwordUnlockOpen) return { unlocked: false, note: 'This document is not password protected.', ...(await mcpCall('get_document_info', {})) };
+    if (!password) throw new Error('Give the password.');
+    passwordUnlockValue = password;
+    await disableImportedEncryption();
+    if (passwordUnlockOpen) throw new Error(passwordUnlockError || 'Could not unlock the PDF.');
+    return { unlocked: true, ...(await mcpCall('get_document_info', {})) };
+  }
+
+  /** @param {string} name @param {Record<string, any>} args */
+  async function mcpRun(name, args) {
+    switch (name) {
+      case 'get_document_info': {
+        const fields = Object.entries(shapes).flatMap(([page, list]) => list
+          .filter((shape) => shape.type === 'input' || shape.type === 'checkbox')
+          .map((shape) => ({ name: shape.fieldName ?? '', type: shape.type === 'checkbox' ? 'checkbox' : 'text', value: shape.fieldValue ?? '', page: Number(page) + 1 })));
+        return {
+          name: workingFile.name,
+          pageCount,
+          pages: Array.from({ length: pageCount }, (_, index) => ({
+            page: index + 1,
+            width: pageSizes[index] ? toPt(pageSizes[index].width) : null,
+            height: pageSizes[index] ? toPt(pageSizes[index].height) : null
+          })),
+          passwordProtectedExport: encryptionEnabled,
+          editProtected: editLocked,
+          ...(editLocked ? { editProtection: { formFillingAllowed: editFillAllowed, commentingAllowed: editAnnotationsAllowed, printingAllowed: editPrintAllowed } } : {}),
+          addedObjects: Object.values(shapes).flat().filter((shape) => !shape.existingField).length
+            + Object.values(annotations).flat().length + Object.values(textHighlights).flat().length,
+          comments: Object.values(pdfComments).flat().length + Object.values(comments).flat().length,
+          watermark: appliedWatermarkText || null,
+          formFields: fields,
+          canUndo: undoHistory.length > 0,
+          canRedo: redoHistory.length > 0
+        };
+      }
+
+      case 'get_page_text': {
+        const pageIndex = mcpPageIndex(args.page);
+        const { runs, width, height } = await mcpTextRuns(pageIndex);
+        /** @type {{ text: string; y: number; right: number }[]} */
+        const lines = [];
+        for (const run of runs) {
+          const line = lines.at(-1);
+          if (line && Math.abs(line.y - run.y) < Math.max(2, run.height * 0.4)) line.text += (run.x - line.right > run.height * 0.15 && !line.text.endsWith(' ') ? ' ' : '') + run.text;
+          else lines.push({ text: run.text, y: run.y, right: 0 });
+          lines[lines.length - 1].right = run.x + run.width;
+        }
+        return {
+          page: pageIndex + 1,
+          width: Math.round(width * 100) / 100,
+          height: Math.round(height * 100) / 100,
+          text: lines.map((line) => line.text).join('\n'),
+          runs
+        };
+      }
+
+      case 'search_text': {
+        const query = String(args.query ?? '');
+        if (!query) throw new Error('query is empty.');
+        const matches = await mcpFindText(query, { caseSensitive: Boolean(args.caseSensitive) });
+        return { query, count: matches.length, matches: matches.slice(0, 500) };
+      }
+
+      case 'render_page': {
+        const pageIndex = mcpPageIndex(args.page);
+        const scale = clamp(Number(args.scale ?? 1.25), 0.25, 3);
+        const withEdits = args.withEdits !== false;
+        const pdfjs = await import('pdfjs-dist');
+        const source = withEdits ? await mcpPreviewBytes() : { bytes: await readWorkingPdf(), note: '' };
+        const task = pdfjs.getDocument({ data: new Uint8Array(source.bytes) });
+        try {
+          const documentProxy = await task.promise;
+          const page = await documentProxy.getPage(pageIndex + 1);
+          const viewport = page.getViewport({ scale });
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.ceil(viewport.width);
+          canvas.height = Math.ceil(viewport.height);
+          const context = canvas.getContext('2d');
+          if (!context) throw new Error('Could not render the page.');
+          context.fillStyle = '#fff';
+          context.fillRect(0, 0, canvas.width, canvas.height);
+          // The print intent renders without animation frames, so it also
+          // works while the Docuflex window is hidden behind the agent's app.
+          await page.render({ canvas, canvasContext: context, viewport, intent: 'print', annotationMode: pdfjs.AnnotationMode.ENABLE }).promise;
+          const blob = await new Promise((resolve, reject) => canvas.toBlob((result) => result ? resolve(result) : reject(new Error('Could not encode the page image.')), 'image/png'));
+          return {
+            page: pageIndex + 1,
+            png: await blobToBase64(/** @type {Blob} */ (blob)),
+            width: canvas.width,
+            height: canvas.height,
+            widthPt: Math.round((viewport.width / scale) * 100) / 100,
+            heightPt: Math.round((viewport.height / scale) * 100) / 100,
+            note: source.note
+          };
+        } finally {
+          await task.destroy();
+        }
+      }
+
+      case 'add_text': {
+        await mcpEnsureSelectTool();
+        const pageIndex = mcpPageIndex(args.page);
+        const text = String(args.text ?? '');
+        if (!text) throw new Error('text is empty.');
+        const fontSize = toPx(clamp(Number(args.fontSize ?? 12), 2, 400));
+        const family = String(args.fontFamily ?? 'Helvetica');
+        const measured = mcpMeasureText(text, fontSize, family, Boolean(args.bold), Boolean(args.italic));
+        const shape = mcpStyleShape(/** @type {AnnotationShape} */ ({
+          id: nextAnnotationId++,
+          type: 'textfield',
+          x: toPx(Number(args.x)),
+          y: toPx(Number(args.y)),
+          width: args.width ? toPx(Number(args.width)) : measured.width,
+          height: args.height ? toPx(Number(args.height)) : measured.height,
+          rotation: 0,
+          text,
+          verticalAlign: 'top'
+        }), { ...args, fontSize: args.fontSize ?? 12, fontFamily: family, color: args.color ?? '#171717' });
+        return mcpAddShape(pageIndex, shape);
+      }
+
+      case 'add_shape': {
+        await mcpEnsureSelectTool();
+        const pageIndex = mcpPageIndex(args.page);
+        if (!['rectangle', 'circle', 'triangle', 'check', 'cross'].includes(args.type)) throw new Error('type must be rectangle, circle, triangle, check or cross.');
+        const shape = mcpStyleShape(/** @type {AnnotationShape} */ ({
+          id: nextAnnotationId++,
+          type: args.type,
+          x: toPx(Number(args.x)),
+          y: toPx(Number(args.y)),
+          width: toPx(Math.max(1, Number(args.width))),
+          height: toPx(Math.max(1, Number(args.height))),
+          rotation: 0
+        }), args);
+        return mcpAddShape(pageIndex, shape);
+      }
+
+      case 'add_line': {
+        await mcpEnsureSelectTool();
+        const pageIndex = mcpPageIndex(args.page);
+        const type = args.type === 'arrow' ? 'arrow' : 'line';
+        let shape = shapeFromEndpoints(
+          /** @type {AnnotationShape} */ ({ id: nextAnnotationId++, type, x: 0, y: 0, width: 1, height: 1, rotation: 0 }),
+          { x: toPx(Number(args.x1)), y: toPx(Number(args.y1)) },
+          { x: toPx(Number(args.x2)), y: toPx(Number(args.y2)) }
+        );
+        shape = mcpStyleShape(shape, { strokeColor: args.color, strokeWidth: args.strokeWidth });
+        return mcpAddShape(pageIndex, shape);
+      }
+
+      case 'add_image': {
+        await mcpEnsureSelectTool();
+        const pageIndex = mcpPageIndex(args.page);
+        const dataUrl = String(args.dataUrl ?? '');
+        if (!dataUrl.startsWith('data:image/')) throw new Error('Give an image path or a data:image/... URL.');
+        const image = new Image();
+        await new Promise((resolve, reject) => {
+          image.onload = resolve;
+          image.onerror = () => reject(new Error('Could not read this image.'));
+          image.src = dataUrl;
+        });
+        const naturalWidth = image.naturalWidth || 300;
+        const naturalHeight = image.naturalHeight || 150;
+        const scale = Math.min(1, 4096 / Math.max(naturalWidth, naturalHeight));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(naturalWidth * scale));
+        canvas.height = Math.max(1, Math.round(naturalHeight * scale));
+        canvas.getContext('2d')?.drawImage(image, 0, 0, canvas.width, canvas.height);
+        const aspect = naturalWidth / naturalHeight;
+        const size = pageSizes[pageIndex];
+        let widthPx = args.width ? toPx(Number(args.width)) : 0;
+        let heightPx = args.height ? toPx(Number(args.height)) : 0;
+        if (!widthPx && !heightPx) widthPx = Math.min(size?.width ?? 400, toPx(200));
+        if (!widthPx) widthPx = heightPx * aspect;
+        if (!heightPx) heightPx = widthPx / aspect;
+        const shape = /** @type {AnnotationShape} */ ({
+          id: nextAnnotationId++,
+          type: 'image',
+          x: toPx(Number(args.x)),
+          y: toPx(Number(args.y)),
+          width: widthPx,
+          height: heightPx,
+          rotation: 0,
+          imageData: canvas.toDataURL('image/png'),
+          strokeEnabled: false
+        });
+        return mcpAddShape(pageIndex, shape);
+      }
+
+      case 'draw': {
+        await mcpEnsureSelectTool();
+        const pageIndex = mcpPageIndex(args.page);
+        const type = args.tool === 'marker' ? 'marker' : 'pen';
+        const points = (Array.isArray(args.points) ? args.points : []).map((/** @type {any} */ point) => ({ x: toPx(Number(point.x)), y: toPx(Number(point.y)), pressure: 0.5 }));
+        if (points.length < 2) throw new Error('A drawing needs at least two points.');
+        /** @type {StrokePoint[]} */
+        const dense = points.reduce((/** @type {StrokePoint[]} */ line, /** @type {StrokePoint} */ point) => appendInterpolatedPoint(line, point), []);
+        const stroke = /** @type {AnnotationStroke} */ ({
+          id: nextAnnotationId++,
+          type,
+          points: dense,
+          rawPoints: dense,
+          color: mcpColor(args.color, type === 'marker' ? markerColor : penColor),
+          thickness: args.thickness ? toPx(Number(args.thickness)) : (type === 'marker' ? markerThickness : penThickness),
+          opacity: args.opacity !== undefined ? clamp(Number(args.opacity), 0.01, 1) : (type === 'marker' ? markerOpacity : penOpacity),
+          falloff: type === 'marker' ? markerFalloff : 0,
+          smoothing: type === 'pen' ? penSmoothing : 0
+        });
+        annotations = { ...annotations, [pageIndex]: [...(annotations[pageIndex] ?? []), stroke] };
+        return { objectId: stroke.id, kind: type, page: pageIndex + 1, points: stroke.points.length };
+      }
+
+      case 'mark_text': {
+        await mcpEnsureSelectTool();
+        const type = /** @type {'highlight' | 'underline' | 'crossout' | 'blackout' | 'whiteout'} */ (args.type);
+        if (!['highlight', 'underline', 'crossout', 'blackout', 'whiteout'].includes(type)) throw new Error('type must be highlight, underline, crossout, blackout or whiteout.');
+        /** @type {Record<number, { x: number; y: number; width: number; height: number }[]>} */
+        const byPage = {};
+        if (Array.isArray(args.rects) && args.rects.length) {
+          const pageIndex = mcpPageIndex(args.page);
+          byPage[pageIndex] = args.rects.map((/** @type {any} */ rect) => ({ x: toPx(Number(rect.x)), y: toPx(Number(rect.y)), width: toPx(Number(rect.width)), height: toPx(Number(rect.height)) }));
+        } else {
+          const query = String(args.query ?? '');
+          if (!query) throw new Error('Give a query or rects.');
+          let matches = await mcpFindText(query, { pageIndex: args.page !== undefined ? mcpPageIndex(args.page) : undefined });
+          if (args.occurrence) matches = matches.slice(Number(args.occurrence) - 1, Number(args.occurrence));
+          if (!matches.length) throw new Error(`"${query}" was not found${args.page ? ` on page ${args.page}` : ''}.`);
+          for (const match of matches) {
+            (byPage[match.page - 1] ??= []).push(...match.rects.map((rect) => ({ x: toPx(rect.x), y: toPx(rect.y), width: toPx(rect.width), height: toPx(rect.height) })));
+          }
+        }
+        const colorHex = mcpColor(args.color, type === 'highlight' ? selectionHighlightColor : type === 'underline' ? selectionUnderlineColor : selectionCrossoutColor);
+        /** @type {number[]} */
+        const ids = [];
+        for (const [page, rects] of Object.entries(byPage)) {
+          const pageIndex = Number(page);
+          const styled = rects.map((rect) => ({
+            ...rect,
+            ...(type === 'highlight' ? { color: textMarkHexColor(colorHex) } : {}),
+            ...(type === 'underline' ? { color: textMarkHexColor(colorHex), thickness: selectionUnderlineThickness } : {}),
+            ...(type === 'crossout' ? { color: textMarkHexColor(colorHex), thickness: selectionCrossoutThickness } : {})
+          }));
+          const mark = { id: nextAnnotationId++, type, rects: mergeTextHighlightRects(styled) };
+          textHighlights = { ...textHighlights, [pageIndex]: [...(textHighlights[pageIndex] ?? []), mark] };
+          ids.push(mark.id);
+        }
+        return { objectIds: ids, type, pages: Object.keys(byPage).map((page) => Number(page) + 1), ...(type === 'blackout' || type === 'whiteout' ? { note: 'Redacted content is permanently removed when the document is saved.' } : {}) };
+      }
+
+      case 'set_watermark': {
+        appliedWatermarkText = String(args.text ?? '').trim();
+        watermarkText = appliedWatermarkText;
+        return { watermark: appliedWatermarkText || null };
+      }
+
+      case 'list_objects': {
+        const only = args.page !== undefined ? mcpPageIndex(args.page) : null;
+        const result = [];
+        for (const [page, list] of Object.entries(shapes)) {
+          if (only !== null && Number(page) !== only) continue;
+          for (const shape of list) if (shape.type !== 'measure') result.push(mcpDescribeShape(shape, Number(page)));
+        }
+        for (const [page, list] of Object.entries(annotations)) {
+          if (only !== null && Number(page) !== only) continue;
+          for (const stroke of list) {
+            const xs = stroke.points.map((point) => point.x);
+            const ys = stroke.points.map((point) => point.y);
+            result.push({ objectId: stroke.id, kind: stroke.type, page: Number(page) + 1, ...rectToPt({ x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) }), color: stroke.color });
+          }
+        }
+        for (const [page, list] of Object.entries(textHighlights)) {
+          if (only !== null && Number(page) !== only) continue;
+          for (const mark of list) result.push({ objectId: mark.id, kind: mark.type ?? 'highlight', page: Number(page) + 1, rects: mark.rects.map(rectToPt) });
+        }
+        return { count: result.length, objects: result };
+      }
+
+      case 'update_object': {
+        await mcpEnsureSelectTool();
+        const found = mcpFindObject(Number(args.objectId));
+        if (found.kind === 'shape') {
+          let next = mcpStyleShape(found.shape, args);
+          if (args.x !== undefined) next.x = toPx(Number(args.x));
+          if (args.y !== undefined) next.y = toPx(Number(args.y));
+          if (args.width !== undefined) next.width = toPx(Math.max(0.5, Number(args.width)));
+          if (args.height !== undefined) next.height = toPx(Math.max(0.5, Number(args.height)));
+          if (args.value !== undefined && (next.type === 'input' || next.type === 'checkbox')) next.fieldValue = next.type === 'checkbox' ? Boolean(args.value) : String(args.value);
+          replaceShape(found.pageIndex, next);
+          return mcpDescribeShape(next, found.pageIndex);
+        }
+        if (found.kind === 'stroke') {
+          const next = { ...found.stroke };
+          if (args.color !== undefined) next.color = mcpColor(args.color, next.color ?? '#000000');
+          if (args.opacity !== undefined) next.opacity = clamp(Number(args.opacity), 0.01, 1);
+          if (args.strokeWidth !== undefined) next.thickness = toPx(Number(args.strokeWidth));
+          replaceStroke(found.pageIndex, next);
+          return { objectId: next.id, kind: next.type, page: found.pageIndex + 1 };
+        }
+        const mark = found.mark;
+        const colorHex = args.color !== undefined ? mcpColor(args.color, '#FFE43B') : null;
+        textHighlights = {
+          ...textHighlights,
+          [found.pageIndex]: (textHighlights[found.pageIndex] ?? []).map((entry) => entry.id === mark.id && colorHex
+            ? { ...entry, rects: entry.rects.map((rect) => ({ ...rect, color: textMarkHexColor(colorHex) })) }
+            : entry)
+        };
+        return { objectId: mark.id, kind: mark.type ?? 'highlight', page: found.pageIndex + 1 };
+      }
+
+      case 'delete_object': {
+        await mcpEnsureSelectTool();
+        const found = mcpFindObject(Number(args.objectId));
+        if (found.kind === 'shape') {
+          if (found.shape.existingField) throw new Error('Form fields that are part of the PDF cannot be deleted; fill them with fill_form_field instead.');
+          setShapeSelection(found.pageIndex, []);
+          shapes = { ...shapes, [found.pageIndex]: (shapes[found.pageIndex] ?? []).filter((shape) => shape.id !== found.shape.id) };
+        } else if (found.kind === 'stroke') {
+          annotations = { ...annotations, [found.pageIndex]: (annotations[found.pageIndex] ?? []).filter((stroke) => stroke.id !== found.stroke.id) };
+        } else {
+          textHighlights = { ...textHighlights, [found.pageIndex]: (textHighlights[found.pageIndex] ?? []).filter((mark) => mark.id !== found.mark.id) };
+        }
+        return { deleted: Number(args.objectId) };
+      }
+
+      case 'replace_text': {
+        await mcpEnsureSelectTool();
+        const pageIndex = mcpPageIndex(args.page);
+        const find = String(args.find ?? '');
+        if (!find) throw new Error('find is empty.');
+        if (editLocked) throw new Error('This PDF is edit protected, so its existing text cannot be changed. Add text on top instead (add_text with mark_text whiteout to cover the old text).');
+        const response = await fetch('/api/pdf/edit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            pdfBase64: arrayBufferToBase64(await readWorkingPdf()),
+            edits: [{ page: pageIndex, oldText: find, newText: String(args.replace ?? ''), oldTextCandidates: [find], occurrence: args.occurrence ? Number(args.occurrence) - 1 : -1 }]
+          })
+        });
+        const result = await response.json().catch(() => null);
+        if (!response.ok || !result) throw new Error(result?.error ?? `Text edit failed (${response.status}).`);
+        if (!result.applied) throw new Error(`Could not rewrite "${find}" on page ${pageIndex + 1}. ${(result.misses ?? []).join(' ')} Use the exact text of a whole run from get_page_text, or cover it with mark_text whiteout and add_text.`);
+        const bytes = base64ToBytes(result.pdfBase64);
+        workingFile = new File([bytes], workingFile.name, { type: 'application/pdf', lastModified: Date.now() });
+        htmlEditorStarted = false;
+        htmlTextEditBaseFile = null;
+        htmlEditorReady = false;
+        htmlViewportMode = false;
+        const scrollState = capturePageScrollState();
+        await loadPdf(false, true, pageCount);
+        await restorePageScrollState(scrollState);
+        return { replaced: find, with: String(args.replace ?? ''), page: pageIndex + 1 };
+      }
+
+      case 'list_comments': {
+        const only = args.page !== undefined ? mcpPageIndex(args.page) : null;
+        const result = [];
+        for (const [source, store] of /** @type {const} */ ([['pdf', pdfComments], ['docuflex', comments]])) {
+          for (const [page, list] of Object.entries(store)) {
+            if (only !== null && Number(page) !== only) continue;
+            for (const comment of list) {
+              result.push({
+                commentId: comment.id,
+                source,
+                page: Number(page) + 1,
+                x: toPt(comment.x),
+                y: toPt(comment.y),
+                author: comment.author,
+                text: comment.text,
+                quote: comment.quote || undefined,
+                replies: commentThreadReplies(comment, Number(page), commentReplies).map((reply) => ({ author: reply.author, text: reply.text }))
+              });
+            }
+          }
+        }
+        return { count: result.length, comments: result };
+      }
+
+      case 'add_comment': {
+        const pageIndex = mcpPageIndex(args.page);
+        const text = String(args.text ?? '').trim();
+        if (!text) throw new Error('text is empty.');
+        /** @type {CommentRect[]} */
+        let rects = [];
+        let quote = '';
+        let anchor = { x: toPx(Number(args.x ?? 20)), y: toPx(Number(args.y ?? 20)) };
+        if (args.quote) {
+          const matches = await mcpFindText(String(args.quote), { pageIndex });
+          if (!matches.length) throw new Error(`"${args.quote}" was not found on page ${pageIndex + 1}.`);
+          rects = matches[0].rects.map((rect) => ({ x: toPx(rect.x), y: toPx(rect.y), width: toPx(rect.width), height: toPx(rect.height) }));
+          quote = matches[0].text;
+          anchor = { x: rects[0].x + rects[0].width, y: rects[0].y };
+        }
+        const comment = {
+          id: nextCommentId++,
+          x: anchor.x,
+          y: anchor.y,
+          rects,
+          quote,
+          text,
+          author: String(args.author ?? '').trim() || currentCommentAuthor(),
+          createdAt: Date.now(),
+          replies: []
+        };
+        comments = { ...comments, [pageIndex]: [...(comments[pageIndex] ?? []), comment] };
+        return { commentId: comment.id, page: pageIndex + 1, quote: quote || undefined, note: 'Turn on the comment view (set_view commentMode true) to show comments in the window.' };
+      }
+
+      case 'reply_to_comment': {
+        const found = findComment(Number(args.commentId), [comments, pdfComments]);
+        if (!found) throw new Error(`No comment with id ${args.commentId}. Use list_comments.`);
+        const text = String(args.text ?? '').trim();
+        if (!text) throw new Error('text is empty.');
+        const reply = { author: String(args.author ?? '').trim() || currentCommentAuthor(), text, createdAt: Date.now() };
+        if (found.comment.existing && found.comment.ref) {
+          commentReplies = { ...commentReplies, [found.pageIndex]: [...(commentReplies[found.pageIndex] ?? []), { ref: found.comment.ref, ...reply }] };
+        } else {
+          comments = {
+            ...comments,
+            [found.pageIndex]: (comments[found.pageIndex] ?? []).map((comment) => comment.id === found.comment.id ? { ...comment, replies: [...(comment.replies ?? []), reply] } : comment)
+          };
+        }
+        return { commentId: found.comment.id, replies: commentThreadReplies(found.comment, found.pageIndex, commentReplies).length + (found.comment.existing ? 0 : 1) };
+      }
+
+      case 'delete_comment': {
+        const found = findComment(Number(args.commentId), [comments, pdfComments]);
+        if (!found) throw new Error(`No comment with id ${args.commentId}.`);
+        if (found.comment.existing) throw new Error('Comments that are already in the PDF cannot be deleted.');
+        comments = { ...comments, [found.pageIndex]: (comments[found.pageIndex] ?? []).filter((comment) => comment.id !== found.comment.id) };
+        return { deleted: found.comment.id };
+      }
+
+      case 'list_form_fields': {
+        const fields = Object.entries(shapes).flatMap(([page, list]) => list
+          .filter((shape) => shape.type === 'input' || shape.type === 'checkbox')
+          .map((shape) => ({ objectId: shape.id, name: shape.fieldName ?? '', type: shape.type === 'checkbox' ? 'checkbox' : 'text', value: shape.fieldValue ?? '', readOnly: Boolean(shape.readOnly), page: Number(page) + 1, ...rectToPt(shape) })));
+        return { count: fields.length, fields };
+      }
+
+      case 'fill_form_field': {
+        await mcpEnsureSelectTool();
+        const fieldName = String(args.name ?? '');
+        const matches = Object.entries(shapes).flatMap(([page, list]) => list
+          .filter((shape) => (shape.type === 'input' || shape.type === 'checkbox') && shape.fieldName === fieldName)
+          .map((shape) => ({ pageIndex: Number(page), shape })));
+        if (!matches.length) throw new Error(`No form field named "${fieldName}". Use list_form_fields.`);
+        for (const { pageIndex, shape } of matches) {
+          if (shape.readOnly) throw new Error(`The field "${fieldName}" is read-only.`);
+          replaceShape(pageIndex, { ...shape, fieldValue: shape.type === 'checkbox' ? args.value === true || args.value === 'true' : String(args.value ?? '') });
+        }
+        return { name: fieldName, value: args.value, widgets: matches.length };
+      }
+
+      case 'add_form_field': {
+        await mcpEnsureSelectTool();
+        const pageIndex = mcpPageIndex(args.page);
+        const isCheckbox = args.type === 'checkbox';
+        const id = nextAnnotationId++;
+        return mcpAddShape(pageIndex, /** @type {AnnotationShape} */ ({
+          id,
+          type: isCheckbox ? 'checkbox' : 'input',
+          x: toPx(Number(args.x)),
+          y: toPx(Number(args.y)),
+          width: toPx(Number(args.width)),
+          height: toPx(Number(args.height)),
+          rotation: 0,
+          fieldName: String(args.name ?? '').trim() || `DocuflexField${id}`,
+          fieldValue: isCheckbox ? Boolean(args.value) : String(args.value ?? ''),
+          existingField: false
+        }));
+      }
+
+      case 'rotate_pages': {
+        await mcpEnsureSelectTool();
+        const indexes = (Array.isArray(args.pages) ? args.pages : []).map(mcpPageIndex);
+        if (!indexes.length) throw new Error('Give at least one page.');
+        const degrees = Number(args.degrees);
+        const steps = degrees === 180 ? [90, 90] : degrees === 270 || degrees === -90 ? [-90] : degrees === 90 ? [90] : null;
+        if (!steps) throw new Error('degrees must be 90, 180, 270 or -90.');
+        for (const step of steps) {
+          selectedPages = new Set(indexes);
+          await rotateSelectedPages(step);
+          if (mcpErrors?.length) break;
+        }
+        return { rotated: indexes.map((index) => index + 1), degrees };
+      }
+
+      case 'delete_pages': {
+        await mcpEnsureSelectTool();
+        const indexes = (Array.isArray(args.pages) ? args.pages : []).map(mcpPageIndex);
+        if (!indexes.length) throw new Error('Give at least one page.');
+        if (new Set(indexes).size >= pageCount) throw new Error('At least one page must remain.');
+        selectedPages = new Set(indexes);
+        await deleteSelectedPages();
+        return { deleted: [...new Set(indexes)].sort((left, right) => left - right).map((index) => index + 1), pageCount };
+      }
+
+      case 'reorder_pages': {
+        await mcpEnsureSelectTool();
+        const order = (Array.isArray(args.order) ? args.order : []).map(mcpPageIndex);
+        if (order.length !== pageCount || new Set(order).size !== pageCount) throw new Error(`order must list every page from 1 to ${pageCount} exactly once.`);
+        await reorderPages(order, new Set());
+        return { order: order.map((index) => index + 1) };
+      }
+
+      case 'insert_pdf': {
+        await mcpEnsureSelectTool();
+        const after = args.after === undefined ? pageCount : clamp(Number(args.after), 0, pageCount);
+        const before = pageCount;
+        await insertDroppedPdf(new File([base64ToBytes(String(args.base64 ?? ''))], 'inserted.pdf', { type: 'application/pdf' }), after);
+        return { insertedPages: pageCount - before, after, pageCount };
+      }
+
+      case 'extract_pages': {
+        await mcpEnsureSelectTool();
+        const indexes = (Array.isArray(args.pages) ? args.pages : []).map(mcpPageIndex);
+        if (!indexes.length) throw new Error('Give at least one page.');
+        const preview = await mcpPreviewBytes();
+        const result = await requestPageOperation('extract', { pages: indexes }, preview.bytes);
+        return { base64: arrayBufferToBase64(result), pages: indexes.map((index) => index + 1), note: preview.note || undefined };
+      }
+
+      case 'save_document': {
+        await mcpEnsureSelectTool();
+        if (args.mode === 'flattened') {
+          if (!editLocked) throw new Error('mode "flattened" is only for edit-protected files; use mode "auto".');
+          if (!editPrintAllowed) throw new Error('The owner of this PDF disabled printing, so it cannot be flattened.');
+          return { base64: await blobToBase64(await exportFlattenedBlob()), mode: 'flattened' };
+        }
+        if (editLocked && !allowedEditLockedChanges()) {
+          throw new Error('This PDF is edit protected and your changes go beyond form filling and comments. Save with mode "flattened" (print copy) or remove the protection with the owner password in Docuflex.');
+        }
+        return { base64: await blobToBase64(await exportEditedPdfBlob()), mode: editLocked ? 'protected (allowed changes only)' : 'normal', passwordProtected: encryptionEnabled };
+      }
+
+      case 'rasterize_pages': {
+        await mcpEnsureSelectTool();
+        if (editLocked) throw new Error('This PDF is edit protected, so its pages cannot be rasterized.');
+        const indexes = Array.isArray(args.pages) && args.pages.length ? args.pages.map(mcpPageIndex) : [];
+        rasterAdjust = {
+          ...RASTER_DEFAULTS,
+          rotation: clamp(Number(args.rotation ?? 0), -45, 45),
+          fillEdges: args.fillEdges !== false,
+          exposure: clamp(Number(args.exposure ?? 0), -100, 100),
+          contrast: clamp(Number(args.contrast ?? 0), -100, 100),
+          saturation: clamp(Number(args.saturation ?? 0), -100, 100),
+          hue: clamp(Number(args.hue ?? 0), -180, 180),
+          temperature: clamp(Number(args.temperature ?? 0), -100, 100),
+          sharpness: clamp(Number(args.sharpness ?? 0), 0, 100)
+        };
+        selectedPages = new Set(indexes);
+        await tick();
+        await rasterizePages();
+        rasterAdjust = { ...RASTER_DEFAULTS };
+        return { rasterized: (indexes.length ? indexes : Array.from({ length: pageCount }, (_, index) => index)).map((index) => index + 1) };
+      }
+
+      case 'run_ocr': {
+        await mcpEnsureSelectTool();
+        if (editLocked) throw new Error('This PDF is edit protected; OCR would rewrite it.');
+        await recognizeDocumentText();
+        return { ocr: 'done', note: 'Use get_page_text to read the recognized text.' };
+      }
+
+      case 'set_password': {
+        const password = String(args.password ?? '');
+        if (!password) {
+          encryptionEnabled = false;
+          protectionPassword = '';
+          onProtectionChange({ enabled: false, password: '' });
+          return { passwordProtected: false };
+        }
+        if (new TextEncoder().encode(password).length > 32) throw new Error('The password must be 32 bytes or fewer.');
+        encryptionEnabled = true;
+        protectionPassword = password;
+        onProtectionChange({ enabled: true, password });
+        return { passwordProtected: true, note: 'The PDF is encrypted with AES-256 when it is saved.' };
+      }
+
+      case 'undo':
+        await undo();
+        return { canUndo: undoHistory.length > 0, canRedo: redoHistory.length > 0 };
+
+      case 'redo':
+        await redo();
+        return { canUndo: undoHistory.length > 0, canRedo: redoHistory.length > 0 };
+
+      case 'set_view': {
+        if (args.zoom !== undefined) {
+          zoomLevel = clampZoom(Number(args.zoom));
+          scheduleSharpRender(0);
+        }
+        if (args.page !== undefined) {
+          await tick();
+          scrollViewerToPage(mcpPageIndex(args.page));
+        }
+        return { zoom: zoomLevel, page: args.page };
+      }
+
+      default:
+        throw new Error(`Unknown tool: ${name}`);
+    }
+  }
+
+  /** Everything this tab needs to come back exactly as it was. */
+  function captureEditorState() {
+    return {
+      workingFile,
+      annotations,
+      shapes,
+      textHighlights,
+      comments,
+      commentReplies,
+      appliedWatermarkText,
+      encryptionEnabled,
+      protectionPassword,
+      ocrTextLayerActive,
+      cropPagesPrepared,
+      nextAnnotationId,
+      nextCommentId,
+      undoHistory,
+      redoHistory,
+      zoomLevel,
+      scrollTop: viewer?.scrollTop ?? 0,
+      scrollLeft: viewer?.scrollLeft ?? 0
+    };
+  }
+
+  /** @param {ReturnType<typeof captureEditorState>} state */
+  function restoreEditorState(state) {
+    workingFile = state.workingFile;
+    annotations = state.annotations;
+    shapes = state.shapes;
+    textHighlights = state.textHighlights;
+    comments = state.comments;
+    commentReplies = state.commentReplies;
+    appliedWatermarkText = state.appliedWatermarkText;
+    encryptionEnabled = state.encryptionEnabled;
+    protectionPassword = state.protectionPassword;
+    ocrTextLayerActive = state.ocrTextLayerActive;
+    cropPagesPrepared = state.cropPagesPrepared;
+    nextAnnotationId = state.nextAnnotationId;
+    nextCommentId = state.nextCommentId;
+    undoHistory = state.undoHistory;
+    redoHistory = state.redoHistory;
+    zoomLevel = state.zoomLevel;
+    // Edits are already in the state, so keep them instead of re-reading form widgets.
+    void loadPdf(false).then(async () => {
+      await tick();
+      if (!viewer) return;
+      viewer.scrollTop = state.scrollTop;
+      viewer.scrollLeft = state.scrollLeft;
+    });
+  }
+
   onDestroy(() => {
+    if (pdfReady) onSaveState(ownDocumentId, captureEditorState());
     loadGeneration += 1;
     pageDragCleanup?.();
     if (historyCommitTimer) clearTimeout(historyCommitTimer);

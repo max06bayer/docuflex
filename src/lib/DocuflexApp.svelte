@@ -9,6 +9,7 @@
   import HomeProtectPanel from '$lib/HomeProtectPanel.svelte';
   import QuickToolPagesPanel from '$lib/QuickToolPagesPanel.svelte';
   import SettingsPanel from '$lib/SettingsPanel.svelte';
+  import McpPanel from '$lib/McpPanel.svelte';
   import TranslateFilesPanel from '$lib/TranslateFilesPanel.svelte';
   // @ts-ignore Fontsource exposes CSS through package exports without JS type declarations.
   import '@fontsource-variable/geist/wght.css';
@@ -87,7 +88,7 @@
   $: sortModeText = sortMode === 'size' ? 'Size' : sortMode === 'name' ? 'Name' : 'Recent';
   /** @type {HTMLInputElement | undefined} */
   let fileInput;
-  /** @type {{ downloadPdf: () => Promise<void>; exportPdfForSave: () => Promise<{ blob: Blob; suggestedName: string }>; openSearchPanel: () => void; openRasterPanel: () => void; undo: () => Promise<void>; redo: () => Promise<void> } | undefined} */
+  /** @type {{ downloadPdf: () => Promise<void>; exportPdfForSave: () => Promise<{ blob: Blob; suggestedName: string }>; openSearchPanel: () => void; openRasterPanel: () => void; mcpCall: (name: string, args: Record<string, any>) => Promise<any>; undo: () => Promise<void>; redo: () => Promise<void> } | undefined} */
   let pdfEditor;
   let isDownloading = false;
   let isSaving = false;
@@ -95,6 +96,191 @@
   let errorToast = null;
   /** Comment view, shared across open documents. */
   let commentMode = false;
+  let mcpPanelOpen = false;
+  /** Local MCP server state; null until known, available=false on the hosted web app. */
+  /** @type {{ available: boolean; enabled: boolean; url: string; connectedApps: number; toolCount: number; lastCall: { name: string; at: number } | null } | null} */
+  let mcpStatus = null;
+  /** @type {EventSource | null} */
+  let mcpStream = null;
+  /** Id the local server gave this window's connection; used for heartbeats and acknowledgements. */
+  /** @type {number | null} */
+  let mcpClientId = null;
+  /** @type {ReturnType<typeof setInterval> | undefined} */
+  let mcpHeartbeat;
+
+  /** @param {Record<string, unknown>} message */
+  function postToMcpBridge(message) {
+    return fetch('/api/mcp/bridge', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...message, clientId: mcpClientId })
+    }).catch(() => null);
+  }
+
+  async function refreshMcpStatus() {
+    try {
+      const response = await fetch('/api/mcp/status', { cache: 'no-store' });
+      mcpStatus = response.ok ? await response.json() : { ...(mcpStatus ?? {}), available: false };
+    } catch {
+      // Keep the last known state while the local server restarts.
+    }
+  }
+
+  /** @param {boolean} enabled */
+  async function setMcpEnabled(enabled) {
+    const response = await fetch('/api/mcp/status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled })
+    }).catch(() => null);
+    if (response?.ok) mcpStatus = await response.json();
+  }
+
+  /** Waits until the active tab's editor exists (after opening or switching). */
+  /** @param {typeof pdfEditor} [previous] the editor that must be replaced first */
+  async function waitForEditor(previous) {
+    for (let attempt = 0; attempt < 300; attempt += 1) {
+      await tick();
+      if (pdfEditor && pdfEditor !== previous) return pdfEditor;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error('The document did not open.');
+  }
+
+  /**
+   * Runs an MCP tool call relayed from the local server. Document and view
+   * management happens here; everything else is handled by the open editor.
+   * @param {string} name @param {Record<string, any>} args
+   */
+  async function runMcpTool(name, args) {
+    switch (name) {
+      case 'list_documents':
+        return { documents: tabs.map((tab) => ({ documentId: tab.id, name: tab.name, active: tab.id === activeTab })) };
+      case 'open_document': {
+        const binary = atob(String(args.base64 ?? ''));
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+        const previous = pdfEditor;
+        addFileTab(new File([bytes], String(args.name || 'document.pdf'), { type: 'application/pdf' }));
+        const id = activeTab;
+        const editor = await waitForEditor(previous);
+        if (args.password) return { documentId: id, ...(await editor.mcpCall('unlock_document', { password: args.password })) };
+        try {
+          return { documentId: id, ...(await editor.mcpCall('get_document_info', {})) };
+        } catch (error) {
+          if (error instanceof Error && /password/i.test(error.message)) {
+            return { documentId: id, passwordRequired: true, hint: 'This PDF needs a password to open. Call unlock_document with it.' };
+          }
+          throw error;
+        }
+      }
+      case 'switch_document': {
+        const tab = tabs.find((entry) => entry.id === Number(args.documentId));
+        if (!tab) throw new Error(`No document with id ${args.documentId}. Use list_documents.`);
+        const previous = tab.id === activeTab ? undefined : pdfEditor;
+        activeTab = tab.id;
+        const editor = await waitForEditor(previous);
+        return { documentId: tab.id, ...(await editor.mcpCall('get_document_info', {})) };
+      }
+      case 'close_document': {
+        const tab = tabs.find((entry) => entry.id === Number(args.documentId));
+        if (!tab) throw new Error(`No document with id ${args.documentId}.`);
+        requestCloseTab(tab.id);
+        return { closed: tab.id };
+      }
+      case 'set_view': {
+        if (typeof args.commentMode === 'boolean') commentMode = args.commentMode;
+        const result = activeTab !== null && pdfEditor ? await pdfEditor.mcpCall('set_view', args) : {};
+        return { ...result, commentMode };
+      }
+      default: {
+        if (activeTab === null || !pdfEditor) throw new Error('No document is open. Use open_document first.');
+        return pdfEditor.mcpCall(name, args);
+      }
+    }
+  }
+
+  /**
+   * Browsers stop animation frames while a window is hidden. pdf.js draws
+   * pages and Svelte runs transitions on them, so an agent working while
+   * Docuflex sits behind its terminal would stall. While hidden, frame
+   * requests run as ordinary tasks instead; when visible nothing changes.
+   */
+  function keepRenderingWhileHidden() {
+    const scope = /** @type {any} */ (window);
+    if (scope.__docuflexHiddenFrames) return;
+    scope.__docuflexHiddenFrames = true;
+    const nativeRequest = window.requestAnimationFrame.bind(window);
+    const nativeCancel = window.cancelAnimationFrame.bind(window);
+    const channel = new MessageChannel();
+    /** @type {Map<number, { native?: number; callback?: FrameRequestCallback }>} */
+    const frames = new Map();
+    let nextFrame = 1;
+    channel.port1.onmessage = (event) => {
+      const frame = frames.get(event.data);
+      if (!frame?.callback) return;
+      frames.delete(event.data);
+      frame.callback(performance.now());
+    };
+    window.requestAnimationFrame = (callback) => {
+      const id = nextFrame++;
+      if (document.hidden) {
+        frames.set(id, { callback });
+        channel.port2.postMessage(id);
+      } else {
+        frames.set(id, { callback, native: nativeRequest((time) => { frames.delete(id); callback(time); }) });
+      }
+      return id;
+    };
+    // Frames requested just before the window hid would otherwise wait for it to return.
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) return;
+      for (const [id, frame] of frames) {
+        if (frame.native === undefined) continue;
+        nativeCancel(frame.native);
+        frame.native = undefined;
+        channel.port2.postMessage(id);
+      }
+    });
+    window.cancelAnimationFrame = (id) => {
+      const frame = frames.get(id);
+      frames.delete(id);
+      if (frame?.native !== undefined) nativeCancel(frame.native);
+    };
+  }
+
+  function connectMcpBridge() {
+    if (mcpStream || typeof EventSource === 'undefined') return;
+    keepRenderingWhileHidden();
+    mcpStream = new EventSource('/api/mcp/bridge');
+    mcpStream.onmessage = async (event) => {
+      /** @type {{ type: string; id?: string; name?: string; args?: Record<string, any> }} */
+      let message;
+      try {
+        message = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      if (message.type === 'ready') {
+        mcpClientId = Number(/** @type {any} */ (message).clientId);
+        clearInterval(mcpHeartbeat);
+        mcpHeartbeat = setInterval(() => void postToMcpBridge({ type: 'alive' }), 10_000);
+        return;
+      }
+      if (message.type !== 'call' || !message.id || !message.name) return;
+      // Tell the server right away that this window took the call.
+      void postToMcpBridge({ type: 'ack', id: message.id });
+      /** @type {{ id: string; ok: boolean; result?: unknown; error?: string }} */
+      let reply;
+      try {
+        reply = { id: message.id, ok: true, result: await runMcpTool(message.name, message.args ?? {}) };
+      } catch (error) {
+        reply = { id: message.id, ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+      await postToMcpBridge({ type: 'result', ...reply });
+      if (mcpPanelOpen) void refreshMcpStatus();
+    };
+  }
   /** @type {ReturnType<typeof setTimeout>} */
   let errorToastTimer;
 
@@ -340,6 +526,7 @@
     const previousLeft = new Map(movingElements.map((element) => [element.getAttribute('data-tab-motion'), element.getBoundingClientRect().left]));
     const index = tabs.findIndex((tab) => tab.id === id);
     tabs = tabs.filter((tab) => tab.id !== id);
+    editorStates.delete(id);
     closingTabs = new Set([...closingTabs].filter((tabId) => tabId !== id));
     if (activeTab === id) {
       activeTab = tabs[index]?.id ?? tabs[index - 1]?.id ?? null;
@@ -482,6 +669,20 @@
     }
   }
 
+  /** @type {Map<number, any>} */
+  const editorStates = new Map();
+
+  /**
+   * Keeps a tab's unsaved edits, comments and undo history while another tab
+   * is shown; the editor restores them when the tab comes back.
+   * @param {number | null} id @param {any} state
+   */
+  function saveEditorState(id, state) {
+    // A plain map, not the reactive tab list: this runs while the old editor
+    // is torn down, and rewriting `tabs` then dropped a tab that was just added.
+    if (id !== null && tabs.some((tab) => tab.id === id)) editorStates.set(id, state);
+  }
+
   /** @param {File} file @param {{ enabled: boolean; password: string }} [protection] @param {string} [thumbnailUrl] @param {string} [initialTool] */
   function addFileTab(file, protection = { enabled: false, password: '' }, thumbnailUrl, initialTool = 'select') {
     const id = nextTabId++;
@@ -608,7 +809,13 @@
     window.addEventListener('scroll', hideQuickTooltip, true);
     window.addEventListener('resize', hideQuickTooltip);
     window.addEventListener('docuflex:error', /** @type {EventListener} */ (handleNativeError));
+    void refreshMcpStatus().then(() => {
+      if (mcpStatus?.available) connectMcpBridge();
+    });
     return () => {
+      mcpStream?.close();
+      mcpStream = null;
+      clearInterval(mcpHeartbeat);
       window.removeEventListener('pointerdown', closeHomepageMenus);
       window.removeEventListener('keydown', handleQuickToolShortcut);
       window.removeEventListener('docuflex:error', /** @type {EventListener} */ (handleNativeError));
@@ -679,6 +886,24 @@
     </div>
 
     <nav class="utilities" aria-label="Editor utilities">
+      {#if mcpStatus?.available}
+        {@const mcpUtility = { label: 'MCP Server', description: mcpStatus.enabled ? 'AI agents can control Docuflex. Click for the address.' : 'The MCP server is off.' }}
+        <button
+          class="utility-button mcp-button"
+          class:active={mcpPanelOpen}
+          class:mcp-live={mcpStatus.enabled && mcpStatus.connectedApps > 0}
+          aria-label={mcpUtility.label}
+          aria-pressed={mcpPanelOpen}
+          aria-describedby={utilityTooltip?.label === mcpUtility.label ? 'utility-tooltip' : undefined}
+          onmouseenter={(event) => scheduleUtilityTooltip(mcpUtility, event.currentTarget)}
+          onmouseleave={hideUtilityTooltip}
+          onfocus={(event) => scheduleUtilityTooltip(mcpUtility, event.currentTarget)}
+          onblur={hideUtilityTooltip}
+          onclick={() => { hideUtilityTooltip(); mcpPanelOpen = !mcpPanelOpen; if (mcpPanelOpen) { settingsPanelOpen = false; void refreshMcpStatus(); } }}
+        >
+          <img src="/mcp.svg" alt="" />
+        </button>
+      {/if}
       {#if activeTab !== null}
         {@const commentUtility = { label: 'Comments', description: commentMode ? 'Hide comments.' : 'Show comments. Click or select text to comment.' }}
         <button
@@ -748,7 +973,7 @@
             hideUtilityTooltip();
             if (utility.id === 'home') activeTab = null;
             else if (utility.id === 'search') pdfEditor?.openSearchPanel();
-            else if (utility.id === 'settings') settingsPanelOpen = !settingsPanelOpen;
+            else if (utility.id === 'settings') { settingsPanelOpen = !settingsPanelOpen; mcpPanelOpen = false; }
           }}
         >
           <img src={utility.icon} alt="" />
@@ -941,11 +1166,18 @@
         protection={activeDocument.protection}
         initialTool={activeDocument.initialTool ?? 'select'}
         {commentMode}
+        documentId={activeDocument.id}
+        savedState={editorStates.get(activeDocument.id) ?? null}
+        onSaveState={saveEditorState}
         onProtectionChange={(protection) => updateDocumentProtection(activeDocument.id, protection)}
         onRequestClose={() => requestCloseTab(activeDocument.id)}
         bind:this={pdfEditor}
       />
     {/key}
+  {/if}
+
+  {#if mcpPanelOpen && mcpStatus?.available}
+    <McpPanel status={mcpStatus} onClose={() => (mcpPanelOpen = false)} onToggle={setMcpEnabled} onRefresh={refreshMcpStatus} />
   {/if}
 
   {#if settingsPanelOpen}
@@ -1226,6 +1458,23 @@
   .utility-button:hover {
     border-color: #c8c8c8;
     background: #eee;
+  }
+
+  .mcp-button {
+    position: relative;
+  }
+
+  /* Green dot while the MCP server is on and this window is serving it. */
+  .mcp-button.mcp-live::after {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 7px;
+    height: 7px;
+    border: 1.5px solid #f8f8f8;
+    border-radius: 50%;
+    background: #2fb344;
+    content: '';
   }
 
   .utility-button.active,
