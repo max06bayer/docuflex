@@ -19,6 +19,7 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -26,6 +27,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.WeakHashMap;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -1297,7 +1299,7 @@ public class DocuflexPdfServer {
           }
           continue;
         } else if ("textfield".equals(shape.type)) {
-          drawTextField(content, page, shape);
+          drawTextField(document, content, page, shape);
           continue;
         } else if ("check".equals(shape.type)) {
           if (!styleFlag(shape, 10, true) || !styleFlag(shape, 11, true)) continue;
@@ -1602,12 +1604,14 @@ public class DocuflexPdfServer {
   }
 
   private static void drawTextField(
+      PDDocument document,
       PDPageContentStream content,
       PDPage page,
       AnnotationStroke shape) throws IOException {
     String text = sanitizeWinAnsi(shape.text == null ? "" : shape.text)
         .replace("\r\n", "\n")
-        .replace('\r', '\n');
+        .replace('\r', '\n')
+        .replace('\t', ' ');
     if (text.isBlank()) return;
 
     String fontFamily = textStyleString(shape, "fontFamily", "Helvetica");
@@ -1615,7 +1619,7 @@ public class DocuflexPdfServer {
     boolean italic = textStyleBoolean(shape, "italic", false);
     boolean underline = textStyleBoolean(shape, "underline", false);
     boolean strikethrough = textStyleBoolean(shape, "strikethrough", false);
-    PDFont font = standardTextFieldFont(fontFamily, fontWeight, italic);
+    PDFont font = textFieldFont(document, fontFamily, fontWeight, italic);
     PdfPoint topLeft = shapePoint(page, shape, 0, 0);
     PdfPoint bottomLeft = shapePoint(page, shape, 0, 1);
     PdfPoint leftCenter = shapePoint(page, shape, 0, 0.5);
@@ -1628,7 +1632,7 @@ public class DocuflexPdfServer {
     float letterSpacing = (float) textStyleNumber(shape, "letterSpacing", 0) / EDITOR_PAGE_SCALE;
     float horizontalPadding = 6f / EDITOR_PAGE_SCALE;
     float availableWidth = (float) Math.max(1, physicalWidth - horizontalPadding * 2);
-    List<String> lines = wrapTextFieldLines(font, fontSize, letterSpacing, availableWidth, text);
+    List<String> lines = wrapTextFieldLines(document, font, fontSize, letterSpacing, availableWidth, text);
 
     double angle = Math.atan2(rightCenter.y - leftCenter.y, rightCenter.x - leftCenter.x);
     float cosine = (float) Math.cos(angle);
@@ -1650,11 +1654,11 @@ public class DocuflexPdfServer {
       int sourceEnd = Math.min(text.length(), sourceStart + line.length());
       sourceCursor = sourceEnd;
       while (sourceCursor < text.length() && (text.charAt(sourceCursor) == ' ' || text.charAt(sourceCursor) == '\n')) sourceCursor += 1;
-      List<PdfTextSegment> segments = pdfTextSegments(shape, text, sourceStart, sourceEnd);
+      List<PdfTextSegment> segments = pdfTextSegments(document, shape, text, sourceStart, sourceEnd);
       String horizontalAlignment = resolvedPdfTextAlignment(shape, sourceStart);
       float lineWidth = 0;
       for (PdfTextSegment segment : segments) {
-        lineWidth += textWidth(segment.style.font, segment.style.fontSize, segment.style.letterSpacing, segment.text);
+        lineWidth += textWidth(document, segment.style.font, segment.style.fontSize, segment.style.letterSpacing, segment.text);
       }
       double startDistance = horizontalPadding;
       if ("center".equals(horizontalAlignment)) startDistance = (physicalWidth - lineWidth) / 2;
@@ -1663,17 +1667,24 @@ public class DocuflexPdfServer {
       double baselineDistance = firstBaseline + lineIndex * lineHeight;
       double advance = 0;
       for (PdfTextSegment segment : segments) {
-        float segmentWidth = textWidth(segment.style.font, segment.style.fontSize, segment.style.letterSpacing, segment.text);
-        double localX = (startDistance + advance) / Math.max(1, physicalWidth);
-        PdfPoint baseline = shapePoint(page, shape, localX, baselineDistance / Math.max(1, physicalHeight));
+        float segmentWidth = textWidth(document, segment.style.font, segment.style.fontSize, segment.style.letterSpacing, segment.text);
         content.setNonStrokingColor(segment.style.color[0], segment.style.color[1], segment.style.color[2]);
         content.setStrokingColor(segment.style.color[0], segment.style.color[1], segment.style.color[2]);
-        content.beginText();
-        content.setFont(segment.style.font, segment.style.fontSize);
-        content.setCharacterSpacing(segment.style.letterSpacing);
-        content.setTextMatrix(new Matrix(cosine, sine, -sine, cosine, baseline.x, baseline.y));
-        if (!segment.text.isEmpty()) content.showText(segment.text);
-        content.endText();
+        // Characters the PDF font can't encode (arrows, math, other scripts)
+        // are drawn in an embedded fallback font instead of failing the export.
+        double runAdvance = 0;
+        for (FontRun run : fontRuns(document, segment.style.font, segment.text)) {
+          double localX = (startDistance + advance + runAdvance) / Math.max(1, physicalWidth);
+          PdfPoint baseline = shapePoint(page, shape, localX, baselineDistance / Math.max(1, physicalHeight));
+          content.beginText();
+          content.setFont(run.font(), segment.style.fontSize);
+          content.setCharacterSpacing(segment.style.letterSpacing);
+          content.setTextMatrix(new Matrix(cosine, sine, -sine, cosine, baseline.x, baseline.y));
+          content.showText(run.text());
+          content.endText();
+          runAdvance += run.font().getStringWidth(run.text()) / 1000f * segment.style.fontSize
+              + run.text().codePointCount(0, run.text().length()) * segment.style.letterSpacing;
+        }
         if (!segment.text.isEmpty() && (segment.style.underline || segment.style.strikethrough)) {
           double segmentEnd = startDistance + advance + segmentWidth;
           if (segment.style.underline) {
@@ -1712,11 +1723,12 @@ public class DocuflexPdfServer {
   }
 
   private static List<PdfTextSegment> pdfTextSegments(
+      PDDocument document,
       AnnotationStroke shape,
       String text,
       int start,
       int end) {
-    if (end <= start) return List.of(new PdfTextSegment("", resolvedPdfTextStyle(shape, start)));
+    if (end <= start) return List.of(new PdfTextSegment("", resolvedPdfTextStyle(document, shape, start)));
     List<Integer> boundaries = new ArrayList<>();
     boundaries.add(start);
     boundaries.add(end);
@@ -1732,12 +1744,12 @@ public class DocuflexPdfServer {
       int segmentStart = boundaries.get(index);
       int segmentEnd = boundaries.get(index + 1);
       if (segmentEnd <= segmentStart) continue;
-      segments.add(new PdfTextSegment(text.substring(segmentStart, segmentEnd), resolvedPdfTextStyle(shape, segmentStart)));
+      segments.add(new PdfTextSegment(text.substring(segmentStart, segmentEnd), resolvedPdfTextStyle(document, shape, segmentStart)));
     }
     return segments;
   }
 
-  private static PdfTextStyle resolvedPdfTextStyle(AnnotationStroke shape, int index) {
+  private static PdfTextStyle resolvedPdfTextStyle(PDDocument document, AnnotationStroke shape, int index) {
     Map<String, Object> base = shape.textStyle == null ? Map.of() : shape.textStyle;
     String color = mapString(base, "color", "#171717");
     String family = mapString(base, "fontFamily", "Helvetica");
@@ -1761,7 +1773,7 @@ public class DocuflexPdfServer {
       strikethrough = mapBoolean(range, "strikethrough", strikethrough);
     }
     return new PdfTextStyle(
-        standardTextFieldFont(family, weight, italic),
+        textFieldFont(document, family, weight, italic),
         (float) Math.max(6, size) / EDITOR_PAGE_SCALE,
         (float) spacing / EDITOR_PAGE_SCALE,
         parseTextColor(color),
@@ -1809,6 +1821,74 @@ public class DocuflexPdfServer {
     return value instanceof Boolean bool ? bool : fallback;
   }
 
+  /**
+   * Static TrueType files for the text box fonts the editor offers beyond the
+   * built-in PDF fonts, by family: regular, bold, italic, bold italic. The
+   * first file that exists on this computer is embedded; otherwise the text
+   * falls back to the closest built-in PDF font.
+   */
+  private static final Map<String, String[][]> TEXT_FONT_FILES = Map.of(
+      "arial", new String[][] {
+          {"/System/Library/Fonts/Supplemental/Arial.ttf", "C:\\Windows\\Fonts\\arial.ttf", "/usr/share/fonts/truetype/msttcorefonts/Arial.ttf"},
+          {"/System/Library/Fonts/Supplemental/Arial Bold.ttf", "C:\\Windows\\Fonts\\arialbd.ttf", "/usr/share/fonts/truetype/msttcorefonts/Arial_Bold.ttf"},
+          {"/System/Library/Fonts/Supplemental/Arial Italic.ttf", "C:\\Windows\\Fonts\\ariali.ttf", "/usr/share/fonts/truetype/msttcorefonts/Arial_Italic.ttf"},
+          {"/System/Library/Fonts/Supplemental/Arial Bold Italic.ttf", "C:\\Windows\\Fonts\\arialbi.ttf", "/usr/share/fonts/truetype/msttcorefonts/Arial_Bold_Italic.ttf"}},
+      "georgia", new String[][] {
+          {"/System/Library/Fonts/Supplemental/Georgia.ttf", "C:\\Windows\\Fonts\\georgia.ttf"},
+          {"/System/Library/Fonts/Supplemental/Georgia Bold.ttf", "C:\\Windows\\Fonts\\georgiab.ttf"},
+          {"/System/Library/Fonts/Supplemental/Georgia Italic.ttf", "C:\\Windows\\Fonts\\georgiai.ttf"},
+          {"/System/Library/Fonts/Supplemental/Georgia Bold Italic.ttf", "C:\\Windows\\Fonts\\georgiaz.ttf"}},
+      "verdana", new String[][] {
+          {"/System/Library/Fonts/Supplemental/Verdana.ttf", "C:\\Windows\\Fonts\\verdana.ttf"},
+          {"/System/Library/Fonts/Supplemental/Verdana Bold.ttf", "C:\\Windows\\Fonts\\verdanab.ttf"},
+          {"/System/Library/Fonts/Supplemental/Verdana Italic.ttf", "C:\\Windows\\Fonts\\verdanai.ttf"},
+          {"/System/Library/Fonts/Supplemental/Verdana Bold Italic.ttf", "C:\\Windows\\Fonts\\verdanaz.ttf"}},
+      "trebuchetms", new String[][] {
+          {"/System/Library/Fonts/Supplemental/Trebuchet MS.ttf", "C:\\Windows\\Fonts\\trebuc.ttf"},
+          {"/System/Library/Fonts/Supplemental/Trebuchet MS Bold.ttf", "C:\\Windows\\Fonts\\trebucbd.ttf"},
+          {"/System/Library/Fonts/Supplemental/Trebuchet MS Italic.ttf", "C:\\Windows\\Fonts\\trebucit.ttf"},
+          {"/System/Library/Fonts/Supplemental/Trebuchet MS Bold Italic.ttf", "C:\\Windows\\Fonts\\trebucbi.ttf"}},
+      "timesnewroman", new String[][] {
+          {"/System/Library/Fonts/Supplemental/Times New Roman.ttf", "C:\\Windows\\Fonts\\times.ttf"},
+          {"/System/Library/Fonts/Supplemental/Times New Roman Bold.ttf", "C:\\Windows\\Fonts\\timesbd.ttf"},
+          {"/System/Library/Fonts/Supplemental/Times New Roman Italic.ttf", "C:\\Windows\\Fonts\\timesi.ttf"},
+          {"/System/Library/Fonts/Supplemental/Times New Roman Bold Italic.ttf", "C:\\Windows\\Fonts\\timesbi.ttf"}},
+      "couriernew", new String[][] {
+          {"/System/Library/Fonts/Supplemental/Courier New.ttf", "C:\\Windows\\Fonts\\cour.ttf"},
+          {"/System/Library/Fonts/Supplemental/Courier New Bold.ttf", "C:\\Windows\\Fonts\\courbd.ttf"},
+          {"/System/Library/Fonts/Supplemental/Courier New Italic.ttf", "C:\\Windows\\Fonts\\couri.ttf"},
+          {"/System/Library/Fonts/Supplemental/Courier New Bold Italic.ttf", "C:\\Windows\\Fonts\\courbi.ttf"}});
+
+  private static PDFont textFieldFont(PDDocument document, String family, int weight, boolean italic) {
+    String[][] variants = TEXT_FONT_FILES.get(normalizeFontName(family));
+    if (variants != null) {
+      boolean bold = weight >= 600;
+      for (String path : variants[(bold ? 1 : 0) + (italic ? 2 : 0)]) {
+        PDFont embedded = embeddedFontFile(document, path);
+        if (embedded != null) return embedded;
+      }
+    }
+    return standardTextFieldFont(family, weight, italic);
+  }
+
+  /** Loads a TrueType file into the output document once and reuses it. */
+  private static PDFont embeddedFontFile(PDDocument document, String path) {
+    File file = new File(path);
+    if (!file.isFile()) return null;
+    FontFallbacks cache = FONT_FALLBACKS.computeIfAbsent(document, ignored -> new FontFallbacks());
+    synchronized (cache) {
+      if (cache.files.containsKey(path)) return cache.files.get(path);
+      PDFont font = null;
+      try {
+        font = PDType0Font.load(document, file);
+      } catch (IOException | RuntimeException ignored) {
+        // Not embeddable: use the built-in font instead.
+      }
+      cache.files.put(path, font);
+      return font;
+    }
+  }
+
   private static PDFont standardTextFieldFont(String family, int weight, boolean italic) {
     boolean bold = weight >= 600;
     String normalized = family.toLowerCase(Locale.ROOT);
@@ -1843,12 +1923,102 @@ public class DocuflexPdfServer {
     return new float[] {0.09f, 0.09f, 0.09f};
   }
 
-  private static float textWidth(PDFont font, float fontSize, float letterSpacing, String text) throws IOException {
+  private static float textWidth(PDDocument document, PDFont font, float fontSize, float letterSpacing, String text) throws IOException {
     if (text.isEmpty()) return 0;
-    return font.getStringWidth(text) / 1000f * fontSize + Math.max(0, text.length() - 1) * letterSpacing;
+    float width = 0;
+    for (FontRun run : fontRuns(document, font, text)) width += run.font().getStringWidth(run.text()) / 1000f * fontSize;
+    return width + Math.max(0, text.codePointCount(0, text.length()) - 1) * letterSpacing;
+  }
+
+  /**
+   * TrueType fonts embedded for characters the standard PDF fonts can't
+   * encode. The first one that has the glyph is used; when none has it the
+   * character becomes "?" so the export still succeeds.
+   */
+  private static final String[] FALLBACK_FONT_FILES = {
+      "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+      "/Library/Fonts/Arial Unicode.ttf",
+      "/System/Library/Fonts/Apple Symbols.ttf",
+      "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+      "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+      "/usr/share/fonts/TTF/DejaVuSans.ttf",
+      "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+      "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+      "/usr/share/fonts/truetype/noto/NotoSansMath-Regular.ttf",
+      "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
+      "C:\\Windows\\Fonts\\segoeui.ttf",
+      "C:\\Windows\\Fonts\\seguisym.ttf",
+      "C:\\Windows\\Fonts\\arial.ttf"
+  };
+
+  private record FontRun(String text, PDFont font) {}
+
+  /** Fallback fonts are loaded once per output document, and only when a text needs them. */
+  private static final class FontFallbacks {
+    List<PDFont> fonts;
+    final Map<String, PDFont> files = new HashMap<>();
+    final Map<PDFont, Map<Integer, PDFont>> choices = new IdentityHashMap<>();
+  }
+
+  private static final Map<PDDocument, FontFallbacks> FONT_FALLBACKS = Collections.synchronizedMap(new WeakHashMap<>());
+
+  private static List<FontRun> fontRuns(PDDocument document, PDFont primary, String text) {
+    List<FontRun> runs = new ArrayList<>();
+    StringBuilder current = new StringBuilder();
+    PDFont currentFont = primary;
+    for (int offset = 0; offset < text.length();) {
+      int codePoint = text.codePointAt(offset);
+      offset += Character.charCount(codePoint);
+      PDFont font = glyphFont(document, primary, codePoint);
+      String character = font == null ? "?" : new String(Character.toChars(codePoint));
+      if (font == null) font = primary;
+      if (font != currentFont && current.length() > 0) {
+        runs.add(new FontRun(current.toString(), currentFont));
+        current.setLength(0);
+      }
+      currentFont = font;
+      current.append(character);
+    }
+    if (current.length() > 0) runs.add(new FontRun(current.toString(), currentFont));
+    return runs;
+  }
+
+  /** The font that draws this character: the requested one when it can, else the first fallback with the glyph. */
+  private static PDFont glyphFont(PDDocument document, PDFont primary, int codePoint) {
+    if (canEncode(primary, codePoint)) return primary;
+    FontFallbacks fallbacks = FONT_FALLBACKS.computeIfAbsent(document, ignored -> new FontFallbacks());
+    synchronized (fallbacks) {
+      Map<Integer, PDFont> choices = fallbacks.choices.computeIfAbsent(primary, ignored -> new HashMap<>());
+      if (choices.containsKey(codePoint)) return choices.get(codePoint);
+      if (fallbacks.fonts == null) {
+        fallbacks.fonts = new ArrayList<>();
+        for (String path : FALLBACK_FONT_FILES) {
+          PDFont font = embeddedFontFile(document, path);
+          if (font != null) fallbacks.fonts.add(font);
+        }
+      }
+      PDFont chosen = null;
+      for (PDFont font : fallbacks.fonts) {
+        if (canEncode(font, codePoint)) {
+          chosen = font;
+          break;
+        }
+      }
+      choices.put(codePoint, chosen);
+      return chosen;
+    }
+  }
+
+  private static boolean canEncode(PDFont font, int codePoint) {
+    try {
+      return font.encode(new String(Character.toChars(codePoint))).length > 0;
+    } catch (IOException | RuntimeException error) {
+      return false;
+    }
   }
 
   private static List<String> wrapTextFieldLines(
+      PDDocument document,
       PDFont font,
       float fontSize,
       float letterSpacing,
@@ -1864,7 +2034,7 @@ public class DocuflexPdfServer {
       while (!remaining.isEmpty()) {
         int fittingLength = 0;
         for (int index = 1; index <= remaining.length(); index += 1) {
-          if (textWidth(font, fontSize, letterSpacing, remaining.substring(0, index)) > availableWidth) break;
+          if (textWidth(document, font, fontSize, letterSpacing, remaining.substring(0, index)) > availableWidth) break;
           fittingLength = index;
         }
         if (fittingLength == 0) fittingLength = 1;

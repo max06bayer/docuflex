@@ -5,11 +5,12 @@
   import { fade, fly, scale } from 'svelte/transition';
   import EditorToolbar from '$lib/EditorToolbar.svelte';
   import HtmlPdfEditor from '$lib/HtmlPdfEditor.svelte';
+  import { renderLatex } from '$lib/math-render.js';
 
   /** @typedef {{ x: number; y: number; pressure: number }} StrokePoint */
   /** @typedef {{ id: number; type: 'marker' | 'pen'; points: StrokePoint[]; rawPoints?: StrokePoint[]; color?: string; thickness?: number; opacity?: number; falloff?: number; smoothing?: number }} AnnotationStroke */
   /** @typedef {{ start: number; end: number; color?: string; fontFamily?: string; fontSize?: number; fontWeight?: number; letterSpacing?: number; textAlign?: 'left' | 'center' | 'right'; italic?: boolean; underline?: boolean; strikethrough?: boolean }} TextStyleRange */
-  /** @typedef {{ id: number; type: 'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'measure' | 'crop' | 'textfield' | 'signature' | 'image' | 'checkbox' | 'input'; x: number; y: number; width: number; height: number; rotation: number; text?: string; textColor?: string; fontFamily?: string; fontSize?: number; fontWeight?: number; letterSpacing?: number; lineHeight?: number; textAlign?: 'left' | 'center' | 'right'; verticalAlign?: 'top' | 'middle' | 'bottom'; italic?: boolean; underline?: boolean; strikethrough?: boolean; textStyleRanges?: TextStyleRange[]; imageData?: string; fieldName?: string; fieldValue?: string | boolean; existingField?: boolean; originalFieldValue?: string | boolean; originalFrame?: { x: number; y: number; width: number; height: number }; readOnly?: boolean; opacity?: number; cornerRadius?: number; fillPresent?: boolean; fillEnabled?: boolean; fillColor?: string; fillAlpha?: number; strokePresent?: boolean; strokeEnabled?: boolean; strokeColor?: string; strokeAlpha?: number; strokeWidth?: number; shadowPresent?: boolean; shadowEnabled?: boolean; shadowOpacity?: number; shadowBlur?: number; shadowX?: number; shadowY?: number; backgroundBlurPresent?: boolean; backgroundBlurEnabled?: boolean; backgroundBlur?: number }} AnnotationShape */
+  /** @typedef {{ id: number; type: 'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'measure' | 'crop' | 'textfield' | 'signature' | 'image' | 'checkbox' | 'input'; x: number; y: number; width: number; height: number; rotation: number; text?: string; textColor?: string; fontFamily?: string; fontSize?: number; fontWeight?: number; letterSpacing?: number; lineHeight?: number; textAlign?: 'left' | 'center' | 'right'; verticalAlign?: 'top' | 'middle' | 'bottom'; italic?: boolean; underline?: boolean; strikethrough?: boolean; textStyleRanges?: TextStyleRange[]; imageData?: string; latex?: string; latexFontSize?: number; latexColor?: string; latexDisplay?: boolean; fieldName?: string; fieldValue?: string | boolean; existingField?: boolean; originalFieldValue?: string | boolean; originalFrame?: { x: number; y: number; width: number; height: number }; readOnly?: boolean; opacity?: number; cornerRadius?: number; fillPresent?: boolean; fillEnabled?: boolean; fillColor?: string; fillAlpha?: number; strokePresent?: boolean; strokeEnabled?: boolean; strokeColor?: string; strokeAlpha?: number; strokeWidth?: number; shadowPresent?: boolean; shadowEnabled?: boolean; shadowOpacity?: number; shadowBlur?: number; shadowX?: number; shadowY?: number; backgroundBlurPresent?: boolean; backgroundBlurEnabled?: boolean; backgroundBlur?: number }} AnnotationShape */
   /** @typedef {{ id: number; type: 'highlight' | 'underline' | 'crossout' | 'blackout' | 'whiteout'; rects: { x: number; y: number; width: number; height: number; color?: [number, number, number]; thickness?: number }[] }} TextHighlight */
 
   /** @typedef {{ x: number; y: number; width: number; height: number }} CommentRect */
@@ -693,6 +694,32 @@
   export function openSearchPanel() {
     activeTool = 'search';
     showSearchPanel();
+  }
+
+  /** What the AI chat tells the model about this document: the page in view and the sidebar selection. */
+  export function aiContext() {
+    /** @type {number | null} */
+    let currentPage = null;
+    if (viewer) {
+      const viewerRect = viewer.getBoundingClientRect();
+      const middle = viewerRect.top + viewerRect.height / 2;
+      let closest = Infinity;
+      viewer.querySelectorAll('.pdf-page').forEach((page, index) => {
+        const rect = page.getBoundingClientRect();
+        const distance = rect.top <= middle && rect.bottom >= middle ? 0 : Math.min(Math.abs(rect.top - middle), Math.abs(rect.bottom - middle));
+        if (distance < closest) {
+          closest = distance;
+          currentPage = index + 1;
+        }
+      });
+    }
+    return {
+      name: workingFile.name,
+      pageCount,
+      currentPage,
+      selectedPages: selectedPageIndexes().map((index) => index + 1),
+      editProtected: editLocked
+    };
   }
 
   /** Pages the raster adjustments apply to: the sidebar selection, otherwise every page. */
@@ -2785,31 +2812,68 @@
     return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value));
   }
 
+  /** @type {{ zoom: number; clientX: number; clientY: number } | null} */
+  let pendingZoom = null;
+  let pendingZoomFrame = 0;
+
+  /** The zoom the view is heading to, so fast wheel events build on each other. */
+  function targetZoom() {
+    return pendingZoom?.zoom ?? zoomLevel;
+  }
+
   /**
-   * Changes the document scale while keeping the document point beneath the
-   * pointer in the same place in the scroll viewport.
+   * Changes the document scale while keeping the point beneath the pointer in
+   * place. Wheel and pinch events arrive faster than a long document can lay
+   * out, so requests are merged and applied once per frame.
    * @param {number} requestedZoom
    * @param {number} clientX
    * @param {number} clientY
    */
-  async function zoomAt(requestedZoom, clientX, clientY) {
+  function zoomAt(requestedZoom, clientX, clientY) {
     if (!viewer) return;
-    const nextZoom = clampZoom(requestedZoom);
-    if (Math.abs(nextZoom - zoomLevel) < 0.001) return;
+    pendingZoom = { zoom: clampZoom(requestedZoom), clientX, clientY };
+    if (!pendingZoomFrame) pendingZoomFrame = requestAnimationFrame(() => void applyPendingZoom());
+  }
 
-    const documentElement = viewer.querySelector('.pdf-document');
-    if (!(documentElement instanceof HTMLElement)) return;
-    const before = documentElement.getBoundingClientRect();
-    const documentX = (clientX - before.left) / zoomLevel;
-    const documentY = (clientY - before.top) / zoomLevel;
+  async function applyPendingZoom() {
+    pendingZoomFrame = 0;
+    const request = pendingZoom;
+    pendingZoom = null;
+    if (!request || !viewer || Math.abs(request.zoom - zoomLevel) < 0.001) return;
 
-    zoomLevel = nextZoom;
+    // Anchor on the page under the pointer, not the document top: far down a
+    // long document small rounding differences per page add up to large jumps.
+    const anchor = zoomAnchorPage(request.clientX, request.clientY);
+    zoomLevel = request.zoom;
     await tick();
+    if (!viewer || !anchor) return;
 
-    const after = documentElement.getBoundingClientRect();
-    viewer.scrollLeft += after.left + documentX * zoomLevel - clientX;
-    viewer.scrollTop += after.top + documentY * zoomLevel - clientY;
+    const rect = anchor.page.getBoundingClientRect();
+    // Rects are in screen pixels, scroll offsets in the viewer's own pixels;
+    // they differ by the app's UI scale (and any other CSS zoom above it).
+    const viewerRect = viewer.getBoundingClientRect();
+    const scale = viewer.offsetWidth ? viewerRect.width / viewer.offsetWidth : 1;
+    viewer.scrollLeft += (rect.left + anchor.x * rect.width - request.clientX) / scale;
+    viewer.scrollTop += (rect.top + anchor.y * rect.height - request.clientY) / scale;
     scheduleSharpRender();
+  }
+
+  /** The page under (or nearest to) a point, and where in it the point is, as fractions. @param {number} clientX @param {number} clientY */
+  function zoomAnchorPage(clientX, clientY) {
+    const pages = viewer?.querySelectorAll('.pdf-page');
+    if (!pages?.length) return null;
+    // Pages are stacked top to bottom, so search by vertical position.
+    let low = 0;
+    let high = pages.length - 1;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (pages[middle].getBoundingClientRect().bottom < clientY) low = middle + 1;
+      else high = middle;
+    }
+    const page = /** @type {HTMLElement} */ (pages[low]);
+    const rect = page.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    return { page, x: (clientX - rect.left) / rect.width, y: (clientY - rect.top) / rect.height };
   }
 
   /** @param {WheelEvent} event */
@@ -2828,7 +2892,7 @@
     // accelerate only the native pinch gesture.
     const sensitivity = event.metaKey ? 0.002 : 0.01;
     const factor = Math.exp(-event.deltaY * deltaScale * sensitivity);
-    zoomAt(zoomLevel * factor, event.clientX, event.clientY);
+    zoomAt(targetZoom() * factor, event.clientX, event.clientY);
   }
 
   /** @param {{ x: number; y: number; width: number; height: number; color?: [number, number, number] }[]} rects */
@@ -3300,6 +3364,8 @@
     if (family === 'Times New Roman') return '"Times New Roman", Times, serif';
     if (family === 'Georgia') return 'Georgia, "Times New Roman", serif';
     if (family === 'Courier New') return '"Courier New", Courier, monospace';
+    if (family === 'Verdana') return 'Verdana, Geneva, sans-serif';
+    if (family === 'Trebuchet MS') return '"Trebuchet MS", Helvetica, sans-serif';
     return 'Helvetica, Arial, sans-serif';
   }
 
@@ -5295,7 +5361,7 @@
     if (event.button === 0 && activeTool === 'zoom') {
       event.preventDefault();
       window.getSelection()?.removeAllRanges();
-      zoomAt(zoomLevel * (event.shiftKey ? 1 / CLICK_ZOOM_FACTOR : CLICK_ZOOM_FACTOR), event.clientX, event.clientY);
+      zoomAt(targetZoom() * (event.shiftKey ? 1 / CLICK_ZOOM_FACTOR : CLICK_ZOOM_FACTOR), event.clientX, event.clientY);
       return;
     }
 
@@ -7131,7 +7197,7 @@
 
   /** @param {AnnotationShape} shape @param {number} pageIndex */
   function mcpDescribeShape(shape, pageIndex) {
-    const kind = shape.existingField ? 'form-field' : shape.type === 'textfield' ? 'text' : shape.type === 'input' || shape.type === 'checkbox' ? 'form-field' : shape.type;
+    const kind = shape.existingField ? 'form-field' : shape.latex ? 'math' : shape.type === 'textfield' ? 'text' : shape.type === 'input' || shape.type === 'checkbox' ? 'form-field' : shape.type;
     return {
       objectId: shape.id,
       kind,
@@ -7142,7 +7208,8 @@
       width: toPt(shape.width),
       height: toPt(shape.height),
       rotation: Math.round(shape.rotation * 100) / 100,
-      ...(shape.type === 'textfield' ? { text: shape.text ?? '', fontSize: toPt(shape.fontSize ?? 16), fontFamily: shape.fontFamily ?? 'Helvetica', color: shape.textColor ?? '#171717' } : {}),
+      ...(shape.type === 'textfield' ? mcpDescribeText(shape) : {}),
+      ...(shape.latex ? { latex: shape.latex, fontSize: shape.latexFontSize, color: shape.latexColor } : {}),
       ...(shape.type === 'input' || shape.type === 'checkbox' ? { name: shape.fieldName ?? '', value: shape.fieldValue ?? '', existingField: Boolean(shape.existingField) } : {}),
       ...(shapeHasFill(shape) ? { fillColor: shapePropertyEnabled(shape, 'fill') ? (shape.fillColor ?? '#ff4d55') : null } : {}),
       ...(shapeSupportsStroke(shape) ? { strokeColor: shapePropertyEnabled(shape, 'stroke') ? (shape.strokeColor ?? (shapeHasFill(shape) ? '#de3542' : '#ff4d55')) : null } : {})
@@ -7170,7 +7237,156 @@
   function mcpAddShape(pageIndex, shape) {
     shapes = { ...shapes, [pageIndex]: [...(shapes[pageIndex] ?? []), shape] };
     setShapeSelection(pageIndex, [shape.id]);
-    return mcpDescribeShape(shape, pageIndex);
+    return { ...mcpDescribeShape(shape, pageIndex), pageNow: mcpPageSummary(pageIndex) };
+  }
+
+  /**
+   * What is now on a page, returned after every change so an agent can see
+   * its edit landed instead of guessing and repeating it.
+   * @param {number} pageIndex
+   */
+  function mcpPageSummary(pageIndex) {
+    /** @param {string} value */
+    const short = (value) => (value.length > 40 ? `${value.slice(0, 39)}…` : value);
+    const objects = [
+      ...(shapes[pageIndex] ?? []).filter((shape) => shape.type !== 'measure' && !shape.existingField).map((shape) => ({
+        objectId: shape.id,
+        kind: shape.latex ? 'math' : shape.type === 'textfield' ? 'text' : shape.type,
+        y: toPt(shape.y),
+        ...(shape.type === 'textfield' ? { text: short(shape.text ?? '') } : shape.latex ? { latex: short(shape.latex) } : {})
+      })),
+      ...(annotations[pageIndex] ?? []).map((stroke) => ({ objectId: stroke.id, kind: stroke.type })),
+      ...(textHighlights[pageIndex] ?? []).map((mark) => ({ objectId: mark.id, kind: mark.type ?? 'highlight' }))
+    ];
+    // Text or formulas mostly on top of each other are almost always repeated
+    // edits; say so plainly.
+    const boxes = (shapes[pageIndex] ?? []).filter((shape) => shape.type === 'textfield' || shape.latex);
+    /** @type {string[]} */
+    const overlaps = [];
+    for (let first = 0; first < boxes.length; first += 1) {
+      for (let second = first + 1; second < boxes.length; second += 1) {
+        const a = boxes[first];
+        const b = boxes[second];
+        const overlapWidth = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
+        const overlapHeight = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
+        if (overlapWidth <= 0 || overlapHeight <= 0) continue;
+        const smaller = Math.min(a.width * a.height, b.width * b.height);
+        if (smaller > 0 && (overlapWidth * overlapHeight) / smaller > 0.5) overlaps.push(`${a.id} and ${b.id}`);
+      }
+    }
+    return {
+      page: pageIndex + 1,
+      addedObjects: objects.length,
+      objects: objects.slice(-15),
+      ...(objects.length > 15 ? { note: 'Showing the 15 newest; list_objects shows all.' } : {}),
+      ...(overlaps.length ? { warning: `These added objects overlap each other: ${overlaps.slice(0, 6).join('; ')}. If one is a repeat, delete it.` } : {})
+    };
+  }
+
+  /**
+   * An identical object already at (almost) the same spot: the agent is
+   * repeating itself, so return the existing one instead of stacking copies.
+   * @param {number} pageIndex @param {(shape: AnnotationShape) => boolean} matches @param {number} xPt @param {number} yPt
+   */
+  function mcpFindDuplicate(pageIndex, matches, xPt, yPt) {
+    return (shapes[pageIndex] ?? []).find((shape) => matches(shape) && Math.abs(toPt(shape.x) - xPt) < 3 && Math.abs(toPt(shape.y) - yPt) < 3) ?? null;
+  }
+
+  /** @param {AnnotationShape} shape @param {number} pageIndex */
+  function mcpDuplicateResult(shape, pageIndex) {
+    return {
+      ...mcpDescribeShape(shape, pageIndex),
+      duplicate: true,
+      note: `Not added again: object ${shape.id} with the same content is already at this position. Your earlier call worked. Change it with update_object or remove it with delete_object.`,
+      pageNow: mcpPageSummary(pageIndex)
+    };
+  }
+
+  /** Moves an added object in front of or behind the other added objects on its page. @param {number} pageIndex @param {number} id @param {string} arrange */
+  function mcpArrange(pageIndex, id, arrange) {
+    const list = shapes[pageIndex] ?? [];
+    const shape = list.find((entry) => entry.id === id);
+    if (!shape) return;
+    const rest = list.filter((entry) => entry.id !== id);
+    if (arrange === 'back') shapes = { ...shapes, [pageIndex]: [shape, ...rest] };
+    else if (arrange === 'front') shapes = { ...shapes, [pageIndex]: [...rest, shape] };
+    else throw new Error('arrange must be "front" or "back".');
+  }
+
+  /**
+   * Renders LaTeX into an image object, keeping the source so it can be edited.
+   * @param {{ id: number; x: number; y: number }} base @param {string} latex @param {Record<string, any>} args
+   * @returns {Promise<AnnotationShape>}
+   */
+  async function mcpMathShape(base, latex, args) {
+    const fontSize = clamp(Number(args.fontSize ?? 14), 4, 200);
+    const color = mcpColor(args.color, '#171717');
+    const display = args.display !== false;
+    const rendered = await renderLatex(latex, { display, color, fontSize });
+    let width = rendered.width;
+    let height = rendered.height;
+    const maxWidth = Number(args.maxWidth);
+    if (maxWidth > 0 && width > maxWidth) {
+      height *= maxWidth / width;
+      width = maxWidth;
+    }
+    return /** @type {AnnotationShape} */ ({
+      ...base,
+      type: 'image',
+      width: toPx(width),
+      height: toPx(height),
+      rotation: Number(/** @type {any} */ (base).rotation) || 0,
+      imageData: rendered.dataUrl,
+      strokeEnabled: false,
+      latex,
+      latexFontSize: fontSize,
+      latexColor: color,
+      latexDisplay: display
+    });
+  }
+
+  /** Added text boxes and formulas on a page; get_page_text only reads the PDF's own text. @param {number} pageIndex */
+  function mcpAddedTextOnPage(pageIndex) {
+    const added = (shapes[pageIndex] ?? []).filter((shape) => shape.type === 'textfield' || shape.latex);
+    return {
+      addedText: added.map((shape) => ({
+        objectId: shape.id,
+        ...(shape.latex ? { latex: shape.latex } : { text: shape.text ?? '' }),
+        x: toPt(shape.x),
+        y: toPt(shape.y),
+        width: toPt(shape.width),
+        height: toPt(shape.height)
+      })),
+      note: '"text" and "runs" are the PDF\'s own text. Text and formulas you added are in "addedText"; list_objects shows every added object.'
+    };
+  }
+
+  /**
+   * A one-page PDF of the given size in points, filled with a color.
+   * @param {number} width @param {number} height @param {string} color "#RRGGBB"
+   */
+  function blankPdfBytes(width, height, color) {
+    const [red, green, blue] = [1, 3, 5].map((offset) => (Number.parseInt(color.slice(offset, offset + 2), 16) / 255).toFixed(4));
+    const w = width.toFixed(2);
+    const h = height.toFixed(2);
+    const content = color === '#FFFFFF' ? '' : `${red} ${green} ${blue} rg 0 0 ${w} ${h} re f`;
+    const objects = [
+      '<< /Type /Catalog /Pages 2 0 R >>',
+      '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${w} ${h}] /Resources << >> /Contents 4 0 R >>`,
+      `<< /Length ${content.length} >>\nstream\n${content}\nendstream`
+    ];
+    let pdf = '%PDF-1.4\n';
+    /** @type {number[]} */
+    const offsets = [];
+    objects.forEach((body, index) => {
+      offsets.push(pdf.length);
+      pdf += `${index + 1} 0 obj\n${body}\nendobj\n`;
+    });
+    const xref = pdf.length;
+    pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.map((offset) => `${String(offset).padStart(10, '0')} 00000 n \n`).join('')}`;
+    pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+    return new TextEncoder().encode(pdf);
   }
 
   /** Applies style props shared by add_shape and update_object (in px where needed). @param {AnnotationShape} shape @param {Record<string, any>} args */
@@ -7220,6 +7436,93 @@
     return { width: widest * 1.08 + fontSizePx * 1.4 + 6, height: lines.length * fontSizePx * 1.2 + fontSizePx * 0.5 };
   }
 
+  const MCP_FONTS = ['Helvetica', 'Arial', 'Verdana', 'Trebuchet MS', 'Times New Roman', 'Georgia', 'Courier New'];
+
+  /**
+   * The text fonts agents can use, under the names the editor uses. Other
+   * names map to the closest one with a note; unknown names fail so an agent
+   * doesn't guess.
+   * @param {unknown} value
+   */
+  function mcpFontFamily(value) {
+    if (value === undefined || value === null || value === '') return { family: 'Helvetica', note: '' };
+    const requested = String(value).trim();
+    const key = requested.toLowerCase().replace(/["']/g, '');
+    /** @type {Record<string, string>} */
+    const exact = Object.fromEntries(MCP_FONTS.map((name) => [name.toLowerCase(), name]));
+    if (exact[key]) return { family: exact[key], note: '' };
+    /** @type {Record<string, string>} */
+    const aliases = {
+      times: 'Times New Roman', serif: 'Times New Roman',
+      courier: 'Courier New', monospace: 'Courier New', mono: 'Courier New',
+      trebuchet: 'Trebuchet MS', 'sans-serif': 'Helvetica', sans: 'Helvetica', inter: 'Helvetica', geist: 'Helvetica', 'helvetica neue': 'Helvetica'
+    };
+    const family = aliases[key];
+    if (family) return { family, note: `"${requested}" is used as ${family}.` };
+    throw new Error(`Font "${requested}" is not available. Use one of: ${MCP_FONTS.join(', ')}. Any Unicode character works in all of them. For formulas use add_math with LaTeX.`);
+  }
+
+  /**
+   * Wraps text the way export does (greedy, breaking at the last space, 6 px
+   * padding on each side) so heights match the exported PDF.
+   * @param {string} text @param {number} fontSizePx @param {string} family @param {boolean} bold @param {boolean} italic @param {number} widthPx
+   */
+  function mcpLayoutText(text, fontSizePx, family, bold, italic, widthPx) {
+    const context = document.createElement('canvas').getContext('2d');
+    if (context) context.font = `${italic ? 'italic ' : ''}${bold ? 700 : 400} ${fontSizePx}px ${textFontStack(family)}`;
+    /** @param {string} value */
+    // 5% wider than the browser measures: exported fonts and embedded symbol
+    // fallbacks run slightly wider, and a too-tall estimate is the safe side.
+    const measure = (value) => (context ? context.measureText(value).width * 1.05 : value.length * fontSizePx * 0.58);
+    const available = Math.max(1, widthPx - 12);
+    /** @type {string[]} */
+    const lines = [];
+    for (const paragraph of text.replace(/\r\n?/g, '\n').replace(/\t/g, ' ').split('\n')) {
+      let remaining = paragraph;
+      if (!remaining) {
+        lines.push('');
+        continue;
+      }
+      while (remaining) {
+        let fitting = 0;
+        for (let index = 1; index <= remaining.length; index += 1) {
+          if (measure(remaining.slice(0, index)) > available) break;
+          fitting = index;
+        }
+        if (fitting === 0) fitting = 1;
+        if (fitting >= remaining.length) {
+          lines.push(remaining.trimEnd());
+          break;
+        }
+        let breakAt = remaining.lastIndexOf(' ', fitting - 1);
+        if (breakAt <= 0) breakAt = fitting;
+        lines.push(remaining.slice(0, breakAt).trimEnd());
+        remaining = remaining.slice(breakAt).trimStart();
+      }
+    }
+    return { lines, height: lines.length * fontSizePx * 1.2 + fontSizePx * 0.5 };
+  }
+
+  /** @param {AnnotationShape} shape */
+  function mcpShapeTextLayout(shape) {
+    return mcpLayoutText(shape.text ?? '', shape.fontSize ?? 16, shape.fontFamily ?? 'Helvetica', (shape.fontWeight ?? 400) >= 600, Boolean(shape.italic), shape.width);
+  }
+
+  /** Text details for agents, including whether the text fits its box. @param {AnnotationShape} shape */
+  function mcpDescribeText(shape) {
+    const layout = mcpShapeTextLayout(shape);
+    const fits = layout.height <= shape.height + 0.5;
+    return {
+      text: shape.text ?? '',
+      fontSize: toPt(shape.fontSize ?? 16),
+      fontFamily: shape.fontFamily ?? 'Helvetica',
+      color: shape.textColor ?? '#171717',
+      lines: layout.lines.length,
+      textHeight: toPt(layout.height),
+      ...(fits ? {} : { overflow: `The text needs ${toPt(layout.height)} pt but the box is ${toPt(shape.height)} pt high; the rest is cut off. Increase height or width, or reduce fontSize.` })
+    };
+  }
+
   /** PDF bytes as they would be exported now, without opening any dialog. */
   async function mcpPreviewBytes() {
     if (editLocked && !allowedEditLockedChanges()) {
@@ -7235,7 +7538,7 @@
     return dataUrl.slice(dataUrl.indexOf(',') + 1);
   }
 
-  const MCP_READ_ONLY_TOOLS = new Set(['get_document_info', 'get_page_text', 'search_text', 'render_page', 'list_objects', 'list_comments', 'list_form_fields', 'extract_pages', 'save_document', 'set_view', 'undo', 'redo']);
+  const MCP_READ_ONLY_TOOLS = new Set(['measure_text', 'get_document_info', 'get_page_text', 'search_text', 'render_page', 'list_objects', 'list_comments', 'list_form_fields', 'extract_pages', 'save_document', 'set_view', 'undo', 'redo']);
 
   /** Commits any pending undo step now instead of after the usual debounce. */
   async function mcpFlushHistory() {
@@ -7250,7 +7553,22 @@
    * @param {string} name @param {Record<string, any>} args
    * @returns {Promise<any>}
    */
-  export async function mcpCall(name, args = {}) {
+  /** @type {Promise<unknown>} */
+  let mcpQueue = Promise.resolve();
+
+  /**
+   * Tool calls run one at a time: parallel agents (AI helpers, several MCP
+   * clients) share this editor's state, history and error collection.
+   * @param {string} name @param {Record<string, any>} [args]
+   */
+  export function mcpCall(name, args = {}) {
+    const result = mcpQueue.then(() => mcpCallNow(name, args));
+    mcpQueue = result.catch(() => {});
+    return result;
+  }
+
+  /** @param {string} name @param {Record<string, any>} [args] */
+  async function mcpCallNow(name, args = {}) {
     if (name === 'unlock_document') return mcpUnlock(String(args.password ?? ''));
     await mcpWaitUntilReady();
     const changesDocument = !MCP_READ_ONLY_TOOLS.has(name);
@@ -7281,12 +7599,12 @@
     for (let attempt = 0; attempt < 300 && !passwordUnlockOpen && !pdfReady; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    if (!passwordUnlockOpen) return { unlocked: false, note: 'This document is not password protected.', ...(await mcpCall('get_document_info', {})) };
+    if (!passwordUnlockOpen) return { unlocked: false, note: 'This document is not password protected.', ...(await mcpCallNow('get_document_info', {})) };
     if (!password) throw new Error('Give the password.');
     passwordUnlockValue = password;
     await disableImportedEncryption();
     if (passwordUnlockOpen) throw new Error(passwordUnlockError || 'Could not unlock the PDF.');
-    return { unlocked: true, ...(await mcpCall('get_document_info', {})) };
+    return { unlocked: true, ...(await mcpCallNow('get_document_info', {})) };
   }
 
   /** @param {string} name @param {Record<string, any>} args */
@@ -7333,7 +7651,8 @@
           width: Math.round(width * 100) / 100,
           height: Math.round(height * 100) / 100,
           text: lines.map((line) => line.text).join('\n'),
-          runs
+          runs,
+          ...mcpAddedTextOnPage(pageIndex)
         };
       }
 
@@ -7346,7 +7665,9 @@
 
       case 'render_page': {
         const pageIndex = mcpPageIndex(args.page);
-        const scale = clamp(Number(args.scale ?? 1.25), 0.25, 3);
+        const region = args.region && typeof args.region === 'object' ? args.region : null;
+        // A region is a close-up, so it renders sharper by default.
+        const scale = clamp(Number(args.scale ?? (region ? 3 : 1.25)), 0.25, region ? 6 : 3);
         const withEdits = args.withEdits !== false;
         const pdfjs = await import('pdfjs-dist');
         const source = withEdits ? await mcpPreviewBytes() : { bytes: await readWorkingPdf(), note: '' };
@@ -7365,12 +7686,24 @@
           // The print intent renders without animation frames, so it also
           // works while the Docuflex window is hidden behind the agent's app.
           await page.render({ canvas, canvasContext: context, viewport, intent: 'print', annotationMode: pdfjs.AnnotationMode.ENABLE }).promise;
-          const blob = await new Promise((resolve, reject) => canvas.toBlob((result) => result ? resolve(result) : reject(new Error('Could not encode the page image.')), 'image/png'));
+          let output = canvas;
+          if (region) {
+            const left = clamp(Number(region.x) * scale, 0, canvas.width - 1);
+            const top = clamp(Number(region.y) * scale, 0, canvas.height - 1);
+            const cropWidth = clamp(Number(region.width) * scale, 1, canvas.width - left);
+            const cropHeight = clamp(Number(region.height) * scale, 1, canvas.height - top);
+            output = document.createElement('canvas');
+            output.width = Math.ceil(cropWidth);
+            output.height = Math.ceil(cropHeight);
+            output.getContext('2d')?.drawImage(canvas, left, top, cropWidth, cropHeight, 0, 0, output.width, output.height);
+          }
+          const blob = await new Promise((resolve, reject) => output.toBlob((result) => result ? resolve(result) : reject(new Error('Could not encode the page image.')), 'image/png'));
           return {
             page: pageIndex + 1,
             png: await blobToBase64(/** @type {Blob} */ (blob)),
-            width: canvas.width,
-            height: canvas.height,
+            width: output.width,
+            height: output.height,
+            ...(region ? { region: { x: Number(region.x), y: Number(region.y), width: Number(region.width), height: Number(region.height) } } : {}),
             widthPt: Math.round((viewport.width / scale) * 100) / 100,
             heightPt: Math.round((viewport.height / scale) * 100) / 100,
             note: source.note
@@ -7385,21 +7718,60 @@
         const pageIndex = mcpPageIndex(args.page);
         const text = String(args.text ?? '');
         if (!text) throw new Error('text is empty.');
+        const duplicate = mcpFindDuplicate(pageIndex, (shape) => shape.type === 'textfield' && shape.text === text, Number(args.x), Number(args.y));
+        if (duplicate) return mcpDuplicateResult(duplicate, pageIndex);
         const fontSize = toPx(clamp(Number(args.fontSize ?? 12), 2, 400));
-        const family = String(args.fontFamily ?? 'Helvetica');
-        const measured = mcpMeasureText(text, fontSize, family, Boolean(args.bold), Boolean(args.italic));
+        const font = mcpFontFamily(args.fontFamily);
+        const measured = mcpMeasureText(text, fontSize, font.family, Boolean(args.bold), Boolean(args.italic));
+        const width = args.width ? toPx(Number(args.width)) : measured.width;
+        const layout = mcpLayoutText(text, fontSize, font.family, Boolean(args.bold), Boolean(args.italic), width);
         const shape = mcpStyleShape(/** @type {AnnotationShape} */ ({
           id: nextAnnotationId++,
           type: 'textfield',
           x: toPx(Number(args.x)),
           y: toPx(Number(args.y)),
-          width: args.width ? toPx(Number(args.width)) : measured.width,
-          height: args.height ? toPx(Number(args.height)) : measured.height,
+          width,
+          // Without a height the box grows to the wrapped text.
+          height: args.height ? toPx(Number(args.height)) : layout.height,
           rotation: 0,
           text,
           verticalAlign: 'top'
-        }), { ...args, fontSize: args.fontSize ?? 12, fontFamily: family, color: args.color ?? '#171717' });
+        }), { ...args, fontSize: args.fontSize ?? 12, fontFamily: font.family, color: args.color ?? '#171717' });
+        return { ...mcpAddShape(pageIndex, shape), ...(font.note ? { fontNote: font.note } : {}) };
+      }
+
+      case 'measure_text': {
+        const text = String(args.text ?? '');
+        const fontSize = toPx(clamp(Number(args.fontSize ?? 12), 2, 400));
+        const font = mcpFontFamily(args.fontFamily);
+        const measured = mcpMeasureText(text, fontSize, font.family, Boolean(args.bold), Boolean(args.italic));
+        const width = args.width ? toPx(Number(args.width)) : measured.width;
+        const layout = mcpLayoutText(text, fontSize, font.family, Boolean(args.bold), Boolean(args.italic), width);
+        return { width: toPt(width), height: toPt(layout.height), lines: layout.lines.length, fontFamily: font.family, ...(font.note ? { fontNote: font.note } : {}) };
+      }
+
+      case 'add_math': {
+        await mcpEnsureSelectTool();
+        const pageIndex = mcpPageIndex(args.page);
+        const latex = String(args.latex ?? '').trim().replace(/^\$+|\$+$/g, '').trim();
+        if (!latex) throw new Error('latex is empty.');
+        const duplicate = mcpFindDuplicate(pageIndex, (shape) => shape.latex === latex, Number(args.x), Number(args.y));
+        if (duplicate) return mcpDuplicateResult(duplicate, pageIndex);
+        const shape = await mcpMathShape({ id: nextAnnotationId++, x: toPx(Number(args.x)), y: toPx(Number(args.y)) }, latex, args);
         return mcpAddShape(pageIndex, shape);
+      }
+
+      case 'insert_blank_page': {
+        await mcpEnsureSelectTool();
+        const after = args.after === undefined ? pageCount : clamp(Number(args.after), 0, pageCount);
+        const reference = pageSizes[Math.max(0, Math.min(pageCount - 1, after - 1))];
+        const width = Number(args.width) > 0 ? Number(args.width) : reference ? toPt(reference.width) : 595.28;
+        const height = Number(args.height) > 0 ? Number(args.height) : reference ? toPt(reference.height) : 841.89;
+        const color = mcpColor(args.color, '#FFFFFF');
+        const before = pageCount;
+        await insertDroppedPdf(new File([blankPdfBytes(width, height, color)], 'blank.pdf', { type: 'application/pdf' }), after);
+        if (pageCount === before) throw new Error('The page was not inserted.');
+        return { insertedPage: after + 1, width, height, color, pageCount, note: `The new page is page ${after + 1}; pages after it moved down by one.` };
       }
 
       case 'add_shape': {
@@ -7562,14 +7934,41 @@
         await mcpEnsureSelectTool();
         const found = mcpFindObject(Number(args.objectId));
         if (found.kind === 'shape') {
-          let next = mcpStyleShape(found.shape, args);
+          if (found.shape.latex) {
+            // Formulas are re-rendered; size follows the formula unless given.
+            let next = found.shape;
+            if (args.latex !== undefined || args.fontSize !== undefined || args.color !== undefined) {
+              next = await mcpMathShape(found.shape, String(args.latex ?? found.shape.latex), {
+                fontSize: args.fontSize ?? found.shape.latexFontSize,
+                color: args.color ?? found.shape.latexColor,
+                display: found.shape.latexDisplay
+              });
+            }
+            next = { ...next };
+            if (args.x !== undefined) next.x = toPx(Number(args.x));
+            if (args.y !== undefined) next.y = toPx(Number(args.y));
+            if (args.width !== undefined && args.height === undefined) { next.height *= toPx(Number(args.width)) / next.width; next.width = toPx(Number(args.width)); }
+            if (args.height !== undefined) next.height = toPx(Number(args.height));
+            if (args.rotation !== undefined) next.rotation = Number(args.rotation) || 0;
+            replaceShape(found.pageIndex, next);
+            if (args.arrange) mcpArrange(found.pageIndex, next.id, args.arrange);
+            return { ...mcpDescribeShape(next, found.pageIndex), pageNow: mcpPageSummary(found.pageIndex) };
+          }
+          const font = args.fontFamily !== undefined && found.shape.type === 'textfield' ? mcpFontFamily(args.fontFamily) : null;
+          let next = mcpStyleShape(found.shape, font ? { ...args, fontFamily: font.family } : args);
           if (args.x !== undefined) next.x = toPx(Number(args.x));
           if (args.y !== undefined) next.y = toPx(Number(args.y));
           if (args.width !== undefined) next.width = toPx(Math.max(0.5, Number(args.width)));
           if (args.height !== undefined) next.height = toPx(Math.max(0.5, Number(args.height)));
           if (args.value !== undefined && (next.type === 'input' || next.type === 'checkbox')) next.fieldValue = next.type === 'checkbox' ? Boolean(args.value) : String(args.value);
+          // Text that no longer fits grows its box, unless a height was given.
+          if (next.type === 'textfield' && args.height === undefined) {
+            const needed = mcpShapeTextLayout(next).height;
+            if (needed > next.height) next = { ...next, height: needed };
+          }
           replaceShape(found.pageIndex, next);
-          return mcpDescribeShape(next, found.pageIndex);
+          if (args.arrange) mcpArrange(found.pageIndex, next.id, args.arrange);
+          return { ...mcpDescribeShape(next, found.pageIndex), ...(font?.note ? { fontNote: font.note } : {}) };
         }
         if (found.kind === 'stroke') {
           const next = { ...found.stroke };
@@ -7592,17 +7991,54 @@
 
       case 'delete_object': {
         await mcpEnsureSelectTool();
-        const found = mcpFindObject(Number(args.objectId));
-        if (found.kind === 'shape') {
-          if (found.shape.existingField) throw new Error('Form fields that are part of the PDF cannot be deleted; fill them with fill_form_field instead.');
-          setShapeSelection(found.pageIndex, []);
-          shapes = { ...shapes, [found.pageIndex]: (shapes[found.pageIndex] ?? []).filter((shape) => shape.id !== found.shape.id) };
-        } else if (found.kind === 'stroke') {
-          annotations = { ...annotations, [found.pageIndex]: (annotations[found.pageIndex] ?? []).filter((stroke) => stroke.id !== found.stroke.id) };
+        /** @type {number[]} */
+        let ids = [];
+        if (args.allOnPage !== undefined) {
+          const pageIndex = mcpPageIndex(args.allOnPage);
+          ids = [
+            ...(shapes[pageIndex] ?? []).filter((shape) => !shape.existingField && shape.type !== 'measure').map((shape) => shape.id),
+            ...(annotations[pageIndex] ?? []).map((stroke) => stroke.id),
+            ...(textHighlights[pageIndex] ?? []).map((mark) => mark.id)
+          ];
         } else {
-          textHighlights = { ...textHighlights, [found.pageIndex]: (textHighlights[found.pageIndex] ?? []).filter((mark) => mark.id !== found.mark.id) };
+          ids = [...(Array.isArray(args.objectIds) ? args.objectIds : []), ...(args.objectId !== undefined ? [args.objectId] : [])].map(Number);
+          if (!ids.length) throw new Error('Give objectId, objectIds or allOnPage.');
         }
-        return { deleted: Number(args.objectId) };
+        /** @type {number[]} */
+        const deleted = [];
+        /** @type {string[]} */
+        const problems = [];
+        /** @type {Set<number>} */
+        const pagesTouched = new Set();
+        for (const id of ids) {
+          let found;
+          try {
+            found = mcpFindObject(id);
+          } catch {
+            problems.push(`No object ${id}.`);
+            continue;
+          }
+          pagesTouched.add(found.pageIndex);
+          if (found.kind === 'shape') {
+            if (found.shape.existingField) {
+              problems.push(`Object ${id} is a form field of the PDF and cannot be deleted.`);
+              continue;
+            }
+            setShapeSelection(found.pageIndex, []);
+            shapes = { ...shapes, [found.pageIndex]: (shapes[found.pageIndex] ?? []).filter((shape) => shape.id !== id) };
+          } else if (found.kind === 'stroke') {
+            annotations = { ...annotations, [found.pageIndex]: (annotations[found.pageIndex] ?? []).filter((stroke) => stroke.id !== id) };
+          } else {
+            textHighlights = { ...textHighlights, [found.pageIndex]: (textHighlights[found.pageIndex] ?? []).filter((mark) => mark.id !== id) };
+          }
+          deleted.push(id);
+        }
+        if (!deleted.length && problems.length) throw new Error(problems.join(' '));
+        return {
+          deleted,
+          ...(problems.length ? { problems } : {}),
+          pages: [...pagesTouched].sort((left, right) => left - right).map((pageIndex) => mcpPageSummary(pageIndex))
+        };
       }
 
       case 'replace_text': {
@@ -7942,6 +8378,7 @@
     pageDragCleanup?.();
     if (historyCommitTimer) clearTimeout(historyCommitTimer);
     if (searchUpdateFrame !== undefined) cancelAnimationFrame(searchUpdateFrame);
+    if (pendingZoomFrame) cancelAnimationFrame(pendingZoomFrame);
     stopSignatureCamera();
     cancelSharpRenders();
     textLayerBuilders.forEach((builder) => builder.cancel());
@@ -9206,6 +9643,8 @@
                 <option value="Times New Roman">Times New Roman</option>
                 <option value="Georgia">Georgia</option>
                 <option value="Courier New">Courier New</option>
+                <option value="Verdana">Verdana</option>
+                <option value="Trebuchet MS">Trebuchet MS</option>
                 <option value="Inter">Inter</option>
                 <option value="Geist">Geist</option>
               </select>

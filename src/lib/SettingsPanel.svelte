@@ -29,7 +29,9 @@
   }
 
   if (typeof window !== 'undefined') window.addEventListener('keydown', handleKeydown);
-  onDestroy(() => window.removeEventListener('keydown', handleKeydown));
+  onDestroy(() => {
+    if (typeof window !== 'undefined') window.removeEventListener('keydown', handleKeydown);
+  });
 
   if (legalOnly && typeof window !== 'undefined') {
     tick().then(() => {

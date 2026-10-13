@@ -22,11 +22,61 @@
 </script>
 
 <svelte:head>
-  <title>Docuflex — Next Generation PDF Editor</title>
+  <title>Docuflex — Free, Open-Source PDF Editor</title>
   <meta
     name="description"
-    content="A powerful, modern PDF toolkit with AI integration for editing, signing, protecting, and exporting documents."
+    content="Docuflex is a free, private, open-source PDF editor hosted in the EU. Edit text, sign, merge, split, compress, convert, OCR and translate PDFs in your browser or with the desktop app."
   />
+  <link rel="canonical" href="https://docuflex.eu/" />
+  <link rel="icon" href="/logo.svg" type="image/svg+xml" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Docuflex" />
+  <meta property="og:url" content="https://docuflex.eu/" />
+  <meta property="og:title" content="Docuflex — Free, Open-Source PDF Editor" />
+  <meta
+    property="og:description"
+    content="Edit, sign, merge, compress, convert and translate PDFs. Free forever, private, open source, hosted in the EU."
+  />
+  <meta property="og:image" content="https://docuflex.eu/landing-page/editor-rendering.webp" />
+  <meta name="twitter:card" content="summary_large_image" />
+  {@html `<script type="application/ld+json">${JSON.stringify({
+    '@context': 'https://schema.org',
+    '@graph': [
+      {
+        '@type': 'Organization',
+        name: 'Docuflex',
+        url: 'https://docuflex.eu/',
+        logo: 'https://docuflex.eu/logo.svg',
+        sameAs: ['https://github.com/max06bayer/docuflex']
+      },
+      {
+        '@type': 'SoftwareApplication',
+        name: 'Docuflex',
+        url: 'https://docuflex.eu/',
+        description:
+          'Free, private, open-source PDF editor hosted in the EU, available as a web editor and desktop app.',
+        applicationCategory: 'BusinessApplication',
+        operatingSystem: 'Web, macOS, Windows',
+        screenshot: 'https://docuflex.eu/landing-page/editor-rendering.webp',
+        license: 'https://www.gnu.org/licenses/agpl-3.0.html',
+        featureList: [
+          'Edit PDF text',
+          'Merge PDFs',
+          'Split PDFs',
+          'Compress PDFs',
+          'Convert PDF to and from Word',
+          'Sign PDFs',
+          'Password-protect PDFs',
+          'Translate PDFs',
+          'OCR scanned PDFs',
+          'Flatten PDFs',
+          'Add watermarks',
+          'Comments and annotations'
+        ],
+        offers: { '@type': 'Offer', price: '0', priceCurrency: 'EUR' }
+      }
+    ]
+  })}</script>`}
 </svelte:head>
 
 <main class="landing-page">
@@ -79,8 +129,8 @@
       </div>
     </div>
 
-    <div class="editor-showcase" aria-hidden="true">
-      <img src={`${landingAssets}/editor-rendering.webp`} alt="" />
+    <div class="editor-showcase">
+      <img src={`${landingAssets}/editor-rendering.webp`} alt="The Docuflex PDF editor editing text in a PDF document" />
     </div>
   </section>
 

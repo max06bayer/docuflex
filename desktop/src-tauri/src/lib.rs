@@ -159,8 +159,29 @@ impl Services {
                         .status();
                 }
             }
+            // Quitting must never hang on a helper: give them a moment to stop
+            // cleanly, then force them.
+            let deadline = Instant::now() + Duration::from_secs(3);
             for child in children.iter_mut() {
-                let _ = child.wait();
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(_)) | Err(_) => break,
+                        Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
+                        Ok(None) => {
+                            // The child is the supervise wrapper; take down the
+                            // service it runs too, or it would keep the port.
+                            #[cfg(unix)]
+                            let _ = Command::new("/usr/bin/pkill")
+                                .args(["-KILL", "-P", &child.id().to_string()])
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null())
+                                .status();
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            break;
+                        }
+                    }
+                }
             }
             children.clear();
         }
@@ -314,6 +335,9 @@ fn spawn_services(
             format!("http://127.0.0.1:{BACKEND_PORT}"),
         )
         .env("BODY_SIZE_LIMIT", (230_u64 * 1024 * 1024).to_string())
+        // The window keeps event streams open (MCP bridge, AI chat). Node's
+        // graceful shutdown would wait 30 s for them and freeze quitting.
+        .env("SHUTDOWN_TIMEOUT", "1")
         // Turns on the local MCP server (/mcp) so AI agents on this computer
         // can drive the editor. The hosted web build never sets this.
         .env("DOCUFLEX_MCP", "1")

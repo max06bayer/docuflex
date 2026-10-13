@@ -11,6 +11,7 @@
   import QuickToolPagesPanel from '$lib/QuickToolPagesPanel.svelte';
   import SettingsPanel from '$lib/SettingsPanel.svelte';
   import McpPanel from '$lib/McpPanel.svelte';
+  import AiChatPanel from '$lib/AiChatPanel.svelte';
   import TranslateFilesPanel from '$lib/TranslateFilesPanel.svelte';
   // @ts-ignore Fontsource exposes CSS through package exports without JS type declarations.
   import '@fontsource-variable/geist/wght.css';
@@ -89,7 +90,7 @@
   $: sortModeText = sortMode === 'size' ? 'Size' : sortMode === 'name' ? 'Name' : 'Recent';
   /** @type {HTMLInputElement | undefined} */
   let fileInput;
-  /** @type {{ downloadPdf: () => Promise<void>; exportPdfForSave: () => Promise<{ blob: Blob; suggestedName: string }>; openSearchPanel: () => void; openRasterPanel: () => void; mcpCall: (name: string, args: Record<string, any>) => Promise<any>; undo: () => Promise<void>; redo: () => Promise<void> } | undefined} */
+  /** @type {{ downloadPdf: () => Promise<void>; exportPdfForSave: () => Promise<{ blob: Blob; suggestedName: string }>; openSearchPanel: () => void; openRasterPanel: () => void; mcpCall: (name: string, args: Record<string, any>) => Promise<any>; aiContext: () => any; undo: () => Promise<void>; redo: () => Promise<void> } | undefined} */
   let pdfEditor;
   let isDownloading = false;
   let isSaving = false;
@@ -108,6 +109,36 @@
   let mcpClientId = null;
   /** @type {ReturnType<typeof setInterval> | undefined} */
   let mcpHeartbeat;
+  let aiPanelOpen = false;
+  /** Whether the AI chat can run here (desktop app or dev with an OpenRouter key). */
+  /** @type {{ available: boolean; model?: string; fallbackModel?: string; tools?: { name: string; title: string; readOnly: boolean; needsApproval: boolean }[] } | null} */
+  let aiStatus = null;
+  /** The agent keeps working while its panel is closed; the brain button shows it. */
+  let aiBusy = false;
+
+  /** The AI chat is still in testing: its button stays greyed out until this is true. */
+  const AI_CHAT_ENABLED = false;
+
+  async function refreshAiStatus() {
+    if (!AI_CHAT_ENABLED) {
+      aiStatus = { available: false };
+      return;
+    }
+    try {
+      const response = await fetch('/api/ai/status', { cache: 'no-store' });
+      aiStatus = response.ok ? await response.json() : { available: false };
+    } catch {
+      aiStatus = { available: false };
+    }
+  }
+
+  /** What the AI chat knows about the window when it asks the model. */
+  function aiContext() {
+    return {
+      documents: tabs.map((tab) => ({ documentId: tab.id, name: tab.name, active: tab.id === activeTab })),
+      active: activeTab !== null && pdfEditor ? pdfEditor.aiContext() : null
+    };
+  }
 
   /** @param {Record<string, unknown>} message */
   function postToMcpBridge(message) {
@@ -816,6 +847,7 @@
     void refreshMcpStatus().then(() => {
       if (mcpStatus?.available) connectMcpBridge();
     });
+    void refreshAiStatus();
     return () => {
       mcpStream?.close();
       mcpStream = null;
@@ -835,8 +867,10 @@
 </script>
 
 <svelte:head>
-  <title>Docuflex Editor</title>
-  <meta name="description" content="Docuflex document editor" />
+  <title>Docuflex Editor — Edit PDFs Online, Free</title>
+  <meta name="description" content="Edit, sign, merge, split, compress and convert PDFs online for free with Docuflex. Private, open source and hosted in the EU." />
+  <link rel="canonical" href="https://docuflex.eu/editor" />
+  <link rel="icon" href="/logo.svg" type="image/svg+xml" />
 </svelte:head>
 
 <main class="editor-shell" class:editor-mode={activeTab !== null}>
@@ -903,7 +937,7 @@
           onmouseleave={hideUtilityTooltip}
           onfocus={(event) => scheduleUtilityTooltip(mcpUtility, event.currentTarget)}
           onblur={hideUtilityTooltip}
-          onclick={() => { hideUtilityTooltip(); mcpPanelOpen = !mcpPanelOpen; if (mcpPanelOpen) { settingsPanelOpen = false; void refreshMcpStatus(); } }}
+          onclick={() => { hideUtilityTooltip(); mcpPanelOpen = !mcpPanelOpen; if (mcpPanelOpen) { settingsPanelOpen = false; aiPanelOpen = false; void refreshMcpStatus(); } }}
         >
           <img src="/mcp.svg" alt="" />
         </button>
@@ -960,14 +994,19 @@
       {#each [
         { id: 'home', icon: '/home.svg', label: 'Home', description: 'Return to the document overview.' },
         { id: 'search', icon: '/search.svg', label: 'Search', description: 'Find text in the current PDF.' },
-        { id: 'assistant', icon: '/brain.svg', label: 'AI Chat', description: 'Chat with AI about your document.' },
+        { id: 'assistant', icon: '/brain.svg', label: 'AI Chat', description: aiStatus?.available ? (aiBusy ? 'Docuflex AI is working…' : 'Ask AI about your document or let it edit for you.') : 'Chat with AI about your document.' },
         { id: 'settings', icon: '/settings.svg', label: 'Settings', description: 'Open Docuflex settings.' }
       ].filter((utility) => utility.id !== 'search' || activeTab !== null) as utility (utility.id)}
+        {@const aiUtility = utility.id === 'assistant'}
         <button
           class="utility-button"
-          class:ai-disabled={utility.id === 'assistant'}
+          class:ai-disabled={aiUtility && !aiStatus?.available}
+          class:ai-button={aiUtility}
+          class:ai-busy={aiUtility && aiBusy}
+          class:active={aiUtility && aiPanelOpen && aiStatus?.available}
           aria-label={utility.label}
-          disabled={utility.id === 'assistant'}
+          aria-pressed={aiUtility ? aiPanelOpen : undefined}
+          disabled={aiUtility && !aiStatus?.available}
           aria-describedby={utilityTooltip?.label === utility.label ? 'utility-tooltip' : undefined}
           onmouseenter={(event) => scheduleUtilityTooltip(utility, event.currentTarget)}
           onmouseleave={hideUtilityTooltip}
@@ -977,7 +1016,8 @@
             hideUtilityTooltip();
             if (utility.id === 'home') activeTab = null;
             else if (utility.id === 'search') pdfEditor?.openSearchPanel();
-            else if (utility.id === 'settings') { settingsPanelOpen = !settingsPanelOpen; mcpPanelOpen = false; }
+            else if (utility.id === 'settings') { settingsPanelOpen = !settingsPanelOpen; mcpPanelOpen = false; if (settingsPanelOpen) aiPanelOpen = false; }
+            else if (utility.id === 'assistant') { aiPanelOpen = !aiPanelOpen; if (aiPanelOpen) { settingsPanelOpen = false; mcpPanelOpen = false; } }
           }}
         >
           <img src={utility.icon} alt="" />
@@ -1178,6 +1218,17 @@
         bind:this={pdfEditor}
       />
     {/key}
+  {/if}
+
+  {#if aiStatus?.available}
+    <AiChatPanel
+      open={aiPanelOpen}
+      status={aiStatus}
+      getContext={aiContext}
+      hasDocument={activeTab !== null}
+      onClose={() => (aiPanelOpen = false)}
+      onBusyChange={(busy) => (aiBusy = busy)}
+    />
   {/if}
 
   {#if mcpPanelOpen && mcpStatus?.available}
@@ -1466,6 +1517,32 @@
 
   .mcp-button {
     position: relative;
+  }
+
+  .ai-button {
+    position: relative;
+  }
+
+  /* Pulsing dot while the agent works with its panel closed. */
+  .ai-button.ai-busy::after {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 7px;
+    height: 7px;
+    border: 1.5px solid #f8f8f8;
+    border-radius: 50%;
+    background: #0878f9;
+    content: '';
+    animation: ai-busy-pulse 1.2s ease-in-out infinite;
+  }
+
+  .ai-button.active.ai-busy::after {
+    border-color: #171717;
+  }
+
+  @keyframes ai-busy-pulse {
+    50% { opacity: 0.35; }
   }
 
   /* Green dot while the MCP server is on and this window is serving it. */

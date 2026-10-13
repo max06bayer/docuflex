@@ -24,6 +24,11 @@ const height = { type: 'number', exclusiveMinimum: 0, description: 'Height in po
 const color = { type: 'string', pattern: '^#?[0-9a-fA-F]{6}$', description: 'Hex color, e.g. "#e8453c".' };
 const objectId = { type: 'integer', description: 'Object id from list_objects or the tool that created it.' };
 const filePath = { type: 'string', description: 'Absolute file path on this computer ("~" is allowed).' };
+const fontFamily = {
+  type: 'string',
+  enum: ['Helvetica', 'Arial', 'Verdana', 'Trebuchet MS', 'Times New Roman', 'Georgia', 'Courier New'],
+  description: 'Sans-serif: Helvetica (default), Arial, Verdana, Trebuchet MS. Serif: Times New Roman, Georgia. Monospace: Courier New. Any Unicode character works (symbols a font lacks are embedded from a Unicode font). For formulas use add_math instead.'
+};
 
 /** @type {{ name: string; title: string; description: string; inputSchema: Record<string, unknown>; annotations?: Record<string, boolean> }[]} */
 export const MCP_TOOLS = [
@@ -82,7 +87,7 @@ export const MCP_TOOLS = [
   {
     name: 'get_page_text',
     title: 'Read page text',
-    description: 'Returns the text of a page plus every text run with its position and size in points, so you can place things next to existing text.',
+    description: 'Returns the PDF\'s own text on a page plus every text run with its position in points, so you can place things next to existing text. Text and formulas you added in Docuflex are listed separately in addedText.',
     inputSchema: { type: 'object', properties: { page }, required: ['page'] },
     annotations: { readOnlyHint: true }
   },
@@ -106,7 +111,13 @@ export const MCP_TOOLS = [
       properties: {
         page,
         scale: { type: 'number', minimum: 0.25, maximum: 3, default: 1.25, description: 'Pixels per point.' },
-        withEdits: { type: 'boolean', default: true }
+        withEdits: { type: 'boolean', default: true },
+        region: {
+          type: 'object',
+          description: 'Only this part of the page, in points, rendered sharper (scale defaults to 3). Use it to check small details like formulas or line breaks.',
+          properties: { x, y, width, height },
+          required: ['x', 'y', 'width', 'height']
+        }
       },
       required: ['page']
     },
@@ -117,14 +128,14 @@ export const MCP_TOOLS = [
   {
     name: 'add_text',
     title: 'Add text',
-    description: 'Adds a text box. Width and height default to fit the text. Returns the new object id.',
+    description: 'Adds a text box. Without width the box fits the longest line; with width the text wraps inside it. Height defaults to the wrapped text height. The result reports lines and textHeight (points) so you can size things around it, and overflow when a given height is too small. Default color #171717. Returns the new object id.',
     inputSchema: {
       type: 'object',
       properties: {
         page, x, y, width, height,
         text: { type: 'string', minLength: 1 },
         fontSize: { type: 'number', minimum: 2, maximum: 400, default: 12 },
-        fontFamily: { type: 'string', default: 'Helvetica', description: 'Helvetica, Times, Courier or another installed font name.' },
+        fontFamily,
         color,
         bold: { type: 'boolean' },
         italic: { type: 'boolean' },
@@ -133,6 +144,41 @@ export const MCP_TOOLS = [
       },
       required: ['page', 'x', 'y', 'text']
     }
+  },
+  {
+    name: 'add_math',
+    title: 'Add formula',
+    description: 'Places a math formula written in LaTeX (e.g. "\\int_0^1 x^2\\,dx = \\tfrac{1}{3}", "\\forall x \\in M: x \\Rightarrow y", "\\begin{aligned} a &= b \\\\ c &= d \\end{aligned}"). Use it for anything with fractions, sub/superscripts, integrals, matrices or aligned steps; plain prose goes in add_text. Do not wrap the LaTeX in $. Size follows the formula; maxWidth scales it down to fit. Returns the object id and its width/height in points.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        page, x, y,
+        latex: { type: 'string', minLength: 1 },
+        fontSize: { type: 'number', minimum: 4, maximum: 200, default: 14, description: 'Size of the formula text in points.' },
+        color,
+        display: { type: 'boolean', default: true, description: 'Display style (larger fractions and limits). false for inline style.' },
+        maxWidth: { type: 'number', exclusiveMinimum: 0, description: 'Scale down to at most this width in points.' }
+      },
+      required: ['page', 'x', 'y', 'latex']
+    }
+  },
+  {
+    name: 'measure_text',
+    title: 'Measure text',
+    description: 'Measures text before placing it: the box width and height in points it needs and its line count, wrapped like add_text. Give width to wrap at that width.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string' },
+        fontSize: { type: 'number', minimum: 2, maximum: 400, default: 12 },
+        fontFamily,
+        bold: { type: 'boolean' },
+        italic: { type: 'boolean' },
+        width
+      },
+      required: ['text']
+    },
+    annotations: { readOnlyHint: true }
   },
   {
     name: 'add_shape',
@@ -238,28 +284,37 @@ export const MCP_TOOLS = [
   {
     name: 'update_object',
     title: 'Update object',
-    description: 'Changes an added object: position/size (x, y, width, height, rotation), text and text style (text, fontSize, fontFamily, color, bold, italic, underline, align), shape style (fillColor, fillOpacity, noFill, strokeColor, strokeWidth, noStroke, cornerRadius, opacity), or a form field value. Only the given properties change.',
+    description: 'Changes an added object: position/size (x, y, width, height, rotation), text and text style (text, fontSize, fontFamily, color, bold, italic, underline, align), a formula (latex, fontSize, color), shape style (fillColor, fillOpacity, noFill, strokeColor, strokeWidth, noStroke, cornerRadius, opacity), stacking (arrange "front" or "back" among added objects), or a form field value. Only the given properties change. A text box grows taller when its text no longer fits, unless you give height.',
     inputSchema: {
       type: 'object',
       properties: {
         objectId, x, y, width, height,
         rotation: { type: 'number' },
-        text: { type: 'string' }, fontSize: { type: 'number' }, fontFamily: { type: 'string' }, color,
+        text: { type: 'string' }, fontSize: { type: 'number' }, fontFamily, color,
         bold: { type: 'boolean' }, italic: { type: 'boolean' }, underline: { type: 'boolean' },
         align: { type: 'string', enum: ['left', 'center', 'right'] },
         fillColor: color, fillOpacity: { type: 'number', minimum: 0, maximum: 1 }, noFill: { type: 'boolean' },
         strokeColor: color, strokeWidth: { type: 'number', minimum: 0 }, noStroke: { type: 'boolean' },
         cornerRadius: { type: 'number', minimum: 0 }, opacity: { type: 'number', minimum: 0, maximum: 1 },
-        value: { type: ['string', 'boolean'], description: 'Form field value.' }
+        value: { type: ['string', 'boolean'], description: 'Form field value.' },
+        latex: { type: 'string', description: 'New LaTeX for a formula object.' },
+        arrange: { type: 'string', enum: ['front', 'back'], description: 'Put the object in front of or behind the other added objects on its page (e.g. a background box goes "back").' }
       },
       required: ['objectId']
     }
   },
   {
     name: 'delete_object',
-    title: 'Delete object',
-    description: 'Removes an added object.',
-    inputSchema: { type: 'object', properties: { objectId }, required: ['objectId'] },
+    title: 'Delete objects',
+    description: 'Removes added objects: one (objectId), several (objectIds), or everything added on a page (allOnPage). The PDF\'s own content is not affected.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        objectId,
+        objectIds: { type: 'array', items: { type: 'integer' } },
+        allOnPage: { type: 'integer', minimum: 1, description: 'Page number: delete every object added on it.' }
+      }
+    },
     annotations: { destructiveHint: true }
   },
 
@@ -380,6 +435,20 @@ export const MCP_TOOLS = [
     inputSchema: { type: 'object', properties: { order: pages }, required: ['order'] }
   },
   {
+    name: 'insert_blank_page',
+    title: 'Insert blank page',
+    description: 'Inserts an empty page, filled with a color if given. after = 0 inserts at the start; default inserts at the end. Size defaults to the page before it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        after: { type: 'integer', minimum: 0, description: 'Insert after this page number.' },
+        color: { ...color, description: 'Page color, default white.' },
+        width: { ...width, description: 'Width in points (A4 is 595 × 842).' },
+        height
+      }
+    }
+  },
+  {
     name: 'insert_pdf',
     title: 'Insert PDF pages',
     description: 'Inserts all pages of another PDF file. after = 0 inserts at the start; default inserts at the end.',
@@ -455,7 +524,9 @@ export const MCP_INSTRUCTIONS = [
   'Docuflex is a PDF editor running on this computer. These tools control the open Docuflex window live: every change appears immediately, can be undone, and is exported like a manual edit.',
   'Workflow: open_document (or use the active document) → get_document_info → read with get_page_text/search_text → edit → render_page to check your work → save_document.',
   'Pages are numbered from 1. Positions and sizes are PDF points (1/72 inch) from the top-left of the displayed page. Colors are hex strings.',
-  'Added content (text, shapes, images, drawings, marks, comments) are objects you can list, update and delete. replace_text rewrites text that is already in the PDF.'
+  'Added content (text, shapes, images, drawings, marks, comments) are objects you can list, update and delete. replace_text rewrites text that is already in the PDF.',
+  'Added text: any Unicode character is fine. Formulas (fractions, sub/superscripts, integrals, aligned steps) go in add_math as LaTeX. Use measure_text, or the textHeight that add_text returns, to size boxes and backgrounds around text.',
+  'Every change returns the object and pageNow, the objects now on that page: trust it, your change landed. Never repeat a call that succeeded. get_page_text shows only the PDF\'s own text; added text is in its addedText.'
 ].join('\n');
 
 /** @param {string} path */
@@ -490,8 +561,83 @@ async function writePdf(path, base64) {
  * @param {string} name @param {Record<string, any>} args
  * @returns {Promise<{ content: any[]; isError?: boolean }>}
  */
-export async function runTool(name, args = {}) {
+/**
+ * Guard against agents that loop: weaker models repeat calls they think
+ * failed, sometimes hundreds of times. Shared by the MCP server and the AI
+ * chat. State lives on globalThis so dev reloads keep it.
+ */
+const guard = /** @type {{ recent: { key: string; name: string; at: number }[]; failures: Map<string, number>; running: Map<string, number> }} */ (
+  /** @type {any} */ (globalThis).__docuflexToolGuard ??= { recent: [], failures: new Map(), running: new Map() }
+);
+const GUARD_WINDOW_MS = 120_000;
+/** Calls that are fine to repeat with the same arguments. */
+const REPEATABLE = new Set(['undo', 'redo', 'rotate_pages', 'set_view', 'render_page', 'list_objects', 'list_documents', 'get_document_info', 'list_comments', 'list_form_fields', 'measure_text', 'save_document', 'switch_document']);
+const READ_ONLY = new Set(MCP_TOOLS.filter((tool) => tool.annotations?.readOnlyHint).map((tool) => tool.name));
+const wait = (/** @type {number} */ ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** @param {unknown} value @returns {unknown} */
+function stable(value) {
+  if (Array.isArray(value)) return value.map(stable);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(/** @type {any} */ (value)[key])]));
+  return value;
+}
+
+/** @param {string} name @param {Record<string, any>} args @param {string} agent */
+async function guardedRun(name, args, agent, /** @type {() => Promise<any>} */ run) {
+  const now = Date.now();
+  guard.recent = guard.recent.filter((entry) => now - entry.at < GUARD_WINDOW_MS);
+  // Repeats count per agent: parallel helpers may read the same page.
+  const key = `${agent}:${name}:${JSON.stringify(stable(args))}`;
+
+  if (!REPEATABLE.has(name)) {
+    const repeats = guard.recent.filter((entry) => entry.key === key).length;
+    const limit = READ_ONLY.has(name) ? 3 : 2;
+    if (repeats >= limit) {
+      throw new Error(`Not run: you already made this exact ${name} call ${repeats} times in the last 2 minutes and it succeeded each time. Repeating it changes nothing${READ_ONLY.has(name) ? '; use the result you already have' : ' and would stack duplicates'}. Check the current state with list_objects, or do something different.`);
+    }
+  }
+
+  const running = guard.running.get(name) ?? 0;
+  // Parallel helpers legitimately run several of the same tool at once.
+  if (running >= 8) {
+    await wait(500);
+    throw new Error(`Wait: ${running} ${name} calls are still running. Let them finish and look at their results before sending more.`);
+  }
+
+  const failureKey = `${agent}:${name}`;
+  const failures = guard.failures.get(failureKey) ?? 0;
+  if (failures >= 8) {
+    guard.failures.set(failureKey, failures - 1);
+    await wait(500);
+    throw new Error(`Paused: your last ${failures} ${name} calls all failed. Stop retrying. Read the last error, change your approach (different arguments or a different tool), or ask the person.`);
+  }
+  if (failures >= 3) await wait(500);
+
+  guard.running.set(name, running + 1);
+  try {
+    const result = await run();
+    guard.failures.set(failureKey, 0);
+    // After undo/redo, repeating an earlier edit is legitimate again.
+    if (name === 'undo' || name === 'redo') guard.recent = [];
+    else guard.recent.push({ key, name, at: Date.now() });
+    return result;
+  } catch (error) {
+    guard.failures.set(failureKey, failures + 1);
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(failures + 1 >= 3 ? `${message}\n(${name} has now failed ${failures + 1} times in a row. Don't repeat the same call; change the arguments or the approach.)` : message);
+  } finally {
+    guard.running.set(name, Math.max(0, (guard.running.get(name) ?? 1) - 1));
+  }
+}
+
+/** @param {string} name @param {Record<string, any>} args @param {string} [agent] who calls, for the repeat guard */
+export async function runTool(name, args = {}, agent = 'mcp') {
   if (!MCP_TOOLS.some((tool) => tool.name === name)) throw new Error(`Unknown tool: ${name}`);
+  return guardedRun(name, args, agent, () => runToolUnguarded(name, args));
+}
+
+/** @param {string} name @param {Record<string, any>} args @returns {Promise<{ content: any[]; isError?: boolean }>} */
+async function runToolUnguarded(name, args) {
   /** @param {unknown} value */
   const text = (value) => ({ content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }] });
 

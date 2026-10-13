@@ -1,0 +1,259 @@
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { env } from '$env/dynamic/private';
+import { mcpAvailable } from '$lib/server/mcp-bridge.js';
+import { MCP_INSTRUCTIONS, MCP_TOOLS } from '$lib/server/mcp-tools.js';
+
+/**
+ * AI chat: an agent that edits the open documents with the same tools the
+ * local MCP server exposes. Like the MCP server it only exists in the desktop
+ * app and local development, and only when an OpenRouter key is configured
+ * on this computer (OPENROUTER_API_KEY or ~/.docuflex/openrouter-key). The
+ * key never reaches the window.
+ */
+
+export const AI_MODEL = env.DOCUFLEX_AI_MODEL || 'xiaomi/mimo-v2.6-flash';
+/** Used by OpenRouter when the main model fails or is unavailable. */
+export const AI_FALLBACK_MODEL = env.DOCUFLEX_AI_FALLBACK_MODEL || 'google/gemini-3-flash-preview';
+const KEY_FILE = join(homedir(), '.docuflex', 'openrouter-key');
+const MEMORY_FILE = join(homedir(), '.docuflex', 'ai-memory.json');
+/** Thinking budget per model turn. MiMo otherwise thinks for a long time on simple steps. */
+const REASONING_TOKENS = 1024;
+
+/** Tools that write files or discard work need the person's approval in the chat. */
+export const AI_APPROVAL_TOOLS = new Set(['save_document', 'extract_pages', 'close_document']);
+
+export async function openRouterKey() {
+  if (env.OPENROUTER_API_KEY) return env.OPENROUTER_API_KEY.trim();
+  try {
+    return (await readFile(KEY_FILE, 'utf8')).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function aiAvailable() {
+  return mcpAvailable() && Boolean(await openRouterKey());
+}
+
+/** Tools only the AI chat has: its notes about documents. */
+export const MEMORY_TOOLS = [
+  {
+    name: 'remember',
+    title: 'Remember',
+    description: 'Saves a short note about the active document for future chats: what the person wants, decisions, what you did and where (pages, object ids are not stable across sessions, so describe positions). Notes for the active document are shown to you automatically in every chat. Keep each note to one or two sentences.',
+    inputSchema: { type: 'object', properties: { note: { type: 'string', minLength: 1, maxLength: 500 } }, required: ['note'] }
+  },
+  {
+    name: 'forget',
+    title: 'Forget',
+    description: 'Deletes a saved note about the active document by its number, or all of them.',
+    inputSchema: { type: 'object', properties: { number: { type: 'integer', minimum: 1 }, all: { type: 'boolean' } } }
+  }
+];
+
+const region = {
+  type: 'object',
+  description: 'The helper\'s area on the page in points (x, y from the top-left, width, height). Leave out to give it the whole page.',
+  properties: { x: { type: 'number' }, y: { type: 'number' }, width: { type: 'number' }, height: { type: 'number' } },
+  required: ['x', 'y', 'width', 'height']
+};
+
+/** Only the main agent has this: it runs helper agents in parallel, each on its own part of a page. */
+export const DELEGATE_TOOL = {
+  name: 'delegate',
+  title: 'Delegate to helpers',
+  description: 'Runs up to 4 helper agents at the same time, each on its own part of the document: a page and optionally a region of it. Helpers can read everything but only add and change things inside their own page/region. Use it for several independent pieces of work, e.g. solving four exercises in their own margins or answer areas. Regions on the same page must not overlap. Each task must be self-contained: say exactly what to do and where (the helper does not see this chat). Returns each helper\'s summary and the objects it created. Not for one small edit; do that yourself.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      tasks: {
+        type: 'array',
+        minItems: 1,
+        maxItems: 4,
+        items: {
+          type: 'object',
+          properties: {
+            task: { type: 'string', minLength: 1, description: 'Complete instructions for this helper.' },
+            page: { type: 'integer', minimum: 1 },
+            region
+          },
+          required: ['task', 'page']
+        }
+      }
+    },
+    required: ['tasks']
+  }
+};
+
+/** What helpers may call: reading anything, editing only on their own page and region (checked in the window). */
+export const SUBAGENT_TOOLS = new Set([
+  'get_document_info', 'get_page_text', 'search_text', 'render_page', 'list_objects', 'list_comments', 'list_form_fields', 'measure_text',
+  'add_text', 'add_math', 'add_shape', 'add_line', 'add_image', 'draw', 'mark_text', 'add_comment', 'update_object', 'delete_object'
+]);
+
+const ALL_TOOLS = [...MCP_TOOLS, ...MEMORY_TOOLS, DELEGATE_TOOL];
+
+/** @param {{ name: string; description: string; inputSchema: Record<string, unknown> }} tool */
+const asFunction = (tool) => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } });
+
+/** The tools in the OpenAI function-calling format OpenRouter expects. */
+export const AI_TOOLS = ALL_TOOLS.map(asFunction);
+const SUBAGENT_FUNCTIONS = MCP_TOOLS.filter((tool) => SUBAGENT_TOOLS.has(tool.name)).map(asFunction);
+
+/** What the chat window needs to show tool calls. */
+export const AI_TOOL_INFO = ALL_TOOLS.map((tool) => ({
+  name: tool.name,
+  title: tool.title,
+  readOnly: Boolean(/** @type {any} */ (tool).annotations?.readOnlyHint),
+  needsApproval: AI_APPROVAL_TOOLS.has(tool.name)
+}));
+
+/** @returns {Promise<Record<string, { text: string; at: string }[]>>} */
+async function readMemoryFile() {
+  try {
+    const data = JSON.parse(await readFile(MEMORY_FILE, 'utf8'));
+    return data && typeof data === 'object' ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+/** @param {Record<string, { text: string; at: string }[]>} data */
+async function writeMemoryFile(data) {
+  await mkdir(join(homedir(), '.docuflex'), { recursive: true, mode: 0o700 });
+  const temporary = `${MEMORY_FILE}.${process.pid}.tmp`;
+  await writeFile(temporary, JSON.stringify(data, null, 2), { mode: 0o600 });
+  await rename(temporary, MEMORY_FILE);
+}
+
+/** Notes are kept per document name; "" holds notes made with no document open. @param {any} context */
+function memoryKey(context) {
+  return typeof context?.active?.name === 'string' ? context.active.name : '';
+}
+
+/** @param {any} context */
+export async function documentMemories(context) {
+  return (await readMemoryFile())[memoryKey(context)] ?? [];
+}
+
+/**
+ * Runs remember / forget for the active document.
+ * @param {string} name @param {Record<string, any>} args @param {any} context
+ */
+export async function runMemoryTool(name, args, context) {
+  const key = memoryKey(context);
+  const label = key || 'chats without a document';
+  const data = await readMemoryFile();
+  const notes = data[key] ?? [];
+  if (name === 'remember') {
+    const note = String(args.note ?? '').trim().slice(0, 500);
+    if (!note) throw new Error('note is empty.');
+    if (notes.some((entry) => entry.text === note)) return { saved: false, note: 'This note is already saved.', notes: notes.length };
+    data[key] = [...notes, { text: note, at: new Date().toISOString() }].slice(-30);
+    await writeMemoryFile(data);
+    return { saved: true, document: label, notes: data[key].length };
+  }
+  if (args.all) {
+    delete data[key];
+    await writeMemoryFile(data);
+    return { forgotten: notes.length, document: label };
+  }
+  const index = Number(args.number) - 1;
+  if (!(index >= 0 && index < notes.length)) throw new Error(`There is no note ${args.number}. This document has ${notes.length} notes.`);
+  data[key] = notes.filter((_, position) => position !== index);
+  await writeMemoryFile(data);
+  return { forgotten: 1, document: label, notes: data[key].length };
+}
+
+/**
+ * @param {any} context what the window reports: open documents, current page, selection
+ * @param {{ text: string; at: string }[]} [memories] saved notes about the active document
+ */
+export function systemPrompt(context, memories = []) {
+  const now = new Date();
+  return [
+    'You are Docuflex AI, the assistant built into Docuflex, a PDF editor. You work like a careful agent: you read the document with tools, make changes with tools, check your work, and then answer briefly.',
+    '',
+    MCP_INSTRUCTIONS,
+    '',
+    'How to work:',
+    '- Never guess what a document says. Read it (get_page_text, search_text) or look at it (render_page) first.',
+    '- For "this page" or "here", use the current page from the context below. Selected pages and selected text in the context are what the person is pointing at.',
+    '- Place added content relative to existing text: get its position from get_page_text or search_text. Check visual results with render_page.',
+    '- Every edit can be undone by the person, so act without asking for ordinary edits. Saving files, extracting pages and closing documents ask the person for approval automatically; just call the tool.',
+    '- Prefer few, precise tool calls. Batch independent calls in one turn.',
+    '- If a tool fails, read the error, adjust and retry once; otherwise explain what went wrong.',
+    '- Every edit result includes pageNow (what is on that page now). Trust it: the edit landed. NEVER repeat a call that succeeded. If unsure, call list_objects once.',
+    '- Think briefly. Plan the few calls you need, then act.',
+    '- For several independent parts (e.g. several exercises to solve, each in its own area), use delegate: one task per part with its page and a non-overlapping region. Read the pages first so you can give each helper exact positions. Afterwards check the result once with render_page.',
+    '- Use remember for things worth knowing next time (preferences, decisions, what you did). Saved notes appear below.',
+    '',
+    'How to answer:',
+    '- Be short and concrete. Say what you did, not how tools work. Use Markdown sparingly (short lists, **bold** for key facts).',
+    '- Answer in the language the person writes in.',
+    '- For summaries and questions about content, quote or cite page numbers.',
+    '',
+    `Today is ${now.toISOString().slice(0, 10)}.`,
+    memories.length
+      ? `Your saved notes about this document (forget deletes by number):\n${memories.map((entry, index) => `${index + 1}. ${entry.text}`).join('\n')}`
+      : 'You have no saved notes about this document yet.',
+    `Context from the Docuflex window: ${JSON.stringify(context ?? {})}`
+  ].join('\n');
+}
+
+/**
+ * Starts a streamed completion on OpenRouter.
+ * @param {any[]} messages @param {any} context @param {AbortSignal} signal
+ */
+/**
+ * Instructions for a helper agent working on one part of a page.
+ * @param {{ page: number; region?: { x: number; y: number; width: number; height: number } | null }} scope @param {any} context
+ */
+export function subagentPrompt(scope, context) {
+  const area = scope.region
+    ? `the region x ${scope.region.x}–${scope.region.x + scope.region.width}, y ${scope.region.y}–${scope.region.y + scope.region.height} (points from the top-left) on page ${scope.page}`
+    : `page ${scope.page}`;
+  return [
+    'You are a helper agent in Docuflex, a PDF editor. Another agent gave you one task. Other helpers work on other parts of the document at the same time.',
+    '',
+    MCP_INSTRUCTIONS,
+    '',
+    `Your area: ${area}. You may read anything, but only add things inside your area, and only change or delete objects you created. Calls outside your area are refused.`,
+    'Work quickly: read what you need, make the edits, check once with render_page using a region around your area, fix problems, then stop.',
+    'Never repeat a call that succeeded; every edit returns pageNow to confirm it.',
+    'Finish with a short plain summary (1 to 3 sentences): what you placed, where, and the object ids. Mention anything you could not do.',
+    `Document: ${JSON.stringify(context?.active ?? {})}`
+  ].join('\n');
+}
+
+/**
+ * @param {any[]} messages @param {any} context @param {AbortSignal} signal
+ * @param {{ page: number; region?: any } | null} [subagent] a helper's scope; helpers get fewer tools and their own prompt
+ */
+export async function streamCompletion(messages, context, signal, subagent = null) {
+  const key = await openRouterKey();
+  if (!key) throw new Error('No OpenRouter key is configured on this computer.');
+  const system = subagent ? subagentPrompt(subagent, context) : systemPrompt(context, await documentMemories(context));
+  return fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    signal,
+    headers: {
+      Authorization: `Bearer ${key}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': 'https://docuflex.eu',
+      'X-Title': 'Docuflex'
+    },
+    body: JSON.stringify({
+      models: [AI_MODEL, AI_FALLBACK_MODEL],
+      stream: true,
+      messages: [{ role: 'system', content: system }, ...messages],
+      tools: subagent ? SUBAGENT_FUNCTIONS : AI_TOOLS,
+      tool_choice: 'auto',
+      parallel_tool_calls: true,
+      reasoning: { max_tokens: REASONING_TOKENS },
+      usage: { include: true }
+    })
+  });
+}
