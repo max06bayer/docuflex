@@ -2877,6 +2877,7 @@
       }
       const rect = zoomStage.getBoundingClientRect();
       const scale = zoomStage.offsetWidth ? rect.width / zoomStage.offsetWidth : 1;
+      zoomStage.style.transition = '';
       zoomStage.style.transformOrigin = `${(clientX - rect.left) / scale}px ${(clientY - rect.top) / scale}px`;
       zoomStage.style.willChange = 'transform';
       zoomGesture = { baseZoom: zoomLevel, zoom, clientX, clientY, anchor: zoomAnchorPage(clientX, clientY) };
@@ -2893,6 +2894,9 @@
     const gesture = zoomGesture;
     zoomGesture = null;
     if (!gesture) return;
+    // Where the previewed page ended up; if the real layout cannot keep it there
+    // (pan limits), it glides over instead of jumping.
+    const previewRect = gesture.anchor?.page.getBoundingClientRect() ?? null;
     const changed = Math.abs(gesture.zoom - zoomLevel) >= 0.001;
     if (changed) {
       zoomLevel = gesture.zoom;
@@ -2910,7 +2914,31 @@
     const scale = viewer.offsetWidth ? viewerRect.width / viewer.offsetWidth : 1;
     viewer.scrollLeft += (rect.left + gesture.anchor.x * rect.width - gesture.clientX) / scale;
     viewer.scrollTop += (rect.top + gesture.anchor.y * rect.height - gesture.clientY) / scale;
+    if (previewRect && zoomStage) {
+      const settledRect = gesture.anchor.page.getBoundingClientRect();
+      const stageScale = zoomStage.offsetWidth ? zoomStage.getBoundingClientRect().width / zoomStage.offsetWidth : 1;
+      const offsetX = (previewRect.left - settledRect.left) / stageScale;
+      const offsetY = (previewRect.top - settledRect.top) / stageScale;
+      if (Math.abs(offsetX) > 0.5 || Math.abs(offsetY) > 0.5) glideZoomStage(offsetX, offsetY);
+    }
     scheduleSharpRender();
+  }
+
+  /** Starts the stage at the previewed position and eases it to where the layout put it. @param {number} offsetX @param {number} offsetY */
+  function glideZoomStage(offsetX, offsetY) {
+    const stage = zoomStage;
+    if (!stage) return;
+    stage.style.transition = 'none';
+    stage.style.transform = `translate(${offsetX}px, ${offsetY}px)`;
+    void stage.offsetWidth;
+    stage.style.transition = 'transform 320ms cubic-bezier(0.22, 1, 0.36, 1)';
+    stage.style.transform = '';
+    const clear = () => {
+      stage.style.transition = '';
+      stage.removeEventListener('transitionend', clear);
+    };
+    stage.addEventListener('transitionend', clear);
+    setTimeout(clear, 400);
   }
 
   /**
@@ -10855,7 +10883,7 @@
     height: 392px;
     max-height: calc(100% - 24px);
     overflow: hidden;
-    border: 1px solid #cbcaca;
+    border: 1.5px solid #c3c2c2;
     border-radius: 21px;
     background: rgba(240, 236, 236, 0.75);
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
@@ -11630,7 +11658,7 @@
     box-sizing: border-box;
     min-width: 0;
     padding: 0 14px 0 14px;
-    border-bottom: 1px solid #c3c2c2;
+    border-bottom: 1.5px solid #c3c2c2;
     background: rgba(214, 214, 214, 0.75);
     height: 50px;
   }
@@ -14391,7 +14419,7 @@
   /* Text-selection panel rows: same field look as the shape inspector's Fill / Stroke rows.
      The mark name is a button: hover darkens the text, on turns it into a black pill hugging the name. */
   .decorated-mark-row {
-    grid-template-columns: auto minmax(0, 1fr) 74px 38px;
+    grid-template-columns: auto minmax(0, 1fr) 72px 38px;
   }
 
   .highlight-mark-row {
@@ -14404,11 +14432,11 @@
   }
 
   .text-mark-row > button:first-child {
-    align-self: center;
-    height: 38px;
-    margin-left: 4px;
-    padding: 0 9px;
-    border-radius: 11px;
+    align-self: stretch;
+    height: auto;
+    margin: 0;
+    padding: 0 13px;
+    border-radius: 14px;
     background: transparent;
     color: rgba(0, 0, 0, 0.5);
     white-space: nowrap;
