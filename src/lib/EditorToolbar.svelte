@@ -102,6 +102,8 @@
 
   /** @type {string} */
   export let activeTool = 'select';
+  /** False while this toolbar's tab is in the background; it then ignores shortcuts. */
+  export let active = true;
   let groupSelections = Object.fromEntries(groups.map((group) => [group.id, group.primary]));
   /** @type {string | null} */
   let expandedGroup = null;
@@ -170,6 +172,7 @@
 
   /** @param {KeyboardEvent} event */
   function handleToolShortcut(event) {
+    if (!active) return;
     const target = event.target;
     if (event.metaKey || event.ctrlKey || event.altKey || event.repeat) return;
     if (target instanceof HTMLElement && (target.matches('input, textarea, select') || target.isContentEditable)) return;

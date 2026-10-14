@@ -42,6 +42,13 @@
   export let onRequestClose = () => {};
   /** @type {string} */
   export let initialTool = 'select';
+  /**
+   * Every open tab keeps its editor mounted so switching tabs is instant; only
+   * the active one is shown and reacts to page-wide input.
+   */
+  export let active = true;
+  /** @type {HTMLElement | undefined} */
+  let sidebarElement;
   let workingFile = file;
 
   /** @type {HTMLDivElement | undefined} */
@@ -337,6 +344,10 @@
   }
 
   $: if (activeTool !== 'eraser') eraserCursorVisible = false;
+  $: if (!active) {
+    pageContextMenu = null;
+    shapeContextMenu = null;
+  }
   $: if (activeTool !== observedTool) {
     const previousTool = observedTool;
     observedTool = activeTool;
@@ -2750,59 +2761,44 @@
       commitActiveTextField();
     }
 
-    document.addEventListener('mousedown', rememberTextSelectionOrigin, true);
-    document.addEventListener('selectstart', blockExternalPdfSelection, true);
-    document.addEventListener('mousemove', blockExternalPdfSelectionDrag, true);
-    document.addEventListener('mousedown', beginTextSelectionCursor, true);
-    document.addEventListener('mousedown', beginProductionCharacterDrag, true);
-    document.addEventListener('mousedown', beginWordDrag, true);
-    document.addEventListener('mousedown', rememberPointerStart);
-    document.addEventListener('mousemove', extendProductionCharacterDrag);
-    document.addEventListener('mousemove', extendWordDrag);
-    document.addEventListener('mouseup', endTextSelectionCursor, true);
-    document.addEventListener('mouseup', finishProductionCharacterDrag, true);
-    document.addEventListener('mouseup', endWordDrag);
-    document.addEventListener('mouseup', commitTextHighlight);
-    document.addEventListener('mouseup', capturePdfTextSelection);
-    document.addEventListener('mouseup', clearTextSelectionOrigin);
-    document.addEventListener('dragstart', suppressProductionBlankDrag);
-    document.addEventListener('click', clearPageSelection);
-    document.addEventListener('pointerdown', closePageContextMenu);
-    document.addEventListener('pointerdown', commitTextFieldOnOutsidePointer, true);
-    window.addEventListener('keydown', handlePageMenuShortcut, true);
-    window.addEventListener('keydown', updateZoomCursor);
-    window.addEventListener('keydown', handleShapeKeyboard, true);
-    window.addEventListener('keydown', handleHistoryShortcut);
-    window.addEventListener('keyup', updateZoomCursor);
-    window.addEventListener('blur', resetZoomCursor);
-    window.addEventListener('blur', endTextSelectionCursor);
+    // Background tabs stay mounted, so page-wide listeners only act for the visible editor.
+    /** @type {[EventTarget, string, (event: any) => void, boolean][]} */
+    const pageListeners = [
+      [document, 'mousedown', rememberTextSelectionOrigin, true],
+      [document, 'selectstart', blockExternalPdfSelection, true],
+      [document, 'mousemove', blockExternalPdfSelectionDrag, true],
+      [document, 'mousedown', beginTextSelectionCursor, true],
+      [document, 'mousedown', beginProductionCharacterDrag, true],
+      [document, 'mousedown', beginWordDrag, true],
+      [document, 'mousedown', rememberPointerStart, false],
+      [document, 'mousemove', extendProductionCharacterDrag, false],
+      [document, 'mousemove', extendWordDrag, false],
+      [document, 'mouseup', endTextSelectionCursor, true],
+      [document, 'mouseup', finishProductionCharacterDrag, true],
+      [document, 'mouseup', endWordDrag, false],
+      [document, 'mouseup', commitTextHighlight, false],
+      [document, 'mouseup', capturePdfTextSelection, false],
+      [document, 'mouseup', clearTextSelectionOrigin, false],
+      [document, 'dragstart', suppressProductionBlankDrag, false],
+      [document, 'click', clearPageSelection, false],
+      [document, 'pointerdown', closePageContextMenu, false],
+      [document, 'pointerdown', commitTextFieldOnOutsidePointer, true],
+      [window, 'keydown', handlePageMenuShortcut, true],
+      [window, 'keydown', updateZoomCursor, false],
+      [window, 'keydown', handleShapeKeyboard, true],
+      [window, 'keydown', handleHistoryShortcut, false],
+      [window, 'keyup', updateZoomCursor, false],
+      [window, 'blur', resetZoomCursor, false],
+      [window, 'blur', endTextSelectionCursor, false]
+    ];
+    const removePageListeners = pageListeners.map(([target, type, handler, capture]) => {
+      /** @param {Event} event */
+      const listener = (event) => { if (active) handler(event); };
+      target.addEventListener(type, listener, capture);
+      return () => target.removeEventListener(type, listener, capture);
+    });
     return () => {
-      document.removeEventListener('mousedown', rememberTextSelectionOrigin, true);
-      document.removeEventListener('selectstart', blockExternalPdfSelection, true);
-      document.removeEventListener('mousemove', blockExternalPdfSelectionDrag, true);
-      document.removeEventListener('mousedown', beginTextSelectionCursor, true);
-      document.removeEventListener('mousedown', beginProductionCharacterDrag, true);
-      document.removeEventListener('mousedown', beginWordDrag, true);
-      document.removeEventListener('mousedown', rememberPointerStart);
-      document.removeEventListener('mousemove', extendProductionCharacterDrag);
-      document.removeEventListener('mousemove', extendWordDrag);
-      document.removeEventListener('mouseup', endTextSelectionCursor, true);
-      document.removeEventListener('mouseup', finishProductionCharacterDrag, true);
-      document.removeEventListener('mouseup', endWordDrag);
-      document.removeEventListener('mouseup', commitTextHighlight);
-      document.removeEventListener('mouseup', capturePdfTextSelection);
-      document.removeEventListener('mouseup', clearTextSelectionOrigin);
-      document.removeEventListener('dragstart', suppressProductionBlankDrag);
-      document.removeEventListener('click', clearPageSelection);
-      document.removeEventListener('pointerdown', closePageContextMenu);
-      document.removeEventListener('pointerdown', commitTextFieldOnOutsidePointer, true);
-      window.removeEventListener('keydown', handlePageMenuShortcut, true);
-      window.removeEventListener('keydown', updateZoomCursor);
-      window.removeEventListener('keydown', handleShapeKeyboard, true);
-      window.removeEventListener('keydown', handleHistoryShortcut);
-      window.removeEventListener('keyup', updateZoomCursor);
-      window.removeEventListener('blur', resetZoomCursor);
-      window.removeEventListener('blur', endTextSelectionCursor);
+      removePageListeners.forEach((remove) => remove());
       endTextSelectionCursor();
     };
   });
@@ -5981,7 +5977,7 @@
 
   /** @param {import('pdfjs-dist').PDFDocumentProxy} document @param {number} generation */
   async function renderThumbnails(document, generation) {
-    const shells = globalThis.document?.querySelectorAll('.thumbnail-page') ?? [];
+    const shells = sidebarElement?.querySelectorAll('.thumbnail-page') ?? [];
     for (let index = 0; index < shells.length; index += 1) {
       if (generation !== loadGeneration) return;
       const shell = shells[index];
@@ -6043,7 +6039,7 @@
   }
 
   function capturePageScrollState() {
-    const sidebar = document.querySelector('.editor-sidebar');
+    const sidebar = sidebarElement;
     return {
       sidebarTop: sidebar instanceof HTMLElement ? sidebar.scrollTop : 0,
       viewerTop: viewer?.scrollTop ?? 0,
@@ -6054,7 +6050,7 @@
   /** @param {{ sidebarTop: number; viewerTop: number; viewerLeft: number }} state */
   async function restorePageScrollState(state) {
     await tick();
-    const sidebar = document.querySelector('.editor-sidebar');
+    const sidebar = sidebarElement;
     if (sidebar instanceof HTMLElement) sidebar.scrollTop = state.sidebarTop;
     if (viewer) {
       viewer.scrollTop = state.viewerTop;
@@ -6149,7 +6145,7 @@
 
       /** @param {number} page */
       function stablePageCenter(page) {
-        const entry = document.querySelector(`.thumbnail-entry[data-page-index="${page}"]`);
+        const entry = sidebarElement?.querySelector(`.thumbnail-entry[data-page-index="${page}"]`);
         if (!(entry instanceof HTMLElement)) return null;
         const rect = entry.getBoundingClientRect();
         const transform = getComputedStyle(entry).transform;
@@ -6179,7 +6175,7 @@
 
     function runPageAutoScroll() {
       if (!pagePointerDrag?.active) return;
-      const sidebar = document.querySelector('.editor-sidebar');
+      const sidebar = sidebarElement;
       if (sidebar instanceof HTMLElement && pageAutoScrollSpeed !== 0) {
         sidebar.scrollTop += pageAutoScrollSpeed;
         updatePageInsertionAt(pagePointerDrag.clientY);
@@ -6207,7 +6203,7 @@
       moveEvent.preventDefault();
       pagePointerDrag = { ...pagePointerDrag, clientX: moveEvent.clientX, clientY: moveEvent.clientY, active: true };
 
-      const sidebar = document.querySelector('.editor-sidebar');
+      const sidebar = sidebarElement;
       if (sidebar instanceof HTMLElement) {
         const sidebarRect = sidebar.getBoundingClientRect();
         const scrollZone = Math.min(190, sidebarRect.height * 0.24);
@@ -6296,7 +6292,7 @@
 
   /** @param {number[]} order @param {Set<number>} nextSelection */
   async function reorderPages(order, nextSelection) {
-    const sidebar = document.querySelector('.editor-sidebar');
+    const sidebar = sidebarElement;
     const sidebarScrollTop = sidebar instanceof HTMLElement ? sidebar.scrollTop : 0;
     const viewerScrollTop = viewer?.scrollTop ?? 0;
     const viewerScrollLeft = viewer?.scrollLeft ?? 0;
@@ -6316,7 +6312,7 @@
       htmlViewportMode = false;
       await loadPdf(false, true, order.length);
       /** @type {{ canvas: HTMLCanvasElement; cssWidth: string; cssHeight: string; shellHeight: string }[]} */
-      const thumbnailFrames = [...document.querySelectorAll('.thumbnail-page')].flatMap((shell) => {
+      const thumbnailFrames = [...(sidebarElement?.querySelectorAll('.thumbnail-page') ?? [])].flatMap((shell) => {
         const canvas = shell.querySelector('canvas');
         if (!(shell instanceof HTMLElement) || !(canvas instanceof HTMLCanvasElement)) return [];
         const copy = document.createElement('canvas');
@@ -6332,7 +6328,7 @@
       });
       pageDragPreviewOrder = [];
       await tick();
-      const normalizedShells = [...document.querySelectorAll('.thumbnail-page')];
+      const normalizedShells = [...(sidebarElement?.querySelectorAll('.thumbnail-page') ?? [])];
       thumbnailFrames.forEach((frame, index) => {
         const shell = normalizedShells[index];
         const canvas = shell?.querySelector('canvas');
@@ -6344,7 +6340,7 @@
         canvas.style.height = frame.cssHeight;
         canvas.getContext('2d')?.drawImage(frame.canvas, 0, 0);
       });
-      const restoredSidebar = document.querySelector('.editor-sidebar');
+      const restoredSidebar = sidebarElement;
       if (restoredSidebar instanceof HTMLElement) restoredSidebar.scrollTop = sidebarScrollTop;
       if (viewer) {
         viewer.scrollTop = viewerScrollTop;
@@ -8389,7 +8385,10 @@
 </script>
 
 <aside
+  bind:this={sidebarElement}
   class="editor-sidebar"
+  class:editor-inactive={!active}
+  inert={!active}
   aria-label="PDF pages"
   ondragover={handleExternalPdfSidebarDrag}
   ondragleave={(event) => {
@@ -8538,7 +8537,7 @@
   </div>
 {/if}
 
-<section class="pdf-workspace" aria-label={`PDF editor for ${workingFile.name}`} bind:this={workspace}>
+<section class="pdf-workspace" class:editor-inactive={!active} inert={!active} aria-label={`PDF editor for ${workingFile.name}`} bind:this={workspace}>
   {#if htmlEditorStarted}
     <div class:active={htmlViewportVisible} class="html-editor-layer">
       <HtmlPdfEditor
@@ -9414,7 +9413,7 @@
       aria-hidden="true"
     ></div>
   {/if}
-  <EditorToolbar bind:activeTool />
+  <EditorToolbar bind:activeTool {active} />
   <input
     class="signature-upload-input"
     type="file"
@@ -14259,5 +14258,20 @@
   .figma-color-picker.drawing-color-picker,
   .figma-color-picker.text-tool-color-picker {
     top: 110px;
+  }
+
+  /* Background tabs: kept rendered (scroll, pages, edits) but invisible and underneath the active editor. */
+  .pdf-workspace {
+    z-index: 1;
+  }
+
+  .editor-sidebar.editor-inactive,
+  .pdf-workspace.editor-inactive {
+    z-index: 0;
+    visibility: hidden;
+  }
+
+  .pdf-workspace.editor-inactive .html-editor-layer.active {
+    visibility: hidden;
   }
 </style>

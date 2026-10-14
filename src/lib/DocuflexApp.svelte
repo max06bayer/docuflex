@@ -92,6 +92,9 @@
   let fileInput;
   /** @type {{ downloadPdf: () => Promise<void>; exportPdfForSave: () => Promise<{ blob: Blob; suggestedName: string }>; openSearchPanel: () => void; openRasterPanel: () => void; mcpCall: (name: string, args: Record<string, any>) => Promise<any>; aiContext: () => any; undo: () => Promise<void>; redo: () => Promise<void> } | undefined} */
   let pdfEditor;
+  /** @type {Record<number, any>} */
+  let editorRefs = {};
+  $: pdfEditor = activeTab !== null ? editorRefs[activeTab] : undefined;
   let isDownloading = false;
   let isSaving = false;
   /** @type {{ id: number; title: string; message: string } | null} */
@@ -1312,22 +1315,24 @@
       <FlattenFilesPanel onClose={() => (flattenPanelOpen = false)} />
     {/if}
   </section>
-  {:else}
-    {#key activeDocument.id}
-      <PdfEditor
-        file={activeDocument.file}
-        protection={activeDocument.protection}
-        initialTool={activeDocument.initialTool ?? 'select'}
-        {commentMode}
-        documentId={activeDocument.id}
-        savedState={editorStates.get(activeDocument.id) ?? null}
-        onSaveState={saveEditorState}
-        onProtectionChange={(protection) => updateDocumentProtection(activeDocument.id, protection)}
-        onRequestClose={() => requestCloseTab(activeDocument.id)}
-        bind:this={pdfEditor}
-      />
-    {/key}
   {/if}
+
+  <!-- One editor per open tab stays mounted, so switching tabs never reloads a PDF. -->
+  {#each tabs as tab (tab.id)}
+    <PdfEditor
+      file={tab.file}
+      protection={tab.protection}
+      initialTool={tab.initialTool ?? 'select'}
+      active={tab.id === activeTab}
+      {commentMode}
+      documentId={tab.id}
+      savedState={editorStates.get(tab.id) ?? null}
+      onSaveState={saveEditorState}
+      onProtectionChange={(protection) => updateDocumentProtection(tab.id, protection)}
+      onRequestClose={() => requestCloseTab(tab.id)}
+      bind:this={editorRefs[tab.id]}
+    />
+  {/each}
 
   {#if aiStatus?.available}
     <AiChatPanel
@@ -3075,15 +3080,16 @@
     height: 61px;
     border: 1px solid #d3d0d0;
     border-left: 0;
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.85) 0%, rgba(243, 243, 243, 0.85) 100%);
+    background: #fff;
   }
 
+  /* 5% larger than the Figma logo, same left edge, centred in the 59px row. */
   .sidebar-logo {
     position: absolute;
-    top: 11px;
+    top: calc((100% - 45.15px) / 2);
     left: 15px;
-    width: 195px;
-    height: 43px;
+    width: 204.75px;
+    height: 45.15px;
     padding: 0;
     border: 0;
     background: transparent;
@@ -3092,8 +3098,8 @@
 
   .sidebar-logo img {
     display: block;
-    width: 195px;
-    height: 43px;
+    width: 204.75px;
+    height: 45.15px;
   }
 
   .sidebar-head-button {

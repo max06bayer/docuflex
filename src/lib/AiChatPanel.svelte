@@ -937,7 +937,7 @@
     const element = selection.anchorNode instanceof Element ? selection.anchorNode : selection.anchorNode.parentElement;
     if (!element || panel?.contains(element) || !element.closest('.pdf-workspace')) return;
     const pageElement = element.closest('.pdf-page');
-    const pages = [...document.querySelectorAll('.pdf-workspace .pdf-page')];
+    const pages = [...document.querySelectorAll('.pdf-workspace:not(.editor-inactive) .pdf-page')];
     const index = pageElement ? pages.indexOf(pageElement) : -1;
     selectionQuote = { text, page: index >= 0 ? index + 1 : null };
   }
