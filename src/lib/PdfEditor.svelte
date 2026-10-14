@@ -5989,7 +5989,7 @@
       if (!(shell instanceof HTMLElement) || !(canvas instanceof HTMLCanvasElement)) continue;
       const page = await document.getPage(index + 1);
       const baseViewport = page.getViewport({ scale: 1 });
-      const viewport = page.getViewport({ scale: 244 / baseViewport.width });
+      const viewport = page.getViewport({ scale: 266 / baseViewport.width });
       const outputScale = window.devicePixelRatio || 1;
       const context = canvas.getContext('2d');
       if (!context) continue;
@@ -9623,9 +9623,9 @@
             <label class="inspector-field"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectionGeometry('height', value), { min: 1 })}>H</span><input class="scrubbable-number" bind:this={inspectorHeightInput} type="number" min="1" step="1" value={Math.round(inspectedFrame.height)} onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectionGeometry('height', value), { min: 1 })} oninput={(event) => updateSelectionGeometry('height', Number(event.currentTarget.value))} /></label>
           </section>
           <section class="selection-property-section appearance-section" aria-label="Appearance">
-            <label class="inspector-field opacity-field"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectedShapes({ opacity: value / 100 }), { min: 0, max: 100 })}>Opacity</span><input class="scrubbable-number" type="number" min="0" max="100" step="1" value={Math.round((inspectedObject.opacity ?? 1) * 100)} onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectedShapes({ opacity: value / 100 }), { min: 0, max: 100 })} oninput={(event) => updateSelectedShapes({ opacity: clamp(Number(event.currentTarget.value) / 100, 0, 1) })} /><em>%</em></label>
+            <label class="inspector-field opacity-field"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectedShapes({ opacity: value }), { step: 0.01, min: 0, max: 1 })}>Opacity</span><input class="scrubbable-number" type="number" min="0" max="1" step="0.01" value={Math.round((inspectedObject.opacity ?? 1) * 100) / 100} onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectedShapes({ opacity: value }), { step: 0.01, min: 0, max: 1 })} oninput={(event) => updateSelectedShapes({ opacity: clamp(Number(event.currentTarget.value), 0, 1) })} /></label>
             <label class="inspector-field corner-field"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectedShapes({ cornerRadius: value * 10 }), { min: 0 })}>Corner</span><input class="scrubbable-number" type="number" min="0" step="1" value={Math.round((inspectedObject.cornerRadius ?? 0) / 10)} onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectedShapes({ cornerRadius: value * 10 }), { min: 0 })} oninput={(event) => updateSelectedShapes({ cornerRadius: Math.max(0, Number(event.currentTarget.value) * 10) })} /></label>
-            <label class="inspector-field inspector-field-wide"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectionGeometry('rotation', value))}>Rotation</span><input class="scrubbable-number" bind:this={inspectorRotationInput} type="number" step="1" value={Math.round(inspectedObjects.length === 1 ? inspectedObject.rotation : (multiSelectionFrame?.rotation ?? 0))} onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectionGeometry('rotation', value))} oninput={(event) => updateSelectionGeometry('rotation', Number(event.currentTarget.value))} /><em>°</em></label>
+            <label class="inspector-field inspector-field-wide"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectionGeometry('rotation', value))}>Rotation</span><span class="rotation-field-value">{#if Math.round(inspectedObjects.length === 1 ? inspectedObject.rotation : (multiSelectionFrame?.rotation ?? 0)) > 0}<b class="rotation-sign">+</b>{/if}<input class="scrubbable-number" bind:this={inspectorRotationInput} type="number" step="1" value={Math.round(inspectedObjects.length === 1 ? inspectedObject.rotation : (multiSelectionFrame?.rotation ?? 0))} onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectionGeometry('rotation', value))} oninput={(event) => updateSelectionGeometry('rotation', Number(event.currentTarget.value))} /></span></label>
           </section>
         {/if}
         {#if inspectedObjects.length === 1 && inspectedObject.type === 'textfield'}
@@ -10411,12 +10411,12 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 95px 27px 70px 24px;
+    padding: 86px 20px 70px 21px;
   }
 
   .thumbnail-entry {
     position: relative;
-    width: 286px;
+    width: 268px;
     transition: opacity 120ms ease, visibility 120ms ease;
   }
 
@@ -10469,7 +10469,7 @@
     position: relative;
     display: block;
     box-sizing: content-box;
-    width: 284px;
+    width: 266px;
     min-height: 120px;
     padding: 0;
     overflow: visible;
@@ -10499,7 +10499,7 @@
 
   .thumbnail-page canvas {
     display: block;
-    width: 284px;
+    width: 266px;
     border-radius: 7px;
     transition: opacity 170ms ease;
   }
@@ -10532,13 +10532,13 @@
   .page-pill {
     position: absolute;
     z-index: 2;
-    top: -17px;
+    top: -16px;
     left: 50%;
     display: grid;
     place-items: center;
     box-sizing: border-box;
-    min-width: 54px;
-    height: 32px;
+    min-width: 51px;
+    height: 29px;
     padding: 0 8px;
     border: 1px solid rgba(0, 0, 0, 0.07);
     border-radius: 41px;
@@ -11079,8 +11079,24 @@
     font-style: normal;
   }
 
-  .appearance-section .inspector-field-wide em {
-    display: none;
+  .rotation-field-value {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    padding-left: 6px;
+    color: rgba(0, 0, 0, 0.75);
+  }
+
+  .rotation-sign {
+    font-weight: inherit;
+  }
+
+  .inspector-field .rotation-field-value input {
+    padding-left: 0;
+  }
+
+  .selection-properties-scroll > .selection-property-section:last-child {
+    border-bottom: 0;
   }
 
   .object-properties {
@@ -11342,15 +11358,9 @@
     box-shadow: 0 0 0 2px #fff, 0 0 0 3.5px #1684f8;
   }
 
-  .stroke-property-row {
-    grid-template-columns: 44px 60px 44px minmax(0, 1fr) 34px;
-  }
-
+  /* The Figma panel shows only the colour; the width stays adjustable by dragging the "Stroke" label. */
   .stroke-property-row .property-number {
-    align-self: stretch;
-    padding: 0 4px;
-    color: rgba(0, 0, 0, 0.5);
-    text-align: left;
+    display: none;
   }
 
   .figma-color-picker {
@@ -13902,5 +13912,352 @@
 
   :global(.textLayer.selecting .endOfContent) {
     top: 0;
+  }
+
+  /* ---- Right-hand panels, all modelled on the Figma "Select" panel ---- */
+  .protect-panel {
+    width: min(293px, calc(100% - 26px));
+  }
+
+  .protect-panel :is(.protect-fields, .protect-warning, .protect-actions, .search-panel-content, .watermark-panel-content, .signature-actions, .saved-signature-content, .add-signature-content, .raster-actions) {
+    background: transparent;
+  }
+
+  .protect-fields,
+  .protect-warning {
+    border-bottom-color: rgba(0, 0, 0, 0.1);
+  }
+
+  .protect-fields {
+    padding: 12px 11px 12px 12px;
+  }
+
+  .protect-warning {
+    padding: 16px 14px 10px 14px;
+  }
+
+  .protect-warning h3 {
+    font-size: 20px;
+    letter-spacing: -0.2px;
+  }
+
+  .protect-warning p {
+    color: rgba(0, 0, 0, 0.5);
+    font-size: 18px;
+    letter-spacing: -0.18px;
+  }
+
+  .protect-actions {
+    padding: 15px 11px 15px 12px;
+  }
+
+  /* Text fields: the inspector's white 48px fields. */
+  .password-field {
+    height: 48px;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 15px;
+    background: #fff;
+  }
+
+  .password-field:focus-within {
+    border-color: rgba(0, 0, 0, 0.18);
+    background: #fff;
+    box-shadow: none;
+  }
+
+  .password-field input {
+    padding: 0 13px;
+    color: rgba(0, 0, 0, 0.75);
+    font-size: 21px;
+    letter-spacing: -0.21px;
+  }
+
+  .password-field input::placeholder {
+    color: rgba(0, 0, 0, 0.5);
+  }
+
+  .password-visibility {
+    border-left: 0;
+  }
+
+  .password-visibility:hover {
+    background: transparent;
+  }
+
+  /* Buttons share the field geometry. */
+  .protect-submit,
+  .signature-action {
+    height: 48px;
+    border-radius: 15px;
+    font-size: 20px;
+    letter-spacing: -0.2px;
+  }
+
+  .signature-action.secondary {
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    background: #fff;
+    color: rgba(0, 0, 0, 0.5);
+  }
+
+  .signature-action.secondary:hover {
+    border-color: rgba(0, 0, 0, 0.18);
+    background: #fff;
+    color: rgba(0, 0, 0, 0.75);
+  }
+
+  /* Heights follow from the 48px controls (header 50 + sections). */
+  .protect-panel {
+    height: 428px;
+  }
+
+  .protect-panel.encrypted {
+    height: 370px;
+  }
+
+  .protect-panel.has-error {
+    height: 464px;
+  }
+
+  .protect-panel.encrypted.has-error {
+    height: 406px;
+  }
+
+  .protect-panel-form {
+    grid-template-rows: 140px 160px 78px;
+  }
+
+  .protect-panel.encrypted .protect-panel-form {
+    grid-template-rows: 82px 160px 78px;
+  }
+
+  .protect-panel.has-error .protect-panel-form {
+    grid-template-rows: 176px 160px 78px;
+  }
+
+  .protect-panel.encrypted.has-error .protect-panel-form {
+    grid-template-rows: 118px 160px 78px;
+  }
+
+  .protect-panel.edit-locked-panel {
+    height: 428px;
+  }
+
+  .protect-panel.edit-locked-panel.has-error {
+    height: 464px;
+  }
+
+  .protect-panel.edit-locked-panel .protect-panel-form {
+    grid-template-rows: 82px 160px 136px;
+  }
+
+  .protect-panel.edit-locked-panel.has-error .protect-panel-form {
+    grid-template-rows: 118px 160px 136px;
+  }
+
+  .protect-panel.search-panel {
+    height: 124px;
+  }
+
+  .search-panel-content {
+    padding: 12px 11px 13px 12px;
+  }
+
+  .search-controls {
+    grid-template-columns: minmax(0, 1fr) 48px 48px;
+    gap: 8px;
+  }
+
+  .search-direction {
+    width: 48px;
+    height: 48px;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 15px;
+    background: #fff;
+  }
+
+  .protect-panel.watermark-panel {
+    height: 183px;
+  }
+
+  .watermark-panel-content {
+    grid-template-rows: 48px 48px;
+    padding: 12px 11px 13px 12px;
+  }
+
+  .signature-actions {
+    padding: 17px 11px 17px 12px;
+  }
+
+  .protect-panel.add-signature-panel {
+    top: 156px;
+  }
+
+  .protect-panel.add-signature-panel.below-signatures {
+    top: 324px;
+  }
+
+  .protect-panel.comment-panel,
+  .protect-panel.raster-panel {
+    max-height: calc(100% - 24px);
+  }
+
+  .raster-scope,
+  .raster-section {
+    border-bottom-color: rgba(0, 0, 0, 0.1);
+  }
+
+  .raster-scope {
+    padding: 14px 12px 13px;
+    color: rgba(0, 0, 0, 0.5);
+  }
+
+  .raster-section {
+    padding: 15px 11px 16px 12px;
+  }
+
+  .raster-slider-label {
+    font-size: 20px;
+    letter-spacing: -0.2px;
+  }
+
+  .raster-actions {
+    padding: 15px 11px 15px 12px;
+    border-top-color: rgba(0, 0, 0, 0.1);
+  }
+
+  .comment-panel-body textarea {
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 15px;
+    background: #fff;
+    color: rgba(0, 0, 0, 0.75);
+    font-size: 21px;
+    letter-spacing: -0.21px;
+  }
+
+  .figma-color-picker {
+    right: 316px;
+    border: 1px solid #cbcaca;
+    border-radius: 21px;
+    background: rgba(255, 255, 255, 0.85);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+    backdrop-filter: blur(1.3px);
+    -webkit-backdrop-filter: blur(1.3px);
+  }
+
+  /* Every row-style control in the panels uses the inspector's white 48px field. */
+  .drawing-color-row,
+  .typography-color-row,
+  .typography-select-row,
+  .drawing-toggle,
+  .typography-segments,
+  .typography-style-row,
+  .text-mark-row {
+    box-sizing: border-box;
+    height: 48px;
+    min-height: 48px;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 15px;
+    background: #fff;
+    color: rgba(0, 0, 0, 0.75);
+    font-size: 21px;
+    letter-spacing: -0.21px;
+  }
+
+  .drawing-color-row > span,
+  .typography-color-row > span,
+  .typography-select-row > span {
+    padding-left: 13px;
+    color: rgba(0, 0, 0, 0.5);
+  }
+
+  .drawing-color-row input,
+  .typography-color-row input,
+  .typography-select-row select,
+  .text-mark-row input {
+    color: rgba(0, 0, 0, 0.75);
+    letter-spacing: inherit;
+  }
+
+  .text-mark-row button,
+  .text-mark-row input,
+  .typography-segments button,
+  .typography-style-row button {
+    border-color: rgba(0, 0, 0, 0.1);
+  }
+
+  .text-mark-row button {
+    padding: 0 13px;
+    color: rgba(0, 0, 0, 0.75);
+    font-size: 21px;
+    letter-spacing: -0.21px;
+  }
+
+  .text-mark-row > button:first-child:hover,
+  .typography-segments button:hover,
+  .typography-style-row button:hover {
+    background: rgba(0, 0, 0, 0.04);
+  }
+
+  .typography-segments button,
+  .typography-style-row button {
+    font-size: 20px;
+  }
+
+  .typography-alignment-row {
+    color: rgba(0, 0, 0, 0.5);
+    font-size: 20px;
+  }
+
+  .drawing-toggle {
+    padding: 0 13px;
+  }
+
+  .drawing-number-grid .inspector-field {
+    padding: 0 10px 0 12px;
+  }
+
+  .drawing-number-grid .inspector-field input {
+    padding-left: 4px;
+  }
+
+  .drawing-toggle em {
+    color: rgba(0, 0, 0, 0.5);
+  }
+
+  .drawing-toggle.active,
+  .drawing-toggle.active em {
+    color: #fff;
+  }
+
+  .drawing-property-section,
+  .text-mark-properties,
+  .typography-section {
+    gap: 10px;
+  }
+
+  .drawing-number-grid {
+    grid-template-columns: minmax(0, 118fr) minmax(0, 142fr);
+    gap: 10px;
+  }
+
+  .typography-weight-size-grid,
+  .typography-spacing-grid {
+    gap: 10px;
+  }
+
+  .protect-panel.text-selection-panel,
+  .text-selection-panel button,
+  .text-selection-panel input {
+    font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  .protect-panel.text-selection-panel,
+  .text-selection-panel input {
+    font-size: 21px;
+  }
+
+  .figma-color-picker.drawing-color-picker,
+  .figma-color-picker.text-tool-color-picker {
+    top: 110px;
   }
 </style>

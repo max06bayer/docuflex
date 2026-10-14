@@ -2647,14 +2647,14 @@
 
   /* ---- Document view redesign (Figma "Redesign" frame). Values are frame px; the shell's 0.85 zoom maps them to the screen. ---- */
   .editor-shell.editor-mode {
-    grid-template-columns: 338px minmax(0, 1fr);
+    grid-template-columns: 310px minmax(0, 1fr);
     background: #e2e2e2;
   }
 
   .editor-mode .topbar {
     position: relative;
     z-index: 6;
-    grid-template-columns: 338px minmax(0, 1fr) auto;
+    grid-template-columns: 310px minmax(0, 1fr) auto;
     isolation: isolate;
     overflow: visible;
     border-bottom: 0;
@@ -2698,7 +2698,7 @@
   .sidebar-toggle {
     position: absolute;
     top: 18px;
-    left: 218px;
+    left: 186px;
     width: 20px;
     height: 20px;
     pointer-events: none;
@@ -2723,11 +2723,11 @@
   }
 
   .history-button.back {
-    left: 258px;
+    left: 226px;
   }
 
   .history-button.forward {
-    left: 298px;
+    left: 266px;
   }
 
   .history-button img {
@@ -2761,7 +2761,7 @@
     top: 0;
     right: 0;
     bottom: 0;
-    left: 339px;
+    left: 310px;
     overflow: hidden;
     border-bottom: 1px solid #b3b0b0;
     background: rgba(255, 255, 255, 0.65);
@@ -2823,25 +2823,36 @@
     height: 21px;
   }
 
+  /* Inactive tabs keep the close button folded away; hovering grows the tab to its selected width and reveals it. */
+  .editor-mode .document-tab {
+    transition: padding-right 220ms cubic-bezier(0.22, 1, 0.36, 1), background-color 180ms ease, color 180ms ease, opacity 110ms ease;
+  }
+
   .editor-mode .close-tab {
     width: 20px;
     height: 20px;
     margin-left: 3px;
+    overflow: hidden;
+    transition: width 220ms cubic-bezier(0.22, 1, 0.36, 1), margin-left 220ms cubic-bezier(0.22, 1, 0.36, 1), opacity 160ms ease;
   }
 
-  .editor-mode .document-tab:not(.active) .close-tab {
-    position: absolute;
-    top: 50%;
-    right: 4px;
-    margin: 0;
+  .editor-mode .document-tab:not(.active):not(:hover):not(:focus-within) {
+    padding-right: 27px;
+  }
+
+  .editor-mode .document-tab:not(.active):hover,
+  .editor-mode .document-tab:not(.active):focus-within {
+    padding-right: 16.5px;
+  }
+
+  .editor-mode .document-tab:not(.active):not(:hover):not(:focus-within) .close-tab {
+    width: 0;
+    margin-left: -11px;
     opacity: 0;
-    transform: translateY(-50%);
-    transition: opacity 150ms ease;
   }
 
-  .editor-mode .document-tab:not(.active):hover .close-tab,
-  .editor-mode .document-tab:not(.active) .close-tab:focus-visible {
-    opacity: 1;
+  .editor-mode .close-tab img.close-tab-cross {
+    flex: 0 0 auto;
   }
 
   .close-tab-cross,
@@ -2909,19 +2920,19 @@
   .window-control.close {
     --light-top: #ff4d4e;
     --light-bottom: #ff7e7f;
-    left: 24px;
+    left: 19px;
   }
 
   .window-control.minimize {
     --light-top: #ffb700;
     --light-bottom: #ffcc49;
-    left: 56px;
+    left: 51px;
   }
 
   .window-control.zoom {
     --light-top: #00cc14;
     --light-bottom: #52ff63;
-    left: 88px;
+    left: 83px;
   }
 
   .window-controls.window-inactive:not(:hover) .window-control {
@@ -3059,7 +3070,7 @@
     grid-row: 2;
     align-self: start;
     box-sizing: border-box;
-    width: 338px;
+    width: 310px;
     height: 61px;
     border: 1px solid #d3d0d0;
     border-left: 0;
@@ -3068,10 +3079,10 @@
 
   .sidebar-logo {
     position: absolute;
-    top: 13px;
-    left: 19px;
-    width: 187px;
-    height: 41px;
+    top: 11px;
+    left: 15px;
+    width: 195px;
+    height: 43px;
     padding: 0;
     border: 0;
     background: transparent;
@@ -3080,8 +3091,8 @@
 
   .sidebar-logo img {
     display: block;
-    width: 187px;
-    height: 41px;
+    width: 195px;
+    height: 43px;
   }
 
   .sidebar-head-button {
@@ -3101,11 +3112,11 @@
   }
 
   .sidebar-head-button:nth-of-type(2) {
-    left: 234px;
+    left: 207px;
   }
 
   .sidebar-head-button:nth-of-type(3) {
-    left: 284px;
+    left: 257px;
   }
 
   .sidebar-head-button:hover {
