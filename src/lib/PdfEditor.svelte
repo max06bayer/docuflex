@@ -2808,6 +2808,28 @@
     return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value));
   }
 
+  /**
+   * Sideways pan room past the page edges. There is none until the pages are
+   * 20% wider than when the document opened; from there it grows with the zoom
+   * (without a jump) up to the full gutter, the same amount on both sides.
+   */
+  const MAX_HORIZONTAL_PAN_GUTTER = 420;
+  const PAN_START_SCALE = 1.2;
+  let viewerWidth = 0;
+  $: horizontalPanGutter = panGutterFor(zoomLevel, viewerWidth, pageSizes);
+
+  /** @param {number} zoom @param {number} viewWidth @param {Record<number, { width: number; height: number }>} sizes */
+  function panGutterFor(zoom, viewWidth, sizes) {
+    const pageWidth = Math.max(0, ...Object.values(sizes).map((size) => size.width));
+    if (!pageWidth || !viewWidth) return 0;
+    const threshold = pageWidth * PAN_START_SCALE;
+    const zoomedWidth = pageWidth * zoom;
+    if (zoomedWidth <= threshold) return 0;
+    // At the threshold the pages plus this gutter exactly fill the view, so panning starts from zero.
+    const startGutter = Math.max(0, (viewWidth - threshold) / 2);
+    return Math.min(MAX_HORIZONTAL_PAN_GUTTER, startGutter + (zoomedWidth - threshold) / 2);
+  }
+
   /** The view opens horizontally centred on the pages; later reloads keep the user's position. */
   let viewCenteredOnOpen = false;
 
@@ -8579,6 +8601,8 @@
     role="region"
     aria-label="Document pages"
     bind:this={viewer}
+    bind:clientWidth={viewerWidth}
+    style:--horizontal-pan-gutter={`${horizontalPanGutter}px`}
     onwheel={handleWheel}
     onscroll={handleViewerScroll}
     onauxclick={preventMiddleClick}
@@ -9568,7 +9592,7 @@
   {#if activeTool === 'select' && pdfTextSelection}
     <div class="protect-panel selection-properties-panel text-selection-panel" role="dialog" aria-label="Selected text properties" transition:fly={{ x: 18, duration: 240, easing: cubicOut }}>
       <header class="protect-panel-header">
-        <img src="/toolbar/small/select.svg" alt="" />
+        <img src="/redesign/vector609.svg" alt="" />
         <h2>Select</h2>
         <button class="protect-panel-close" type="button" aria-label="Close text properties" onclick={() => { pdfTextSelection = null; window.getSelection()?.removeAllRanges(); }}><span></span><span></span></button>
       </header>
@@ -10766,12 +10790,12 @@
     overflow: hidden;
     border: 1px solid #cbcaca;
     border-radius: 21px;
-    background: rgba(255, 255, 255, 0.5);
+    background: rgba(240, 236, 236, 0.75);
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
     color: #000;
     font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    backdrop-filter: blur(6.5px);
-    -webkit-backdrop-filter: blur(6.5px);
+    backdrop-filter: blur(1.3px);
+    -webkit-backdrop-filter: blur(1.3px);
     font-size: 16px;
     transition: height 300ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 200ms ease;
     -webkit-font-smoothing: antialiased;
@@ -11540,7 +11564,7 @@
     min-width: 0;
     padding: 0 14px 0 14px;
     border-bottom: 1px solid #cacaca;
-    background: rgba(83, 83, 83, 0.08);
+    background: rgba(214, 214, 214, 0.75);
     height: 50px;
   }
 
@@ -13079,7 +13103,7 @@
   }
 
   .pdf-viewer {
-    --horizontal-pan-gutter: 420px;
+    --horizontal-pan-gutter: 0px;
     box-sizing: border-box;
     width: 100%;
     height: 100%;
@@ -14152,10 +14176,10 @@
     right: 316px;
     border: 1px solid #cbcaca;
     border-radius: 21px;
-    background: rgba(255, 255, 255, 0.85);
+    background: rgba(240, 236, 236, 0.75);
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
-    backdrop-filter: blur(6.5px);
-    -webkit-backdrop-filter: blur(6.5px);
+    backdrop-filter: blur(1.3px);
+    -webkit-backdrop-filter: blur(1.3px);
   }
 
   /* Every row-style control in the panels uses the inspector's white 48px field. */
@@ -14288,5 +14312,72 @@
 
   .pdf-workspace.editor-inactive .html-editor-layer.active {
     visibility: hidden;
+  }
+
+  /* Text-selection panel rows: same field look as the shape inspector's Fill / Stroke rows. */
+  .decorated-mark-row {
+    grid-template-columns: minmax(0, 1fr) 46px 84px 38px;
+  }
+
+  .highlight-mark-row {
+    grid-template-columns: minmax(0, 1fr) 84px 38px;
+  }
+
+  .text-mark-row button,
+  .text-mark-row input {
+    border-right: 0;
+  }
+
+  .text-mark-row > button:first-child {
+    padding-left: 13px;
+    color: rgba(0, 0, 0, 0.5);
+  }
+
+  .text-mark-row > button:first-child.active {
+    color: #fff;
+  }
+
+  .text-mark-row input {
+    padding: 0 4px 0 0;
+    color: rgba(0, 0, 0, 0.75);
+    font-size: 21px;
+    text-align: left;
+  }
+
+  .text-mark-row input.text-mark-thickness {
+    color: rgba(0, 0, 0, 0.5);
+    text-align: center;
+  }
+
+  .text-mark-color {
+    width: 25px !important;
+    height: 25px !important;
+    border: 1px solid color-mix(in srgb, var(--property-color) 19%, transparent) !important;
+    border-radius: 17px !important;
+    transform: none;
+  }
+
+  .text-redaction-grid {
+    gap: 10px;
+  }
+
+  .text-redaction-grid button {
+    height: 48px;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 15px;
+    background: #fff;
+    color: rgba(0, 0, 0, 0.75);
+    font-size: 21px;
+    letter-spacing: -0.21px;
+  }
+
+  .text-redaction-grid button:hover {
+    border-color: rgba(0, 0, 0, 0.18);
+  }
+
+  .text-redaction-grid button.active {
+    border-color: #111;
+    background: #111;
+    color: #fff;
   }
 </style>
