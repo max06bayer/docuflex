@@ -18,8 +18,15 @@ use tauri::{webview::DownloadEvent, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri::{LogicalPosition, TitleBarStyle};
 use url::Url;
 
+// The side-by-side build ("Docuflex Redesign") uses its own ports so it can run next to the regular app.
+#[cfg(not(feature = "side-by-side"))]
 const FRONTEND_PORT: u16 = 43_127;
+#[cfg(not(feature = "side-by-side"))]
 const BACKEND_PORT: u16 = 43_128;
+#[cfg(feature = "side-by-side")]
+const FRONTEND_PORT: u16 = 43_137;
+#[cfg(feature = "side-by-side")]
+const BACKEND_PORT: u16 = 43_138;
 const MAX_OPEN_PDF_BYTES: u64 = 230 * 1024 * 1024;
 
 type PendingPdf = Arc<Mutex<Option<PathBuf>>>;
@@ -562,7 +569,7 @@ pub fn run() {
             let window_builder = window_builder
                 .title_bar_style(TitleBarStyle::Overlay)
                 .hidden_title(true)
-                .traffic_light_position(LogicalPosition::new(24.0, 24.0));
+                .traffic_light_position(LogicalPosition::new(22.0, 16.0));
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             let window_builder = window_builder.decorations(false).shadow(true);
             #[cfg(any(target_os = "linux", target_os = "windows"))]

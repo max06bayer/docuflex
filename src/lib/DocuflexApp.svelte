@@ -875,22 +875,39 @@
 
 <main class="editor-shell" class:editor-mode={activeTab !== null}>
   <header class="topbar">
-    <div class="brand-area">
-      <button class="logo-button" aria-label="Go to Home" title="Home" onclick={() => (activeTab = null)}>
-        <img class="logo" src="/logo.svg" alt="Docuflex" />
-      </button>
-      <nav class="history" aria-label="History navigation">
-        <button class="plain-button" aria-label="Undo" title="Undo" onclick={() => pdfEditor?.undo()}>
-          <img src="/arrowleft.svg" alt="" />
+    {#if activeTab !== null}
+      <div class="window-head">
+        <span class="window-head-texture" aria-hidden="true"></span>
+        <img class="sidebar-toggle" src="/redesign/rectangle1193.svg" alt="" />
+        <nav class="history" aria-label="History navigation">
+          <button class="history-button back" aria-label="Undo" title="Undo" onclick={() => pdfEditor?.undo()}>
+            <img src="/redesign/vector543.svg" alt="" />
+          </button>
+          <button class="history-button forward" aria-label="Redo" title="Redo" onclick={() => pdfEditor?.redo()}>
+            <img src="/redesign/vector542.svg" alt="" />
+          </button>
+        </nav>
+      </div>
+      <span class="topbar-backdrop" aria-hidden="true"><img src="/redesign/rectangle997.png" alt="" /></span>
+    {:else}
+      <div class="brand-area">
+        <button class="logo-button" aria-label="Go to Home" title="Home" onclick={() => (activeTab = null)}>
+          <img class="logo" src="/logo.svg" alt="Docuflex" />
         </button>
-        <button class="plain-button" aria-label="Redo" title="Redo" onclick={() => pdfEditor?.redo()}>
-          <img src="/arrowright.svg" alt="" />
-        </button>
-      </nav>
-    </div>
+        <nav class="history" aria-label="History navigation">
+          <button class="plain-button" aria-label="Undo" title="Undo" onclick={() => pdfEditor?.undo()}>
+            <img src="/arrowleft.svg" alt="" />
+          </button>
+          <button class="plain-button" aria-label="Redo" title="Redo" onclick={() => pdfEditor?.redo()}>
+            <img src="/arrowright.svg" alt="" />
+          </button>
+        </nav>
+      </div>
+    {/if}
 
     <div class="tab-strip" role="tablist" aria-label="Open documents">
       {#each tabs as tab (tab.id)}
+        {@const tabLabel = activeTab !== null ? tab.name.replace(/\.pdf$/i, '') : tab.name}
         <button
           class:active={tab.id === activeTab}
           class:closing={closingTabs.has(tab.id)}
@@ -900,11 +917,15 @@
           aria-selected={tab.id === activeTab}
           onclick={() => (activeTab = tab.id)}
         >
-          <img src="/pdficon.svg" alt="" />
+          {#if activeTab !== null}
+            <img class="tab-file-icon" src={tab.id === activeTab ? '/redesign/subtract2.svg' : '/redesign/pdf-tab-inactive.svg'} alt="" />
+          {:else}
+            <img src="/pdficon.svg" alt="" />
+          {/if}
           {#if tab.protection.enabled}
             <img class="tab-lock-icon" src="/lock.svg" alt="Encrypted" title="Encrypted" />
           {/if}
-          <span class="tab-title" class:long-title={tab.name.length > 22}>{tab.name}</span>
+          <span class="tab-title" class:long-title={tabLabel.length > 22}>{tabLabel}</span>
           <span
             class="close-tab"
             role="button"
@@ -913,13 +934,21 @@
             onclick={(event) => closeTab(event, tab.id)}
             onkeydown={(event) => (event.key === 'Enter' || event.key === ' ') && closeTab(event, tab.id)}
           >
-            <img src="/close.svg" alt="" />
+            {#if activeTab !== null}
+              <span class="close-tab-cross" aria-hidden="true"><img src="/redesign/vector540.svg" alt="" /><img src="/redesign/vector541.svg" alt="" /></span>
+            {:else}
+              <img src="/close.svg" alt="" />
+            {/if}
           </span>
         </button>
       {/each}
 
       <button class="add-tab" data-tab-motion="add" aria-label="Open another document" title="Open document" onclick={() => openFilePicker()}>
-        <img src="/plus.svg" alt="" />
+        {#if activeTab !== null}
+          <span class="add-tab-cross" aria-hidden="true"><img src="/redesign/vector535.svg" alt="" /><img src="/redesign/vector536.svg" alt="" /></span>
+        {:else}
+          <img src="/plus.svg" alt="" />
+        {/if}
       </button>
     </div>
 
@@ -939,7 +968,7 @@
           onblur={hideUtilityTooltip}
           onclick={() => { hideUtilityTooltip(); mcpPanelOpen = !mcpPanelOpen; if (mcpPanelOpen) { settingsPanelOpen = false; aiPanelOpen = false; void refreshMcpStatus(); } }}
         >
-          <img src="/mcp.svg" alt="" />
+          <img class="utility-icon-mcp" src={activeTab !== null ? '/redesign/icon-code-xml.svg' : '/mcp.svg'} alt="" />
         </button>
       {/if}
       {#if activeTab !== null}
@@ -956,7 +985,7 @@
           onblur={hideUtilityTooltip}
           onclick={() => { hideUtilityTooltip(); commentMode = !commentMode; }}
         >
-          <img src="/comments.svg" alt="" />
+          <img class="utility-icon-comments" src="/redesign/icon-message-square-quote.svg" alt="" />
         </button>
         {@const rasterUtility = { label: 'Adjust & Rasterize', description: 'Rotate, color-correct and rasterize pages.' }}
         <button
@@ -970,7 +999,7 @@
           onblur={hideUtilityTooltip}
           onclick={() => { hideUtilityTooltip(); pdfEditor?.openRasterPanel(); }}
         >
-          <img src="/color.svg" alt="" />
+          <img class="utility-icon-palette" src="/redesign/icon-palette.svg" alt="" />
         </button>
         <button
           class="utility-button"
@@ -994,9 +1023,9 @@
       {#each [
         { id: 'home', icon: '/home.svg', label: 'Home', description: 'Return to the document overview.' },
         { id: 'search', icon: '/search.svg', label: 'Search', description: 'Find text in the current PDF.' },
-        { id: 'assistant', icon: '/brain.svg', label: 'AI Chat', description: aiStatus?.available ? (aiBusy ? 'Docuflex AI is working…' : 'Ask AI about your document or let it edit for you.') : 'Chat with AI about your document.' },
-        { id: 'settings', icon: '/settings.svg', label: 'Settings', description: 'Open Docuflex settings.' }
-      ].filter((utility) => utility.id !== 'search' || activeTab !== null) as utility (utility.id)}
+        { id: 'assistant', icon: activeTab !== null ? '/redesign/icon-brain.svg' : '/brain.svg', label: 'AI Chat', description: aiStatus?.available ? (aiBusy ? 'Docuflex AI is working…' : 'Ask AI about your document or let it edit for you.') : 'Chat with AI about your document.' },
+        { id: 'settings', icon: activeTab !== null ? '/redesign/icon-settings2.svg' : '/settings.svg', label: 'Settings', description: 'Open Docuflex settings.' }
+      ].filter((utility) => activeTab === null ? utility.id !== 'search' : utility.id !== 'home' && utility.id !== 'search') as utility (utility.id)}
         {@const aiUtility = utility.id === 'assistant'}
         <button
           class="utility-button"
@@ -1004,6 +1033,7 @@
           class:ai-button={aiUtility}
           class:ai-busy={aiUtility && aiBusy}
           class:active={aiUtility && aiPanelOpen && aiStatus?.available}
+          data-utility={utility.id}
           aria-label={utility.label}
           aria-pressed={aiUtility ? aiPanelOpen : undefined}
           disabled={aiUtility && !aiStatus?.available}
@@ -1025,6 +1055,40 @@
       {/each}
     </nav>
   </header>
+
+  {#if activeTab !== null}
+    {@const searchUtility = { label: 'Search', description: 'Find text in the current PDF.' }}
+    {@const homeUtility = { label: 'Home', description: 'Return to the document overview.' }}
+    <div class="sidebar-head">
+      <button class="sidebar-logo" aria-label="Go to Home" title="Home" onclick={() => (activeTab = null)}>
+        <img src="/redesign/docuflex-logo1.svg" alt="Docuflex" />
+      </button>
+      <button
+        class="sidebar-head-button"
+        aria-label={searchUtility.label}
+        aria-describedby={utilityTooltip?.label === searchUtility.label ? 'utility-tooltip' : undefined}
+        onmouseenter={(event) => scheduleUtilityTooltip(searchUtility, event.currentTarget)}
+        onmouseleave={hideUtilityTooltip}
+        onfocus={(event) => scheduleUtilityTooltip(searchUtility, event.currentTarget)}
+        onblur={hideUtilityTooltip}
+        onclick={() => { hideUtilityTooltip(); pdfEditor?.openSearchPanel(); }}
+      >
+        <img class="sidebar-search-icon" src="/redesign/icon-search.svg" alt="" />
+      </button>
+      <button
+        class="sidebar-head-button"
+        aria-label={homeUtility.label}
+        aria-describedby={utilityTooltip?.label === homeUtility.label ? 'utility-tooltip' : undefined}
+        onmouseenter={(event) => scheduleUtilityTooltip(homeUtility, event.currentTarget)}
+        onmouseleave={hideUtilityTooltip}
+        onfocus={(event) => scheduleUtilityTooltip(homeUtility, event.currentTarget)}
+        onblur={hideUtilityTooltip}
+        onclick={() => { hideUtilityTooltip(); activeTab = null; }}
+      >
+        <img class="sidebar-home-icon" src="/redesign/vector537.svg" alt="" />
+      </button>
+    </div>
+  {/if}
 
   {#if utilityTooltip}
     <div
@@ -2534,5 +2598,410 @@
     .quick-tool.wide-icon .quick-tool-icon {
       flex-basis: 106px;
     }
+  }
+
+  /* ---- Document view redesign (Figma "Redesign" frame). Values are frame px; the shell's 0.85 zoom maps them to the screen. ---- */
+  .editor-shell.editor-mode {
+    grid-template-columns: 338px minmax(0, 1fr);
+    background: #e2e2e2;
+  }
+
+  .editor-mode .topbar {
+    position: relative;
+    z-index: 6;
+    grid-template-columns: 338px minmax(0, 1fr) auto;
+    isolation: isolate;
+    overflow: visible;
+    border-bottom: 0;
+    background: transparent;
+    font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  .window-head {
+    position: relative;
+    z-index: 1;
+    grid-column: 1;
+    height: 56px;
+    overflow: hidden;
+  }
+
+  .window-head-texture {
+    position: absolute;
+    inset: 0;
+    background: #efefef;
+    pointer-events: none;
+  }
+
+  .window-head-texture::before,
+  .window-head-texture::after {
+    position: absolute;
+    inset: 0;
+    content: '';
+  }
+
+  .window-head-texture::before {
+    background: url('/redesign/rectangle992.png') center / 100% 100% no-repeat;
+    opacity: 0.5;
+  }
+
+  .window-head-texture::after {
+    background:
+      linear-gradient(90deg, rgba(255, 255, 255, 0) 43.47%, #fff 100%),
+      linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, #fff 100%);
+  }
+
+  .sidebar-toggle {
+    position: absolute;
+    top: 18px;
+    left: 218px;
+    width: 20px;
+    height: 20px;
+    pointer-events: none;
+  }
+
+  .editor-mode .history {
+    position: static;
+    margin: 0;
+  }
+
+  .history-button {
+    position: absolute;
+    top: 14px;
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .history-button.back {
+    left: 258px;
+  }
+
+  .history-button.forward {
+    left: 298px;
+  }
+
+  .history-button img {
+    display: block;
+    transition: opacity 150ms ease;
+  }
+
+  .history-button.back img {
+    width: 18.4px;
+    height: 16.649px;
+    transform: rotate(-90deg) scaleY(-1);
+  }
+
+  .history-button.forward img {
+    width: 18.5px;
+    height: 16.7668px;
+    transform: rotate(-90deg);
+  }
+
+  .history-button:hover img {
+    opacity: 0.7;
+  }
+
+  .history-button:active img {
+    opacity: 0.55;
+  }
+
+  .topbar-backdrop {
+    position: absolute;
+    z-index: 0;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 339px;
+    overflow: hidden;
+    border-bottom: 1px solid #b3b0b0;
+    background: rgba(255, 255, 255, 0.65);
+    box-shadow: 0 4px 50px rgba(0, 0, 0, 0.1);
+    pointer-events: none;
+  }
+
+  .topbar-backdrop img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: fill;
+    opacity: 0.25;
+  }
+
+  .topbar-backdrop::after {
+    position: absolute;
+    inset: 0;
+    background:
+      linear-gradient(90deg, rgba(255, 255, 255, 0) 33.804%, #fff 100%),
+      linear-gradient(90deg, #fff 0%, rgba(255, 255, 255, 0) 54.345%);
+    content: '';
+  }
+
+  .editor-mode .tab-strip {
+    position: relative;
+    z-index: 1;
+    height: 56px;
+  }
+
+  .editor-mode .document-tab {
+    position: relative;
+    gap: 11px;
+    max-width: 340px;
+    height: 56px;
+    margin-right: -1px;
+    padding: 0 27px 0 17px;
+    border: 1px solid #b0b0b0;
+    border-top: 0;
+    background: linear-gradient(180deg, rgba(209, 209, 209, 0.15) 0%, rgba(156, 156, 156, 0.15) 100%);
+    color: rgba(154, 63, 63, 0.75);
+    font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 21px;
+    font-weight: 400;
+    letter-spacing: -0.21px;
+  }
+
+  .editor-mode .document-tab.active {
+    z-index: 1;
+    padding-right: 16.5px;
+    border-color: #c5c3c3;
+    background: linear-gradient(180deg, #efefef 0%, #fff 100%);
+    color: #000;
+  }
+
+  .editor-mode .document-tab img.tab-file-icon {
+    width: 21px;
+    height: 21px;
+  }
+
+  .editor-mode .close-tab {
+    width: 20px;
+    height: 20px;
+    margin-left: 3px;
+  }
+
+  .editor-mode .document-tab:not(.active) .close-tab {
+    position: absolute;
+    top: 50%;
+    right: 4px;
+    margin: 0;
+    opacity: 0;
+    transform: translateY(-50%);
+    transition: opacity 150ms ease;
+  }
+
+  .editor-mode .document-tab:not(.active):hover .close-tab,
+  .editor-mode .document-tab:not(.active) .close-tab:focus-visible {
+    opacity: 1;
+  }
+
+  .close-tab-cross,
+  .add-tab-cross {
+    position: relative;
+    display: block;
+  }
+
+  .close-tab-cross {
+    width: 13px;
+    height: 13px;
+  }
+
+  .editor-mode .close-tab .close-tab-cross img {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 1.4px;
+    height: 19.7848px;
+    transform: translate(-50%, -50%) rotate(45deg);
+  }
+
+  .editor-mode .close-tab .close-tab-cross img + img {
+    transform: translate(-50%, -50%) rotate(135deg);
+  }
+
+  .editor-mode .close-tab:hover .close-tab-cross img {
+    filter: brightness(0.6);
+  }
+
+  .editor-mode .add-tab {
+    flex-basis: 55px;
+    width: 55px;
+    height: 56px;
+  }
+
+  .add-tab-cross {
+    width: 18px;
+    height: 18px;
+  }
+
+  .editor-mode .add-tab .add-tab-cross img {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 1.5px;
+    height: 19.5px;
+    transform: translate(-50%, -50%);
+  }
+
+  .editor-mode .add-tab .add-tab-cross img + img {
+    transform: translate(-50%, -50%) rotate(90deg);
+  }
+
+  .editor-mode .add-tab:hover .add-tab-cross img {
+    filter: brightness(0.75);
+  }
+
+  .editor-mode .add-tab:active .add-tab-cross {
+    transform: scale(0.94);
+  }
+
+  .editor-mode .utilities {
+    position: relative;
+    z-index: 1;
+    gap: 10px;
+    height: 56px;
+    padding: 0 13px 0 14px;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .editor-mode .utility-button {
+    width: 40px;
+    height: 40px;
+    border: 1px solid rgba(0, 0, 0, 0.05);
+    border-radius: 15px;
+    background: rgba(0, 0, 0, 0.05);
+  }
+
+  .editor-mode .utility-button:hover {
+    border-color: rgba(0, 0, 0, 0.07);
+    background: rgba(0, 0, 0, 0.08);
+  }
+
+  .editor-mode .utility-button:disabled:hover {
+    border-color: rgba(0, 0, 0, 0.05);
+    background: rgba(0, 0, 0, 0.05);
+  }
+
+  .editor-mode .utility-button.active,
+  .editor-mode .utility-button.active:hover {
+    border-color: #171717;
+    background: #171717;
+  }
+
+  .editor-mode .utility-button img,
+  .editor-mode .utility-button:nth-child(n) img {
+    width: 24px;
+    height: 24px;
+  }
+
+  .editor-mode .utility-button img.utility-icon-mcp,
+  .editor-mode .utility-button img.utility-icon-comments {
+    width: 25px;
+    height: 25px;
+  }
+
+  .editor-mode .utility-button.ai-button img {
+    width: 23px;
+    height: 24px;
+  }
+
+  .editor-mode .utility-button[data-utility='settings'] img {
+    width: 26px;
+    height: 26px;
+  }
+
+  .editor-mode .ai-button.ai-busy::after,
+  .editor-mode .mcp-button.mcp-live::after {
+    border-color: #ececec;
+  }
+
+  .sidebar-head {
+    position: relative;
+    z-index: 5;
+    grid-column: 1;
+    grid-row: 2;
+    align-self: start;
+    box-sizing: border-box;
+    width: 338px;
+    height: 61px;
+    border: 1px solid #d3d0d0;
+    border-left: 0;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.85) 0%, rgba(243, 243, 243, 0.85) 100%);
+  }
+
+  .sidebar-logo {
+    position: absolute;
+    top: 13px;
+    left: 19px;
+    width: 187px;
+    height: 41px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .sidebar-logo img {
+    display: block;
+    width: 187px;
+    height: 41px;
+  }
+
+  .sidebar-head-button {
+    position: absolute;
+    top: 9px;
+    display: grid;
+    place-items: center;
+    box-sizing: border-box;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border: 1px solid rgba(0, 0, 0, 0.05);
+    border-radius: 15px;
+    background: rgba(0, 0, 0, 0.05);
+    cursor: pointer;
+    transition: background-color 180ms ease, border-color 180ms ease;
+  }
+
+  .sidebar-head-button:nth-of-type(2) {
+    left: 234px;
+  }
+
+  .sidebar-head-button:nth-of-type(3) {
+    left: 284px;
+  }
+
+  .sidebar-head-button:hover {
+    border-color: rgba(0, 0, 0, 0.07);
+    background: rgba(0, 0, 0, 0.08);
+  }
+
+  .sidebar-head-button img {
+    display: block;
+    transition: filter 160ms ease, transform 160ms ease;
+  }
+
+  .sidebar-head-button:hover img {
+    filter: brightness(0.72);
+  }
+
+  .sidebar-head-button:active img {
+    transform: scale(0.94);
+  }
+
+  .sidebar-search-icon {
+    width: 27px;
+    height: 27px;
+  }
+
+  .sidebar-home-icon {
+    width: 21.4px;
+    height: 21.7397px;
+    margin-top: 1px;
   }
 </style>

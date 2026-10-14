@@ -168,12 +168,12 @@
       background: #f8f8f8;
     }
 
-    html[data-docuflex-desktop="macos"] .editor-shell {
+    html[data-docuflex-desktop="macos"] .editor-shell:not(.editor-mode) {
       --desktop-sidebar-width: 310px;
       grid-template-columns: var(--desktop-sidebar-width) minmax(0, 1fr) !important;
     }
 
-    html[data-docuflex-desktop="macos"] .topbar {
+    html[data-docuflex-desktop="macos"] .editor-shell:not(.editor-mode) .topbar {
       grid-template-columns: var(--desktop-sidebar-width) minmax(0, 1fr) auto !important;
       overflow: visible !important;
       position: relative !important;
@@ -239,16 +239,16 @@
       padding-top: 72px !important;
     }
 
-    html[data-docuflex-desktop="macos"] .add-tab {
+    html[data-docuflex-desktop="macos"] .editor-shell:not(.editor-mode) .add-tab {
       position: relative !important;
     }
 
-    html[data-docuflex-desktop="macos"] .add-tab img {
+    html[data-docuflex-desktop="macos"] .editor-shell:not(.editor-mode) .add-tab img {
       display: none !important;
     }
 
-    html[data-docuflex-desktop="macos"] .add-tab::before,
-    html[data-docuflex-desktop="macos"] .add-tab::after {
+    html[data-docuflex-desktop="macos"] .editor-shell:not(.editor-mode) .add-tab::before,
+    html[data-docuflex-desktop="macos"] .editor-shell:not(.editor-mode) .add-tab::after {
       position: absolute;
       top: 50%;
       left: 50%;
@@ -262,52 +262,21 @@
       transition: background-color 150ms ease, transform 150ms ease;
     }
 
-    html[data-docuflex-desktop="macos"] .add-tab::after {
+    html[data-docuflex-desktop="macos"] .editor-shell:not(.editor-mode) .add-tab::after {
       transform: translate(-50%, -50%) rotate(90deg);
     }
 
-    html[data-docuflex-desktop="macos"] .add-tab:hover::before,
-    html[data-docuflex-desktop="macos"] .add-tab:hover::after {
+    html[data-docuflex-desktop="macos"] .editor-shell:not(.editor-mode) .add-tab:hover::before,
+    html[data-docuflex-desktop="macos"] .editor-shell:not(.editor-mode) .add-tab:hover::after {
       background: #727272;
     }
 
-    html[data-docuflex-desktop="macos"] .add-tab:active::before {
+    html[data-docuflex-desktop="macos"] .editor-shell:not(.editor-mode) .add-tab:active::before {
       transform: translate(-50%, -50%) scale(0.94);
     }
 
-    html[data-docuflex-desktop="macos"] .add-tab:active::after {
+    html[data-docuflex-desktop="macos"] .editor-shell:not(.editor-mode) .add-tab:active::after {
       transform: translate(-50%, -50%) rotate(90deg) scale(0.94);
-    }
-
-    html[data-docuflex-desktop="macos"] .editor-mode .editor-sidebar .thumbnail-list {
-      padding-top: 78px !important;
-    }
-
-    html[data-docuflex-desktop="macos"] .editor-mode .utilities .utility-button[aria-label="Home"],
-    html[data-docuflex-desktop="macos"] .editor-mode .utilities .utility-button[aria-label="Search"] {
-      position: absolute !important;
-      top: 63px;
-      z-index: 4;
-    }
-
-    html[data-docuflex-desktop="macos"] .editor-mode .utilities {
-      z-index: 3 !important;
-    }
-
-    html[data-docuflex-desktop="macos"] .editor-mode .utilities .utility-button[aria-label="Home"] {
-      left: calc(var(--desktop-sidebar-width) - 104px);
-    }
-
-    html[data-docuflex-desktop="macos"] .editor-mode .utilities .utility-button[aria-label="Search"] {
-      left: calc(var(--desktop-sidebar-width) - 52px);
-    }
-
-    html[data-docuflex-desktop="macos"] .editor-mode .utilities .utility-button[aria-label="Home"]::before,
-    html[data-docuflex-desktop="macos"] .editor-mode .utilities .utility-button[aria-label="Search"]::before {
-      border-radius: inherit;
-      content: "";
-      inset: 0;
-      position: absolute;
     }
 
     html[data-docuflex-desktop="linux"] .editor-shell {

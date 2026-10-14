@@ -3266,7 +3266,7 @@
     height: 100%;
     margin: 0;
     overflow: auto;
-    background: #f5f5f5;
+    background: transparent;
     scrollbar-width: none;
   }
   html::-webkit-scrollbar { display: none; }
@@ -3281,7 +3281,7 @@
       var(--docuflex-viewer-padding-right, 35.556px)
       var(--docuflex-viewer-padding-bottom, 59.259px);
     overflow: visible;
-    background: #f5f5f5;
+    background: transparent;
   }
   #sidebar, #outline, .loading-indicator {
     display: none !important;
@@ -3308,7 +3308,7 @@
   .pf {
     flex: 0 0 auto;
     margin: 0 0 var(--docuflex-page-margin, 22.222px) !important;
-    box-shadow: 0 5px 22px rgba(0, 0, 0, 0.13);
+    box-shadow: 0 0 0 1px #bab6b6, 3px 8px 16px rgba(0, 0, 0, 0.05);
   }
   html.docuflex-pan-tool, html.docuflex-pan-tool * {
     cursor: grab !important;
@@ -3611,7 +3611,7 @@ ${setupScript}`;
     htmlFrame.style.transformOrigin = 'top center';
     doc.body.style.zoom = '';
     doc.body.style.width = '100%';
-    doc.documentElement.style.setProperty('--docuflex-viewer-padding-top', '36px');
+    doc.documentElement.style.setProperty('--docuflex-viewer-padding-top', '54px');
     doc.documentElement.style.setProperty('--docuflex-viewer-padding-right', '48px');
     doc.documentElement.style.setProperty('--docuflex-viewer-padding-bottom', '80px');
     doc.documentElement.style.setProperty('--docuflex-page-margin', `${30 / scale}px`);
@@ -5027,7 +5027,7 @@ ${setupScript}`;
     inset: 0;
     min-height: 0;
     overflow: hidden;
-    background: #f5f5f5;
+    background: transparent;
     scrollbar-width: none;
   }
 
@@ -5044,7 +5044,7 @@ ${setupScript}`;
     width: 100%;
     min-height: 100%;
     border: 0;
-    background: #f5f5f5;
+    background: transparent;
   }
 
   .html-editor-state {

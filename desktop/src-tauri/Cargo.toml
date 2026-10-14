@@ -9,6 +9,9 @@ edition = "2021"
 name = "docuflex_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+side-by-side = []
+
 [build-dependencies]
 tauri-build = { version = "2.5.6", features = [] }
 
