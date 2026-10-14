@@ -2865,37 +2865,97 @@
    * A pinch or Cmd-scroll in progress. Re-laying out every page and text layer
    * on each wheel event made zooming stutter, so the gesture is previewed as a
    * GPU scale around the pointer and laid out once it settles.
-   * @type {{ baseZoom: number; zoom: number; clientX: number; clientY: number; anchor: ReturnType<typeof zoomAnchorPage> } | null}
+   * @type {{ baseZoom: number; zoom: number; clientX: number; clientY: number; widestPage: HTMLElement; firstPage: HTMLElement; metrics: { viewerScale: number; stageScale: number; stageLeft: number; stageTop: number; viewLeft: number; viewTop: number; viewWidth: number; viewHeight: number; paddingTop: number; paddingBottom: number; pageLeft: number; pageWidth: number; documentTop: number; documentHeight: number } } | null}
    */
   let zoomGesture = null;
   /** @type {ReturnType<typeof setTimeout> | undefined} */
   let zoomGestureTimer;
   const ZOOM_SETTLE_MS = 140;
 
+  /**
+   * Where the pages may sit at a given zoom, in screen pixels: the same centring
+   * and pan limits the real layout applies. The preview is clamped to this on
+   * every step (as Chrome does), so zooming out drifts the pages back into place
+   * instead of snapping when the gesture ends.
+   * @param {NonNullable<typeof zoomGesture>} gesture @param {number} zoom
+   */
+  function zoomGesturePlacement(gesture, zoom) {
+    const m = gesture.metrics;
+    const k = zoom / gesture.baseZoom;
+    const pageWidth = m.pageWidth * k;
+    // Horizontal: pages centred in the document, which fills the view between the pan gutters.
+    const gutter = panGutterFor(zoom, viewerWidth, pageSizes) * m.viewerScale;
+    const documentWidth = Math.max(m.viewWidth - 2 * gutter, pageWidth);
+    const contentWidth = documentWidth + 2 * gutter;
+    const pageLeftInContent = gutter + (documentWidth - pageWidth) / 2;
+    const scrollRangeX = Math.max(0, contentWidth - m.viewWidth);
+    const freeLeft = gesture.clientX - (gesture.clientX - m.pageLeft) * k;
+    const left = Math.min(m.viewLeft + pageLeftInContent, Math.max(m.viewLeft + pageLeftInContent - scrollRangeX, freeLeft));
+    // Vertical: the document starts below the top padding and scrolls within its height.
+    const documentHeight = m.documentHeight * k;
+    const scrollRangeY = Math.max(0, m.paddingTop + documentHeight + m.paddingBottom - m.viewHeight);
+    const freeTop = gesture.clientY - (gesture.clientY - m.documentTop) * k;
+    const top = Math.min(m.viewTop + m.paddingTop, Math.max(m.viewTop + m.paddingTop - scrollRangeY, freeTop));
+    return { left, top };
+  }
+
   /** @param {number} requestedZoom @param {number} clientX @param {number} clientY */
   function previewZoomGesture(requestedZoom, clientX, clientY) {
     if (!viewer || !zoomStage) return;
     const zoom = clampZoom(requestedZoom);
     if (!zoomGesture) {
+      const pages = [...viewer.querySelectorAll('.pdf-page')];
+      if (!pages.length) return;
       if (pendingZoomFrame) cancelAnimationFrame(pendingZoomFrame);
       pendingZoomFrame = 0;
       pendingZoom = null;
-      // Zooming out while the pages already fit sideways ends centred, so shrink towards the centre instead of the pointer.
-      const firstPage = viewer.querySelector('.pdf-page');
-      if (zoom < zoomLevel && firstPage && viewer.scrollWidth <= viewer.clientWidth + 1) {
-        const pageRect = firstPage.getBoundingClientRect();
-        clientX = pageRect.left + pageRect.width / 2;
-      }
-      const rect = zoomStage.getBoundingClientRect();
-      const scale = zoomStage.offsetWidth ? rect.width / zoomStage.offsetWidth : 1;
+      const widestPage = /** @type {HTMLElement} */ (pages.reduce((widest, page) => page.getBoundingClientRect().width > widest.getBoundingClientRect().width ? page : widest));
+      const widestRect = widestPage.getBoundingClientRect();
+      const firstRect = pages[0].getBoundingClientRect();
+      const viewerRect = viewer.getBoundingClientRect();
+      const viewerScale = viewer.offsetWidth ? viewerRect.width / viewer.offsetWidth : 1;
+      const viewerStyle = getComputedStyle(viewer);
+      const paddingTop = Number.parseFloat(viewerStyle.paddingTop) * viewerScale;
+      const paddingBottom = Number.parseFloat(viewerStyle.paddingBottom) * viewerScale;
+      const stageRect = zoomStage.getBoundingClientRect();
       zoomStage.style.transition = '';
-      zoomStage.style.transformOrigin = `${(clientX - rect.left) / scale}px ${(clientY - rect.top) / scale}px`;
+      zoomStage.style.transformOrigin = '0 0';
       zoomStage.style.willChange = 'transform';
-      zoomGesture = { baseZoom: zoomLevel, zoom, clientX, clientY, anchor: zoomAnchorPage(clientX, clientY) };
+      zoomGesture = {
+        baseZoom: zoomLevel,
+        zoom,
+        clientX,
+        clientY,
+        widestPage,
+        firstPage: /** @type {HTMLElement} */ (pages[0]),
+        metrics: {
+          viewerScale,
+          stageScale: zoomStage.offsetWidth ? stageRect.width / zoomStage.offsetWidth : 1,
+          stageLeft: stageRect.left,
+          stageTop: stageRect.top,
+          viewLeft: viewerRect.left,
+          viewTop: viewerRect.top,
+          viewWidth: viewer.clientWidth * viewerScale,
+          viewHeight: viewer.clientHeight * viewerScale,
+          paddingTop,
+          paddingBottom,
+          pageLeft: widestRect.left,
+          pageWidth: widestRect.width,
+          documentTop: firstRect.top,
+          documentHeight: viewer.scrollHeight * viewerScale - paddingTop - paddingBottom
+        }
+      };
     } else {
       zoomGesture.zoom = zoom;
     }
-    zoomStage.style.transform = `scale(${zoomGesture.zoom / zoomGesture.baseZoom})`;
+    const gesture = zoomGesture;
+    const m = gesture.metrics;
+    const k = gesture.zoom / gesture.baseZoom;
+    const { left, top } = zoomGesturePlacement(gesture, gesture.zoom);
+    // Map the widest page's left edge and the document top to their clamped positions.
+    const translateX = (left - m.stageLeft - k * (m.pageLeft - m.stageLeft)) / m.stageScale;
+    const translateY = (top - m.stageTop - k * (m.documentTop - m.stageTop)) / m.stageScale;
+    zoomStage.style.transform = `translate(${translateX}px, ${translateY}px) scale(${k})`;
     clearTimeout(zoomGestureTimer);
     zoomGestureTimer = setTimeout(() => void commitZoomGesture(), ZOOM_SETTLE_MS);
   }
@@ -2905,9 +2965,7 @@
     const gesture = zoomGesture;
     zoomGesture = null;
     if (!gesture) return;
-    // Where the previewed page ended up; if the real layout cannot keep it there
-    // (pan limits), it glides over instead of jumping.
-    const previewRect = gesture.anchor?.page.getBoundingClientRect() ?? null;
+    const target = zoomGesturePlacement(gesture, gesture.zoom);
     const changed = Math.abs(gesture.zoom - zoomLevel) >= 0.001;
     if (changed) {
       zoomLevel = gesture.zoom;
@@ -2919,17 +2977,15 @@
       zoomStage.style.transformOrigin = '';
       zoomStage.style.willChange = '';
     }
-    if (!changed || !viewer || !gesture.anchor) return;
-    const rect = gesture.anchor.page.getBoundingClientRect();
-    const viewerRect = viewer.getBoundingClientRect();
-    const scale = viewer.offsetWidth ? viewerRect.width / viewer.offsetWidth : 1;
-    viewer.scrollLeft += (rect.left + gesture.anchor.x * rect.width - gesture.clientX) / scale;
-    viewer.scrollTop += (rect.top + gesture.anchor.y * rect.height - gesture.clientY) / scale;
-    if (previewRect && zoomStage) {
-      const settledRect = gesture.anchor.page.getBoundingClientRect();
-      const stageScale = zoomStage.offsetWidth ? zoomStage.getBoundingClientRect().width / zoomStage.offsetWidth : 1;
-      const offsetX = (previewRect.left - settledRect.left) / stageScale;
-      const offsetY = (previewRect.top - settledRect.top) / stageScale;
+    if (!changed || !viewer) return;
+    // The preview was already clamped, so the layout can land exactly where it showed the pages.
+    const scale = gesture.metrics.viewerScale;
+    viewer.scrollLeft += (gesture.widestPage.getBoundingClientRect().left - target.left) / scale;
+    viewer.scrollTop += (gesture.firstPage.getBoundingClientRect().top - target.top) / scale;
+    if (zoomStage) {
+      const offsetX = (target.left - gesture.widestPage.getBoundingClientRect().left) / gesture.metrics.stageScale;
+      const offsetY = (target.top - gesture.firstPage.getBoundingClientRect().top) / gesture.metrics.stageScale;
+      // Rounding leftovers only; anything visible eases instead of jumping.
       if (Math.abs(offsetX) > 0.5 || Math.abs(offsetY) > 0.5) glideZoomStage(offsetX, offsetY);
     }
     scheduleSharpRender();
