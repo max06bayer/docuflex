@@ -2829,6 +2829,7 @@
   }
 
   .editor-mode .close-tab {
+    flex: 0 0 auto;
     width: 20px;
     height: 20px;
     margin-left: 3px;
