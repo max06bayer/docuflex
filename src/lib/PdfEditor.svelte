@@ -2820,25 +2820,20 @@
   }
 
   /**
-   * Sideways pan room past the page edges. There is none until the pages are
-   * 20% wider than when the document opened; from there it grows with the zoom
-   * (without a jump) up to the full gutter, the same amount on both sides.
+   * Sideways pan room past the page edges. None at the opening zoom; zooming in
+   * adds exactly enough for the point under the pointer to stay put (as in
+   * Chrome), up to a maximum, the same on both sides.
    */
-  const MAX_HORIZONTAL_PAN_GUTTER = 420;
-  const PAN_START_SCALE = 1.2;
+  const MAX_HORIZONTAL_PAN_GUTTER = 600;
   let viewerWidth = 0;
   $: horizontalPanGutter = panGutterFor(zoomLevel, viewerWidth, pageSizes);
 
   /** @param {number} zoom @param {number} viewWidth @param {Record<number, { width: number; height: number }>} sizes */
   function panGutterFor(zoom, viewWidth, sizes) {
     const pageWidth = Math.max(0, ...Object.values(sizes).map((size) => size.width));
-    if (!pageWidth || !viewWidth) return 0;
-    const threshold = pageWidth * PAN_START_SCALE;
-    const zoomedWidth = pageWidth * zoom;
-    if (zoomedWidth <= threshold) return 0;
-    // At the threshold the pages plus this gutter exactly fill the view, so panning starts from zero.
-    const startGutter = Math.max(0, (viewWidth - threshold) / 2);
-    return Math.min(MAX_HORIZONTAL_PAN_GUTTER, startGutter + (zoomedWidth - threshold) / 2);
+    if (!pageWidth || !viewWidth || zoom <= 1) return 0;
+    // With this gutter the scroll range is viewWidth * (zoom - 1): enough to keep any visible point fixed while zooming.
+    return Math.min(MAX_HORIZONTAL_PAN_GUTTER, Math.max(0, (zoom * (viewWidth - pageWidth)) / 2));
   }
 
   /** The view opens horizontally centred on the pages; later reloads keep the user's position. */
@@ -2870,7 +2865,8 @@
   let zoomGesture = null;
   /** @type {ReturnType<typeof setTimeout> | undefined} */
   let zoomGestureTimer;
-  const ZOOM_SETTLE_MS = 140;
+  // Long enough that a slow pinch is not re-laid out halfway through.
+  const ZOOM_SETTLE_MS = 300;
 
   /**
    * Where the pages may sit at a given zoom, in screen pixels: the same centring
@@ -2909,7 +2905,9 @@
       if (pendingZoomFrame) cancelAnimationFrame(pendingZoomFrame);
       pendingZoomFrame = 0;
       pendingZoom = null;
-      const widestPage = /** @type {HTMLElement} */ (pages.reduce((widest, page) => page.getBoundingClientRect().width > widest.getBoundingClientRect().width ? page : widest));
+      // Measure as little as possible here: this runs before the first preview frame.
+      const widestIndex = Object.entries(pageSizes).reduce((best, [index, size]) => (size.width > (pageSizes[best]?.width ?? 0) ? Number(index) : best), 0);
+      const widestPage = /** @type {HTMLElement} */ (pages[widestIndex] ?? pages[0]);
       const widestRect = widestPage.getBoundingClientRect();
       const firstRect = pages[0].getBoundingClientRect();
       const viewerRect = viewer.getBoundingClientRect();
@@ -2918,9 +2916,9 @@
       const paddingTop = Number.parseFloat(viewerStyle.paddingTop) * viewerScale;
       const paddingBottom = Number.parseFloat(viewerStyle.paddingBottom) * viewerScale;
       const stageRect = zoomStage.getBoundingClientRect();
-      zoomStage.style.transition = '';
+      zoomGlide?.cancel();
+      zoomGlide = null;
       zoomStage.style.transformOrigin = '0 0';
-      zoomStage.style.willChange = 'transform';
       zoomGesture = {
         baseZoom: zoomLevel,
         zoom,
@@ -2975,7 +2973,6 @@
     if (zoomStage) {
       zoomStage.style.transform = '';
       zoomStage.style.transformOrigin = '';
-      zoomStage.style.willChange = '';
     }
     if (!changed || !viewer) return;
     // The preview was already clamped, so the layout can land exactly where it showed the pages.
@@ -2985,29 +2982,27 @@
     if (zoomStage) {
       const offsetX = (target.left - gesture.widestPage.getBoundingClientRect().left) / gesture.metrics.stageScale;
       const offsetY = (target.top - gesture.firstPage.getBoundingClientRect().top) / gesture.metrics.stageScale;
-      // Rounding leftovers only; anything visible eases instead of jumping.
-      if (Math.abs(offsetX) > 0.5 || Math.abs(offsetY) > 0.5) glideZoomStage(offsetX, offsetY);
+      // Sub-pixel rounding is left alone; anything visible eases instead of jumping.
+      if (Math.abs(offsetX) > 3 || Math.abs(offsetY) > 3) glideZoomStage(offsetX, offsetY);
     }
     scheduleSharpRender();
   }
 
+  /** @type {Animation | null} */
+  let zoomGlide = null;
+
   /** Starts the stage at the previewed position and eases it to where the layout put it. @param {number} offsetX @param {number} offsetY */
   function glideZoomStage(offsetX, offsetY) {
-    const stage = zoomStage;
-    if (!stage) return;
-    stage.style.transition = 'none';
-    stage.style.transform = `translate(${offsetX}px, ${offsetY}px)`;
-    void stage.offsetWidth;
-    // A slow ease-in-out reads as the page settling back rather than snapping.
-    stage.style.transition = 'transform 650ms cubic-bezier(0.65, 0, 0.35, 1)';
-    stage.style.transform = '';
-    const clear = () => {
-      stage.style.transition = '';
-      stage.removeEventListener('transitionend', clear);
-    };
-    stage.addEventListener('transitionend', clear);
-    setTimeout(clear, 750);
+    if (!zoomStage) return;
+    zoomGlide?.cancel();
+    // A cancellable animation: a new gesture must take over at once, not wait for the glide.
+    zoomGlide = zoomStage.animate(
+      [{ transform: `translate(${offsetX}px, ${offsetY}px)` }, { transform: 'none' }],
+      { duration: 650, easing: 'cubic-bezier(0.65, 0, 0.35, 1)' }
+    );
+    zoomGlide.onfinish = () => { zoomGlide = null; };
   }
+
 
   /**
    * Changes the document scale while keeping the point beneath the pointer in
@@ -13530,6 +13525,8 @@
     display: flow-root;
     width: max-content;
     min-width: 100%;
+    /* Kept on its own layer so a zoom gesture starts without a hitch. */
+    will-change: transform;
   }
 
   .pdf-document {
