@@ -3291,7 +3291,7 @@
     top: auto !important;
     right: auto !important;
     bottom: auto !important;
-    left: -50px !important;
+    left: 0 !important;
     width: 100% !important;
     min-width: 100%;
     margin: 0;

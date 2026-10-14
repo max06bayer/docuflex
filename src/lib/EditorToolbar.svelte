@@ -322,7 +322,7 @@
     z-index: 10;
     bottom: 30px;
     left: 50%;
-    transform: translateX(calc(-50% - 65px));
+    transform: translateX(-50%);
   }
 
   .editor-toolbar {

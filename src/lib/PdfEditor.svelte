@@ -2808,6 +2808,15 @@
     return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value));
   }
 
+  /** The view opens horizontally centred on the pages; later reloads keep the user's position. */
+  let viewCenteredOnOpen = false;
+
+  /** Scrolls so the pages sit in the middle of the visible editor area, with equal pan room on both sides. */
+  function centerViewerHorizontally() {
+    if (!viewer) return;
+    viewer.scrollLeft = Math.max(0, (viewer.scrollWidth - viewer.clientWidth) / 2);
+  }
+
   /** @type {{ zoom: number; clientX: number; clientY: number } | null} */
   let pendingZoom = null;
   let pendingZoomFrame = 0;
@@ -5804,6 +5813,10 @@
       ]);
       status = '';
       pdfReady = true;
+      if (!viewCenteredOnOpen) {
+        viewCenteredOnOpen = true;
+        centerViewerHorizontally();
+      }
       if (searchPanelOpen && searchQuery) scheduleSearchUpdate();
       if (zoomLevel !== 1) scheduleSharpRender(0);
     } catch (error) {
@@ -8359,6 +8372,7 @@
     undoHistory = state.undoHistory;
     redoHistory = state.redoHistory;
     zoomLevel = state.zoomLevel;
+    viewCenteredOnOpen = true;
     // Edits are already in the state, so keep them instead of re-reading form widgets.
     void loadPdf(false).then(async () => {
       await tick();
@@ -10410,7 +10424,7 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 86px 20px 70px 21px;
+    padding: 86px 20.5px 70px;
   }
 
   .thumbnail-entry {
@@ -10756,8 +10770,8 @@
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
     color: #000;
     font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    backdrop-filter: blur(1.3px);
-    -webkit-backdrop-filter: blur(1.3px);
+    backdrop-filter: blur(6.5px);
+    -webkit-backdrop-filter: blur(6.5px);
     font-size: 16px;
     transition: height 300ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 200ms ease;
     -webkit-font-smoothing: antialiased;
@@ -13065,10 +13079,12 @@
   }
 
   .pdf-viewer {
+    --horizontal-pan-gutter: 420px;
     box-sizing: border-box;
     width: 100%;
     height: 100%;
-    padding: 54px 48px 80px;
+    /* The side padding is pan room: the same amount beyond both page edges, scrolled to the middle on open. */
+    padding: 54px var(--horizontal-pan-gutter) 80px;
     overflow: auto;
     scrollbar-width: none;
   }
@@ -13246,7 +13262,6 @@
     overflow: hidden;
     background: #fff;
     box-shadow: 0 0 0 1px #bab6b6, 3px 8px 16px rgba(0, 0, 0, 0.05);
-    transform: translateX(-80px);
   }
 
   .annotation-layer {
@@ -14139,8 +14154,8 @@
     border-radius: 21px;
     background: rgba(255, 255, 255, 0.85);
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
-    backdrop-filter: blur(1.3px);
-    -webkit-backdrop-filter: blur(1.3px);
+    backdrop-filter: blur(6.5px);
+    -webkit-backdrop-filter: blur(6.5px);
   }
 
   /* Every row-style control in the panels uses the inspector's white 48px field. */
