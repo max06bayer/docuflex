@@ -2931,14 +2931,15 @@
     stage.style.transition = 'none';
     stage.style.transform = `translate(${offsetX}px, ${offsetY}px)`;
     void stage.offsetWidth;
-    stage.style.transition = 'transform 320ms cubic-bezier(0.22, 1, 0.36, 1)';
+    // A slow ease-in-out reads as the page settling back rather than snapping.
+    stage.style.transition = 'transform 650ms cubic-bezier(0.65, 0, 0.35, 1)';
     stage.style.transform = '';
     const clear = () => {
       stage.style.transition = '';
       stage.removeEventListener('transitionend', clear);
     };
     stage.addEventListener('transitionend', clear);
-    setTimeout(clear, 400);
+    setTimeout(clear, 750);
   }
 
   /**
