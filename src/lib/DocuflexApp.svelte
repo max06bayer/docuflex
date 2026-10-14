@@ -3086,7 +3086,8 @@
   /* 5% larger than the Figma logo, same left edge, centred in the 59px row. */
   .sidebar-logo {
     position: absolute;
-    top: calc((100% - 45.15px) / 2);
+    /* The wordmark sits high inside the asset; this centres the letters themselves. */
+    top: calc((100% - 45.15px) / 2 + 2.6px);
     left: 15px;
     width: 204.75px;
     height: 45.15px;

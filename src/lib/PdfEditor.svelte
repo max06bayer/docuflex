@@ -2845,7 +2845,72 @@
 
   /** The zoom the view is heading to, so fast wheel events build on each other. */
   function targetZoom() {
-    return pendingZoom?.zoom ?? zoomLevel;
+    return zoomGesture?.zoom ?? pendingZoom?.zoom ?? zoomLevel;
+  }
+
+  /** @type {HTMLDivElement | undefined} */
+  let zoomStage;
+  /**
+   * A pinch or Cmd-scroll in progress. Re-laying out every page and text layer
+   * on each wheel event made zooming stutter, so the gesture is previewed as a
+   * GPU scale around the pointer and laid out once it settles.
+   * @type {{ baseZoom: number; zoom: number; clientX: number; clientY: number; anchor: ReturnType<typeof zoomAnchorPage> } | null}
+   */
+  let zoomGesture = null;
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let zoomGestureTimer;
+  const ZOOM_SETTLE_MS = 140;
+
+  /** @param {number} requestedZoom @param {number} clientX @param {number} clientY */
+  function previewZoomGesture(requestedZoom, clientX, clientY) {
+    if (!viewer || !zoomStage) return;
+    const zoom = clampZoom(requestedZoom);
+    if (!zoomGesture) {
+      if (pendingZoomFrame) cancelAnimationFrame(pendingZoomFrame);
+      pendingZoomFrame = 0;
+      pendingZoom = null;
+      // Zooming out while the pages already fit sideways ends centred, so shrink towards the centre instead of the pointer.
+      const firstPage = viewer.querySelector('.pdf-page');
+      if (zoom < zoomLevel && firstPage && viewer.scrollWidth <= viewer.clientWidth + 1) {
+        const pageRect = firstPage.getBoundingClientRect();
+        clientX = pageRect.left + pageRect.width / 2;
+      }
+      const rect = zoomStage.getBoundingClientRect();
+      const scale = zoomStage.offsetWidth ? rect.width / zoomStage.offsetWidth : 1;
+      zoomStage.style.transformOrigin = `${(clientX - rect.left) / scale}px ${(clientY - rect.top) / scale}px`;
+      zoomStage.style.willChange = 'transform';
+      zoomGesture = { baseZoom: zoomLevel, zoom, clientX, clientY, anchor: zoomAnchorPage(clientX, clientY) };
+    } else {
+      zoomGesture.zoom = zoom;
+    }
+    zoomStage.style.transform = `scale(${zoomGesture.zoom / zoomGesture.baseZoom})`;
+    clearTimeout(zoomGestureTimer);
+    zoomGestureTimer = setTimeout(() => void commitZoomGesture(), ZOOM_SETTLE_MS);
+  }
+
+  async function commitZoomGesture() {
+    clearTimeout(zoomGestureTimer);
+    const gesture = zoomGesture;
+    zoomGesture = null;
+    if (!gesture) return;
+    const changed = Math.abs(gesture.zoom - zoomLevel) >= 0.001;
+    if (changed) {
+      zoomLevel = gesture.zoom;
+      await tick();
+    }
+    // Same task as the layout change, so no frame shows the scale twice.
+    if (zoomStage) {
+      zoomStage.style.transform = '';
+      zoomStage.style.transformOrigin = '';
+      zoomStage.style.willChange = '';
+    }
+    if (!changed || !viewer || !gesture.anchor) return;
+    const rect = gesture.anchor.page.getBoundingClientRect();
+    const viewerRect = viewer.getBoundingClientRect();
+    const scale = viewer.offsetWidth ? viewerRect.width / viewer.offsetWidth : 1;
+    viewer.scrollLeft += (rect.left + gesture.anchor.x * rect.width - gesture.clientX) / scale;
+    viewer.scrollTop += (rect.top + gesture.anchor.y * rect.height - gesture.clientY) / scale;
+    scheduleSharpRender();
   }
 
   /**
@@ -2919,7 +2984,7 @@
     // accelerate only the native pinch gesture.
     const sensitivity = event.metaKey ? 0.002 : 0.01;
     const factor = Math.exp(-event.deltaY * deltaScale * sensitivity);
-    zoomAt(targetZoom() * factor, event.clientX, event.clientY);
+    previewZoomGesture(targetZoom() * factor, event.clientX, event.clientY);
   }
 
   /** @param {{ x: number; y: number; width: number; height: number; color?: [number, number, number] }[]} rects */
@@ -8613,6 +8678,7 @@
     onpointerleave={handleViewerPointerLeave}
     oncontextmenu={openShapeContextMenu}
   >
+    <div class="pdf-zoom-stage" bind:this={zoomStage}>
     <div class="pdf-document" style:--zoom-level={zoomLevel}>
       {#each Array(pageCount) as _, index}
         {@const currentSelectedShapes = selectedShape?.pageIndex === index ? (shapes[index] ?? []).filter((shape) => selectedShapeIds.has(shape.id)) : []}
@@ -9439,6 +9505,7 @@
           {/if}
         </div>
       {/each}
+    </div>
     </div>
   </div>
   {#if eraserCursorVisible}
@@ -11563,7 +11630,7 @@
     box-sizing: border-box;
     min-width: 0;
     padding: 0 14px 0 14px;
-    border-bottom: 1px solid #cacaca;
+    border-bottom: 1px solid #c3c2c2;
     background: rgba(214, 214, 214, 0.75);
     height: 50px;
   }
@@ -13219,6 +13286,13 @@
     to { opacity: 1; transform: scale(1) translateY(0); }
   }
 
+  /* Wraps the pages so a zoom gesture can be previewed with a transform before the real re-layout. */
+  .pdf-zoom-stage {
+    display: flow-root;
+    width: max-content;
+    min-width: 100%;
+  }
+
   .pdf-document {
     width: max-content;
     min-width: 100%;
@@ -14314,13 +14388,14 @@
     visibility: hidden;
   }
 
-  /* Text-selection panel rows: same field look as the shape inspector's Fill / Stroke rows. */
+  /* Text-selection panel rows: same field look as the shape inspector's Fill / Stroke rows.
+     The mark name is a button: hover darkens the text, on turns it into a black pill hugging the name. */
   .decorated-mark-row {
-    grid-template-columns: minmax(0, 1fr) 46px 84px 38px;
+    grid-template-columns: auto minmax(0, 1fr) 74px 38px;
   }
 
   .highlight-mark-row {
-    grid-template-columns: minmax(0, 1fr) 84px 38px;
+    grid-template-columns: auto minmax(0, 1fr) 38px;
   }
 
   .text-mark-row button,
@@ -14329,27 +14404,49 @@
   }
 
   .text-mark-row > button:first-child {
-    padding-left: 13px;
+    align-self: center;
+    height: 38px;
+    margin-left: 4px;
+    padding: 0 9px;
+    border-radius: 11px;
+    background: transparent;
     color: rgba(0, 0, 0, 0.5);
+    white-space: nowrap;
+    transition: color 180ms ease, background-color 220ms cubic-bezier(0.22, 1, 0.36, 1);
   }
 
-  .text-mark-row > button:first-child.active {
+  .text-mark-row > button:first-child:hover {
+    background: transparent;
+    color: #000;
+  }
+
+  .text-mark-row > button:first-child.active,
+  .text-mark-row > button:first-child.active:hover {
+    background: #111;
     color: #fff;
   }
 
   .text-mark-row input {
-    padding: 0 4px 0 0;
+    height: 100%;
+    padding: 0 10px 0 0;
     color: rgba(0, 0, 0, 0.75);
     font-size: 21px;
-    text-align: left;
+    text-align: right;
   }
 
   .text-mark-row input.text-mark-thickness {
+    padding: 0 0 0 6px;
     color: rgba(0, 0, 0, 0.5);
     text-align: center;
   }
 
-  .text-mark-color {
+  .decorated-mark-row input.text-mark-hex {
+    padding-right: 8px;
+  }
+
+  .text-mark-row button.text-mark-color {
+    align-self: center;
+    justify-self: start;
     width: 25px !important;
     height: 25px !important;
     border: 1px solid color-mix(in srgb, var(--property-color) 19%, transparent) !important;
