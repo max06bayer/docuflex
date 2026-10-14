@@ -14662,7 +14662,7 @@
     color: #fff;
   }
 
-  /* Bottom 23% of the view: the pages fade to 30% and blur progressively more towards the bottom. */
+  /* Bottom 23% of the view fades the pages to 30%; the bottom 13% also blurs progressively more towards the bottom. */
   .pdf-viewer,
   .html-editor-layer {
     -webkit-mask-image: linear-gradient(to bottom, #000 77%, rgba(0, 0, 0, 0.3) 100%);
@@ -14675,7 +14675,8 @@
     right: 0;
     bottom: 0;
     left: 0;
-    height: 23%;
+    /* The blur only takes the lower part of the faded area. */
+    height: 13%;
     pointer-events: none;
   }
 
