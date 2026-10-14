@@ -2860,7 +2860,7 @@
    * A pinch or Cmd-scroll in progress. Re-laying out every page and text layer
    * on each wheel event made zooming stutter, so the gesture is previewed as a
    * GPU scale around the pointer and laid out once it settles.
-   * @type {{ baseZoom: number; zoom: number; clientX: number; clientY: number; widestPage: HTMLElement; firstPage: HTMLElement; metrics: { viewerScale: number; stageScale: number; stageLeft: number; stageTop: number; viewLeft: number; viewTop: number; viewWidth: number; viewHeight: number; paddingTop: number; paddingBottom: number; pageLeft: number; pageWidth: number; documentTop: number; documentHeight: number } } | null}
+   * @type {{ baseZoom: number; zoom: number; clientX: number; clientY: number; active: boolean; offsetX: number; offsetY: number; widestPage: HTMLElement; firstPage: HTMLElement; metrics: { viewerScale: number; stageScale: number; stageLeft: number; stageTop: number; viewLeft: number; viewTop: number; viewWidth: number; viewHeight: number; paddingTop: number; paddingBottom: number; pageLeft: number; pageWidth: number; documentTop: number; documentHeight: number } } | null}
    */
   let zoomGesture = null;
   /** @type {ReturnType<typeof setTimeout> | undefined} */
@@ -2892,7 +2892,7 @@
     const scrollRangeY = Math.max(0, m.paddingTop + documentHeight + m.paddingBottom - m.viewHeight);
     const freeTop = gesture.clientY - (gesture.clientY - m.documentTop) * k;
     const top = Math.min(m.viewTop + m.paddingTop, Math.max(m.viewTop + m.paddingTop - scrollRangeY, freeTop));
-    return { left, top };
+    return { left, top, freeLeft, freeTop };
   }
 
   /** @param {number} requestedZoom @param {number} clientX @param {number} clientY */
@@ -2924,6 +2924,9 @@
         zoom,
         clientX,
         clientY,
+        active: true,
+        offsetX: 0,
+        offsetY: 0,
         widestPage,
         firstPage: /** @type {HTMLElement} */ (pages[0]),
         metrics: {
@@ -2946,20 +2949,59 @@
     } else {
       zoomGesture.zoom = zoom;
     }
+    zoomGesture.active = true;
+    if (!zoomFrame) {
+      lastZoomFrameTime = 0;
+      zoomFrame = requestAnimationFrame(stepZoomPreview);
+    }
+    clearTimeout(zoomGestureTimer);
+    zoomGestureTimer = setTimeout(() => {
+      if (zoomGesture) zoomGesture.active = false;
+      if (!zoomFrame) zoomFrame = requestAnimationFrame(stepZoomPreview);
+    }, ZOOM_SETTLE_MS);
+  }
+
+  let zoomFrame = 0;
+  let lastZoomFrameTime = 0;
+  /** How quickly the pages ease back inside their limits; no hard clamping, so no sharp turns. */
+  const ZOOM_EASE_MS = 110;
+
+  /**
+   * One preview frame: the zoom follows the pointer exactly, and any part of
+   * that position the layout would not allow is eased away over a few frames.
+   * Once the gesture has ended and the easing has settled, the real layout takes over.
+   * @param {number} now
+   */
+  function stepZoomPreview(now) {
+    zoomFrame = 0;
     const gesture = zoomGesture;
+    if (!gesture || !zoomStage) return;
+    const elapsed = lastZoomFrameTime ? Math.min(64, now - lastZoomFrameTime) : 16;
+    lastZoomFrameTime = now;
+    const placement = zoomGesturePlacement(gesture, gesture.zoom);
+    const blend = 1 - Math.exp(-elapsed / ZOOM_EASE_MS);
+    gesture.offsetX += (placement.left - placement.freeLeft - gesture.offsetX) * blend;
+    gesture.offsetY += (placement.top - placement.freeTop - gesture.offsetY) * blend;
+    const left = placement.freeLeft + gesture.offsetX;
+    const top = placement.freeTop + gesture.offsetY;
     const m = gesture.metrics;
     const k = gesture.zoom / gesture.baseZoom;
-    const { left, top } = zoomGesturePlacement(gesture, gesture.zoom);
-    // Map the widest page's left edge and the document top to their clamped positions.
+    // Map the widest page's left edge and the document top to the eased positions.
     const translateX = (left - m.stageLeft - k * (m.pageLeft - m.stageLeft)) / m.stageScale;
     const translateY = (top - m.stageTop - k * (m.documentTop - m.stageTop)) / m.stageScale;
     zoomStage.style.transform = `translate(${translateX}px, ${translateY}px) scale(${k})`;
-    clearTimeout(zoomGestureTimer);
-    zoomGestureTimer = setTimeout(() => void commitZoomGesture(), ZOOM_SETTLE_MS);
+    const settled = Math.abs(placement.left - left) < 0.5 && Math.abs(placement.top - top) < 0.5;
+    if (!gesture.active && settled) {
+      void commitZoomGesture();
+      return;
+    }
+    if (gesture.active || !settled) zoomFrame = requestAnimationFrame(stepZoomPreview);
   }
 
   async function commitZoomGesture() {
     clearTimeout(zoomGestureTimer);
+    if (zoomFrame) cancelAnimationFrame(zoomFrame);
+    zoomFrame = 0;
     const gesture = zoomGesture;
     zoomGesture = null;
     if (!gesture) return;
@@ -2975,7 +3017,7 @@
       zoomStage.style.transformOrigin = '';
     }
     if (!changed || !viewer) return;
-    // The preview was already clamped, so the layout can land exactly where it showed the pages.
+    // The preview has already eased into the allowed position, so the layout lands exactly there.
     const scale = gesture.metrics.viewerScale;
     viewer.scrollLeft += (gesture.widestPage.getBoundingClientRect().left - target.left) / scale;
     viewer.scrollTop += (gesture.firstPage.getBoundingClientRect().top - target.top) / scale;
@@ -8689,6 +8731,8 @@
     if (historyCommitTimer) clearTimeout(historyCommitTimer);
     if (searchUpdateFrame !== undefined) cancelAnimationFrame(searchUpdateFrame);
     if (pendingZoomFrame) cancelAnimationFrame(pendingZoomFrame);
+    if (zoomFrame) cancelAnimationFrame(zoomFrame);
+    clearTimeout(zoomGestureTimer);
     stopSignatureCamera();
     cancelSharpRenders();
     textLayerBuilders.forEach((builder) => builder.cancel());
