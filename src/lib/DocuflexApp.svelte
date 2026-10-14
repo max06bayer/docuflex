@@ -115,6 +115,27 @@
   let aiStatus = null;
   /** The agent keeps working while its panel is closed; the brain button shows it. */
   let aiBusy = false;
+  /** Drives the inactive (grey) look of the drawn macOS window buttons. */
+  let windowFocused = true;
+  /** Whether the macOS desktop app is showing its own traffic lights. */
+  let nativeWindowButtonsHidden = false;
+
+  /** The desktop shell handles these the same way as its native window buttons. */
+  /** @param {'close' | 'minimize' | 'fullscreen'} action */
+  function windowAction(action) {
+    window.location.assign(`/__docuflex/window/${action}`);
+  }
+
+  /** The redesigned document view draws its own traffic lights on macOS, so the native ones step aside there. */
+  /** @param {boolean} hidden @param {boolean} [force] */
+  function setNativeWindowButtonsHidden(hidden, force = false) {
+    if (typeof document === 'undefined' || document.documentElement.dataset.docuflexDesktop !== 'macos') return;
+    if (hidden === nativeWindowButtonsHidden && !force) return;
+    nativeWindowButtonsHidden = hidden;
+    window.location.assign(`/__docuflex/window/native-buttons-${hidden ? 'hide' : 'show'}`);
+  }
+
+  $: setNativeWindowButtonsHidden(activeTab !== null);
 
   /** The AI chat is still in testing: its button stays greyed out until this is true. */
   const AI_CHAT_ENABLED = false;
@@ -844,6 +865,20 @@
     window.addEventListener('scroll', hideQuickTooltip, true);
     window.addEventListener('resize', hideQuickTooltip);
     window.addEventListener('docuflex:error', /** @type {EventListener} */ (handleNativeError));
+    const handleWindowFocus = () => (windowFocused = true);
+    const handleWindowBlur = () => (windowFocused = false);
+    windowFocused = document.hasFocus();
+    window.addEventListener('focus', handleWindowFocus);
+    window.addEventListener('blur', handleWindowBlur);
+    /** @type {ReturnType<typeof setTimeout> | undefined} */
+    let nativeButtonsTimer;
+    // Leaving full screen can bring the native buttons back; hide them again once the window settles.
+    const handleWindowResize = () => {
+      clearTimeout(nativeButtonsTimer);
+      nativeButtonsTimer = setTimeout(() => { if (activeTab !== null) setNativeWindowButtonsHidden(true, true); }, 350);
+    };
+    window.addEventListener('resize', handleWindowResize);
+    setNativeWindowButtonsHidden(activeTab !== null);
     void refreshMcpStatus().then(() => {
       if (mcpStatus?.available) connectMcpBridge();
     });
@@ -855,6 +890,10 @@
       window.removeEventListener('pointerdown', closeHomepageMenus);
       window.removeEventListener('keydown', handleQuickToolShortcut);
       window.removeEventListener('docuflex:error', /** @type {EventListener} */ (handleNativeError));
+      window.removeEventListener('focus', handleWindowFocus);
+      window.removeEventListener('blur', handleWindowBlur);
+      window.removeEventListener('resize', handleWindowResize);
+      clearTimeout(nativeButtonsTimer);
       window.removeEventListener('scroll', hideQuickTooltip, true);
       window.removeEventListener('resize', hideQuickTooltip);
     };
@@ -878,7 +917,13 @@
     {#if activeTab !== null}
       <div class="window-head">
         <span class="window-head-texture" aria-hidden="true"></span>
-        <img class="sidebar-toggle" src="/redesign/rectangle1193.svg" alt="" />
+        <!-- Drawn from the Figma frame on the macOS desktop; the native buttons are hidden while the document view is open. -->
+        <div class="window-controls" class:window-inactive={!windowFocused}>
+          <button class="window-control close" aria-label="Close window" onclick={() => windowAction('close')}></button>
+          <button class="window-control minimize" aria-label="Minimize window" onclick={() => windowAction('minimize')}></button>
+          <button class="window-control zoom" aria-label="Enter full screen" onclick={() => windowAction('fullscreen')}></button>
+        </div>
+        <img class="sidebar-toggle" src="/redesign/sidebar-toggle.svg" alt="" />
         <nav class="history" aria-label="History navigation">
           <button class="history-button back" aria-label="Undo" title="Undo" onclick={() => pdfEditor?.undo()}>
             <img src="/redesign/vector543.svg" alt="" />
@@ -935,7 +980,7 @@
             onkeydown={(event) => (event.key === 'Enter' || event.key === ' ') && closeTab(event, tab.id)}
           >
             {#if activeTab !== null}
-              <span class="close-tab-cross" aria-hidden="true"><img src="/redesign/vector540.svg" alt="" /><img src="/redesign/vector541.svg" alt="" /></span>
+              <img class="close-tab-cross" src="/redesign/tab-close.svg" alt="" />
             {:else}
               <img src="/close.svg" alt="" />
             {/if}
@@ -945,7 +990,7 @@
 
       <button class="add-tab" data-tab-motion="add" aria-label="Open another document" title="Open document" onclick={() => openFilePicker()}>
         {#if activeTab !== null}
-          <span class="add-tab-cross" aria-hidden="true"><img src="/redesign/vector535.svg" alt="" /><img src="/redesign/vector536.svg" alt="" /></span>
+          <img class="add-tab-cross" src="/redesign/add-tab-plus.svg" alt="" />
         {:else}
           <img src="/plus.svg" alt="" />
         {/if}
@@ -2627,7 +2672,7 @@
 
   .window-head-texture {
     position: absolute;
-    inset: 0;
+    inset: -2px;
     background: #efefef;
     pointer-events: none;
   }
@@ -2635,13 +2680,13 @@
   .window-head-texture::before,
   .window-head-texture::after {
     position: absolute;
-    inset: 0;
+    inset: 2px;
     content: '';
   }
 
+  /* The exported texture already carries the layer's 50% opacity in its alpha channel. */
   .window-head-texture::before {
     background: url('/redesign/rectangle992.png') center / 100% 100% no-repeat;
-    opacity: 0.5;
   }
 
   .window-head-texture::after {
@@ -2724,13 +2769,13 @@
     pointer-events: none;
   }
 
+  /* The exported texture already carries the layer's 25% opacity in its alpha channel. */
   .topbar-backdrop img {
     position: absolute;
     inset: 0;
     width: 100%;
     height: 100%;
     object-fit: fill;
-    opacity: 0.25;
   }
 
   .topbar-backdrop::after {
@@ -2801,29 +2846,16 @@
 
   .close-tab-cross,
   .add-tab-cross {
-    position: relative;
     display: block;
+    max-width: none;
   }
 
-  .close-tab-cross {
-    width: 13px;
-    height: 13px;
+  .editor-mode .close-tab img.close-tab-cross {
+    width: 14.4px;
+    height: 14.4px;
   }
 
-  .editor-mode .close-tab .close-tab-cross img {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    width: 1.4px;
-    height: 19.7848px;
-    transform: translate(-50%, -50%) rotate(45deg);
-  }
-
-  .editor-mode .close-tab .close-tab-cross img + img {
-    transform: translate(-50%, -50%) rotate(135deg);
-  }
-
-  .editor-mode .close-tab:hover .close-tab-cross img {
+  .editor-mode .close-tab:hover img.close-tab-cross {
     filter: brightness(0.6);
   }
 
@@ -2833,30 +2865,130 @@
     height: 56px;
   }
 
-  .add-tab-cross {
-    width: 18px;
-    height: 18px;
-  }
-
-  .editor-mode .add-tab .add-tab-cross img {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    width: 1.5px;
+  .editor-mode .add-tab img.add-tab-cross {
+    width: 19.5px;
     height: 19.5px;
-    transform: translate(-50%, -50%);
   }
 
-  .editor-mode .add-tab .add-tab-cross img + img {
-    transform: translate(-50%, -50%) rotate(90deg);
-  }
-
-  .editor-mode .add-tab:hover .add-tab-cross img {
+  .editor-mode .add-tab:hover img.add-tab-cross {
     filter: brightness(0.75);
   }
 
-  .editor-mode .add-tab:active .add-tab-cross {
+  .editor-mode .add-tab:active img.add-tab-cross {
     transform: scale(0.94);
+  }
+
+  .window-controls {
+    position: absolute;
+    top: 0;
+    left: 0;
+    display: none;
+  }
+
+  :global(html[data-docuflex-desktop='macos']) .window-controls {
+    display: block;
+  }
+
+  /* Figma's Ellipse 89–91: vertical gradient, 0.5px white rim fading out, white 2px/4.9px drop shadow. */
+  .window-control {
+    position: absolute;
+    top: 18px;
+    box-sizing: border-box;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: 0.5px solid transparent;
+    border-radius: 50%;
+    background:
+      linear-gradient(180deg, var(--light-top), var(--light-bottom)) padding-box,
+      linear-gradient(180deg, #fff, rgba(255, 255, 255, 0)) border-box;
+    box-shadow: 0 2px 4.9px #fff;
+    cursor: default;
+  }
+
+  .window-control.close {
+    --light-top: #ff4d4e;
+    --light-bottom: #ff7e7f;
+    left: 24px;
+  }
+
+  .window-control.minimize {
+    --light-top: #ffb700;
+    --light-bottom: #ffcc49;
+    left: 56px;
+  }
+
+  .window-control.zoom {
+    --light-top: #00cc14;
+    --light-bottom: #52ff63;
+    left: 88px;
+  }
+
+  .window-controls.window-inactive:not(:hover) .window-control {
+    --light-top: #d9d9d9;
+    --light-bottom: #e4e4e4;
+  }
+
+  /* macOS shows the button glyphs while the pointer is over the group. */
+  .window-control::before,
+  .window-control::after {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    content: '';
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 90ms ease;
+  }
+
+  .window-controls:hover .window-control::before,
+  .window-controls:hover .window-control::after {
+    opacity: 1;
+  }
+
+  .window-control.close::before,
+  .window-control.close::after,
+  .window-control.minimize::before {
+    width: 10px;
+    height: 1.6px;
+    border-radius: 1px;
+    background: rgba(77, 0, 0, 0.72);
+    transform: translate(-50%, -50%) rotate(45deg);
+  }
+
+  .window-control.close::after {
+    transform: translate(-50%, -50%) rotate(-45deg);
+  }
+
+  .window-control.minimize::before {
+    width: 11px;
+    background: rgba(100, 55, 0, 0.72);
+    transform: translate(-50%, -50%);
+  }
+
+  .window-control.zoom::before,
+  .window-control.zoom::after {
+    width: 0;
+    height: 0;
+    border-style: solid;
+    border-color: transparent;
+  }
+
+  .window-control.zoom::before {
+    margin: -5px 0 0 -1px;
+    border-width: 6px 6px 0 0;
+    border-top-color: rgba(0, 70, 5, 0.72);
+    border-right-color: rgba(0, 70, 5, 0.72);
+    border-radius: 0 1px 0 0;
+    clip-path: polygon(0 0, 100% 0, 100% 100%);
+  }
+
+  .window-control.zoom::after {
+    margin: -1px 0 0 -5px;
+    border-width: 0 0 6px 6px;
+    border-bottom-color: rgba(0, 70, 5, 0.72);
+    border-left-color: rgba(0, 70, 5, 0.72);
+    clip-path: polygon(0 0, 0 100%, 100% 100%);
   }
 
   .editor-mode .utilities {

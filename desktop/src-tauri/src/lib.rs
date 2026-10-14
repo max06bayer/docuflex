@@ -462,6 +462,30 @@ fn choose_download_destination(suggested: &Path) -> Option<PathBuf> {
         .save_file()
 }
 
+/// The redesigned document view draws its own traffic lights, so the native
+/// ones are hidden while it is open and shown again for the home screen.
+#[cfg(target_os = "macos")]
+fn set_native_window_buttons_hidden(window: &tauri::WebviewWindow, hidden: bool) {
+    let Ok(ns_window) = window.ns_window() else {
+        return;
+    };
+    let ns_window = ns_window as usize;
+    let _ = window.run_on_main_thread(move || {
+        use objc2_app_kit::{NSWindow, NSWindowButton};
+        // SAFETY: Tauri hands out the live NSWindow pointer, and this closure runs on the main thread.
+        let ns_window = unsafe { &*(ns_window as *const NSWindow) };
+        for kind in [
+            NSWindowButton::CloseButton,
+            NSWindowButton::MiniaturizeButton,
+            NSWindowButton::ZoomButton,
+        ] {
+            if let Some(button) = ns_window.standardWindowButton(kind) {
+                button.setHidden(hidden);
+            }
+        }
+    });
+}
+
 fn editor_initialization_script() -> &'static str {
     include_str!("../../runtime/chrome.js")
 }
@@ -569,7 +593,7 @@ pub fn run() {
             let window_builder = window_builder
                 .title_bar_style(TitleBarStyle::Overlay)
                 .hidden_title(true)
-                .traffic_light_position(LogicalPosition::new(22.0, 16.0));
+                .traffic_light_position(LogicalPosition::new(24.0, 24.0));
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             let window_builder = window_builder.decorations(false).shadow(true);
             #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -603,6 +627,14 @@ pub fn run() {
                                     "close" => {
                                         let _ = window.close();
                                     }
+                                    "fullscreen" => {
+                                        let fullscreen = window.is_fullscreen().unwrap_or(false);
+                                        let _ = window.set_fullscreen(!fullscreen);
+                                    }
+                                    #[cfg(target_os = "macos")]
+                                    "native-buttons-hide" => set_native_window_buttons_hidden(&window, true),
+                                    #[cfg(target_os = "macos")]
+                                    "native-buttons-show" => set_native_window_buttons_hidden(&window, false),
                                     _ => {}
                                 }
                             }

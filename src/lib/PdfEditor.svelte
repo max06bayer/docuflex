@@ -11585,6 +11585,19 @@
     background: #000;
   }
 
+  /* The redesign draws the cross as one SVG so its 1.4px strokes keep their weight. */
+  .protect-panel .protect-panel-close {
+    background: url('/redesign/panel-close.svg') center / 12.67px 12.67px no-repeat;
+  }
+
+  .protect-panel .protect-panel-close span {
+    display: none;
+  }
+
+  .protect-panel .protect-panel-close:hover {
+    filter: brightness(0);
+  }
+
   .protect-panel-form {
     display: grid;
     grid-template-rows: 124px 140px 78px;
