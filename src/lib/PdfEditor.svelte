@@ -171,6 +171,12 @@
   let shapeMarquee = null;
   /** @type {{ pageIndex: number; x: number; y: number; empty: boolean } | null} */
   let shapeContextMenu = null;
+  /** The app's own right-click menu for PDF text (the native macOS one is suppressed). */
+  /** @type {{ x: number; y: number } | null} */
+  let textContextMenu = null;
+  /** The text selection drawn by the app while the pointer is still dragging; the native highlight is hidden. */
+  /** @type {Record<number, { x: number; y: number; width: number; height: number }[]> | null} */
+  let liveTextSelectionPages = null;
   /** @type {AnnotationShape[] | null} */
   let shapeClipboard = null;
   /** @type {{ pageIndex: number; x: number; y: number; width: number; height: number; rotation: number } | null} */
@@ -347,6 +353,7 @@
   $: if (!active) {
     pageContextMenu = null;
     shapeContextMenu = null;
+    textContextMenu = null;
   }
   $: if (activeTool !== observedTool) {
     const previousTool = observedTool;
@@ -2739,6 +2746,9 @@
       if (shapeContextMenu && (!(target instanceof Element) || !target.closest('.shape-context-menu'))) {
         shapeContextMenu = null;
       }
+      if (textContextMenu && (!(target instanceof Element) || !target.closest('.text-context-menu'))) {
+        textContextMenu = null;
+      }
     }
 
     /** @param {KeyboardEvent} event */
@@ -2779,6 +2789,7 @@
       [document, 'mouseup', commitTextHighlight, false],
       [document, 'mouseup', capturePdfTextSelection, false],
       [document, 'mouseup', clearTextSelectionOrigin, false],
+      [document, 'selectionchange', updateLiveTextSelection, false],
       [document, 'dragstart', suppressProductionBlankDrag, false],
       [document, 'click', clearPageSelection, false],
       [document, 'pointerdown', closePageContextMenu, false],
@@ -3170,12 +3181,124 @@
     return { active, markIds };
   }
 
+  /**
+   * The selected text's rectangles per page, in page units, or null when the
+   * range is not inside the PDF text.
+   * @param {Range} range @param {HTMLElement} currentViewer
+   */
+  function textSelectionPages(range, currentViewer) {
+    const ancestor = range.commonAncestorContainer instanceof Element
+      ? range.commonAncestorContainer
+      : range.commonAncestorContainer.parentElement;
+    if (!ancestor?.closest('.textLayer') || !currentViewer.contains(ancestor)) return null;
+    const clientRects = [...range.getClientRects()].filter((rect) => rect.width > 0.5 && rect.height > 0.5);
+    /** @type {Record<number, { x: number; y: number; width: number; height: number }[]>} */
+    const pagesByIndex = {};
+    [...currentViewer.querySelectorAll('.pdf-page')].forEach((shell, pageIndex) => {
+      if (!(shell instanceof HTMLElement)) return;
+      const pageRect = shell.getBoundingClientRect();
+      const pageWidth = Number.parseFloat(shell.style.width) || shell.offsetWidth;
+      const pageHeight = Number.parseFloat(shell.style.height) || shell.offsetHeight;
+      const rects = clientRects.filter((rect) => {
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+        return centerX >= pageRect.left && centerX <= pageRect.right && centerY >= pageRect.top && centerY <= pageRect.bottom;
+      }).map((rect) => ({
+        x: ((rect.left - pageRect.left) / pageRect.width) * pageWidth,
+        y: ((rect.top - pageRect.top) / pageRect.height) * pageHeight,
+        width: (rect.width / pageRect.width) * pageWidth,
+        height: (rect.height / pageRect.height) * pageHeight
+      }));
+      if (rects.length) pagesByIndex[pageIndex] = mergeTextHighlightRects(rects);
+    });
+    return pagesByIndex;
+  }
+
+  /** Draws the app's selection while dragging, since the native highlight is hidden. */
+  function updateLiveTextSelection() {
+    if (activeTool !== 'select' || !viewer) {
+      liveTextSelectionPages = null;
+      return;
+    }
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || !selection.rangeCount) {
+      liveTextSelectionPages = null;
+      return;
+    }
+    const pages = textSelectionPages(selection.getRangeAt(0), viewer);
+    liveTextSelectionPages = pages && Object.keys(pages).length ? pages : null;
+  }
+
+  /** @param {string} text */
+  async function copyTextToClipboard(text) {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const field = document.createElement('textarea');
+      field.value = text;
+      field.style.position = 'fixed';
+      field.style.opacity = '0';
+      document.body.append(field);
+      field.select();
+      document.execCommand('copy');
+      field.remove();
+    }
+  }
+
+  function copyPdfSelectionText() {
+    textContextMenu = null;
+    const text = pdfTextSelection?.text ?? window.getSelection()?.toString() ?? '';
+    void copyTextToClipboard(text);
+  }
+
+  /** @param {number} clientX @param {number} clientY */
+  function pointInTextSelection(clientX, clientY) {
+    if (!pdfTextSelection || !viewer) return false;
+    const shells = viewer.querySelectorAll('.pdf-page');
+    return Object.entries(pdfTextSelection.pages).some(([page, rects]) => {
+      const shell = shells[Number(page)];
+      if (!(shell instanceof HTMLElement)) return false;
+      // Same page units as textSelectionPages.
+      const pageWidth = Number.parseFloat(shell.style.width) || shell.offsetWidth;
+      const pageHeight = Number.parseFloat(shell.style.height) || shell.offsetHeight;
+      const pageRect = shell.getBoundingClientRect();
+      const x = ((clientX - pageRect.left) / pageRect.width) * pageWidth;
+      const y = ((clientY - pageRect.top) / pageRect.height) * pageHeight;
+      return rects.some((rect) => x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height);
+    });
+  }
+
+  /** Right-clicking a word with nothing selected selects that word, as on macOS. @param {number} clientX @param {number} clientY */
+  function selectPdfWordAt(clientX, clientY) {
+    if (!viewer) return;
+    const caretRange = document.caretRangeFromPoint?.(clientX, clientY);
+    const node = caretRange?.startContainer;
+    if (!caretRange || !(node instanceof Text) || !node.parentElement?.closest('.textLayer')) return;
+    const text = node.data;
+    const isWordCharacter = (/** @type {string} */ character) => /[\p{L}\p{N}_'’-]/u.test(character);
+    let start = Math.min(caretRange.startOffset, text.length);
+    let end = start;
+    while (start > 0 && isWordCharacter(text[start - 1])) start -= 1;
+    while (end < text.length && isWordCharacter(text[end])) end += 1;
+    if (start === end) return;
+    const range = document.createRange();
+    range.setStart(node, start);
+    range.setEnd(node, end);
+    const pages = textSelectionPages(range, viewer);
+    if (!pages || !Object.keys(pages).length) return;
+    setShapeSelection(0, []);
+    pdfTextSelection = { pages, text: range.toString(), ...existingTextMarkState(pages) };
+  }
+
   /** @param {MouseEvent} event */
   function capturePdfTextSelection(event) {
+    // Only the primary button selects; a right-click keeps the current selection for the menu.
+    if (event.button !== 0) return;
     if (activeTool !== 'select' || !viewer) return;
     queueMicrotask(() => {
       const target = event.target;
-      if (target instanceof Element && target.closest('.text-selection-panel, .figma-color-picker')) return;
+      if (target instanceof Element && target.closest('.text-selection-panel, .figma-color-picker, .text-context-menu')) return;
       const currentViewer = viewer;
       if (!currentViewer) return;
       const selection = window.getSelection();
@@ -3185,30 +3308,9 @@
         return;
       }
       const range = selection.getRangeAt(0);
-      const ancestor = range.commonAncestorContainer instanceof Element
-        ? range.commonAncestorContainer
-        : range.commonAncestorContainer.parentElement;
-      if (!ancestor?.closest('.textLayer')) return;
-      const clientRects = [...range.getClientRects()].filter((rect) => rect.width > 0.5 && rect.height > 0.5);
-      /** @type {Record<number, { x: number; y: number; width: number; height: number }[]>} */
-      const pagesByIndex = {};
-      [...currentViewer.querySelectorAll('.pdf-page')].forEach((shell, pageIndex) => {
-        if (!(shell instanceof HTMLElement)) return;
-        const pageRect = shell.getBoundingClientRect();
-        const pageWidth = Number.parseFloat(shell.style.width) || shell.offsetWidth;
-        const pageHeight = Number.parseFloat(shell.style.height) || shell.offsetHeight;
-        const rects = clientRects.filter((rect) => {
-          const centerX = rect.left + rect.width / 2;
-          const centerY = rect.top + rect.height / 2;
-          return centerX >= pageRect.left && centerX <= pageRect.right && centerY >= pageRect.top && centerY <= pageRect.bottom;
-        }).map((rect) => ({
-          x: ((rect.left - pageRect.left) / pageRect.width) * pageWidth,
-          y: ((rect.top - pageRect.top) / pageRect.height) * pageHeight,
-          width: (rect.width / pageRect.width) * pageWidth,
-          height: (rect.height / pageRect.height) * pageHeight
-        }));
-        if (rects.length) pagesByIndex[pageIndex] = mergeTextHighlightRects(rects);
-      });
+      const pagesByIndex = textSelectionPages(range, currentViewer);
+      if (!pagesByIndex) return;
+      liveTextSelectionPages = null;
       if (Object.keys(pagesByIndex).length && commentMode) {
         // In comment view a selection starts a comment on that text instead
         // of opening the highlight tools.
@@ -4612,7 +4714,22 @@
     const hit = shapeTarget(event);
     const shape = hit ? findShape(hit.pageIndex, hit.id) : null;
     const target = event.target;
-    if (!shape && target instanceof Element && target.closest('.textLayer span')) return;
+    if (!shape && ((target instanceof Element && target.closest('.textLayer span')) || pointInTextSelection(event.clientX, event.clientY))) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!pointInTextSelection(event.clientX, event.clientY)) selectPdfWordAt(event.clientX, event.clientY);
+      // WebKit selects the word under a right-click natively; the app keeps its own selection.
+      window.getSelection()?.removeAllRanges();
+      pageContextMenu = null;
+      shapeContextMenu = null;
+      const menuWidth = 206;
+      const menuHeight = 52;
+      textContextMenu = {
+        x: Math.max(10, Math.min(event.clientX, window.innerWidth - menuWidth - 10)),
+        y: Math.max(10, Math.min(event.clientY, window.innerHeight - menuHeight - 10))
+      };
+      return;
+    }
     const pageHit = shape ? null : pageAtPoint(event.clientX, event.clientY);
     if ((!shape && !pageHit) || shape?.type === 'crop') return;
     event.preventDefault();
@@ -4894,6 +5011,22 @@
       event.preventDefault();
       event.stopImmediatePropagation();
       copySelectedShapes();
+      return;
+    }
+    if (clipboardShortcut && clipboardKey === 'c' && pdfTextSelection?.text) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      copyPdfSelectionText();
+      return;
+    }
+    if (textContextMenu && !event.metaKey && !event.ctrlKey && !event.altKey && clipboardKey === 'c') {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      copyPdfSelectionText();
+      return;
+    }
+    if (event.key === 'Escape' && textContextMenu) {
+      textContextMenu = null;
       return;
     }
     if (clipboardShortcut && clipboardKey === 'v' && shapeClipboard?.length) {
@@ -8667,6 +8800,25 @@
   </div>
 {/if}
 
+{#if textContextMenu}
+  <div
+    class="page-context-menu text-context-menu"
+    role="menu"
+    tabindex="-1"
+    aria-label="Text actions"
+    style:left={`${textContextMenu.x}px`}
+    style:top={`${textContextMenu.y}px`}
+    in:scale={{ duration: 190, easing: cubicOut, start: 0.92, opacity: 0 }}
+    out:scale={{ duration: 145, easing: cubicOut, start: 0.96, opacity: 0 }}
+  >
+    <button class="page-menu-item" role="menuitem" disabled={!pdfTextSelection?.text} onclick={copyPdfSelectionText}>
+      <img src="/redesign/icon-copy2.svg" alt="" />
+      <span>Copy</span>
+      <kbd>C</kbd>
+    </button>
+  </div>
+{/if}
+
 <section class="pdf-workspace" class:editor-inactive={!active} inert={!active} aria-label={`PDF editor for ${workingFile.name}`} bind:this={workspace}>
   {#if htmlEditorStarted}
     <div class:active={htmlViewportVisible} class="html-editor-layer">
@@ -9449,14 +9601,14 @@
               {/each}
             {/each}
           </svg>
-          {#if pdfTextSelection?.pages[index]?.length}
+          {#if (pdfTextSelection?.pages[index] ?? liveTextSelectionPages?.[index])?.length}
             <svg
               class="annotation-layer native-selection-layer"
               viewBox={`0 0 ${pageSizes[index]?.width ?? 1} ${pageSizes[index]?.height ?? 1}`}
               preserveAspectRatio="none"
               aria-hidden="true"
             >
-              {#each pdfTextSelection.pages[index] as rect}
+              {#each pdfTextSelection?.pages[index] ?? liveTextSelectionPages?.[index] ?? [] as rect}
                 <rect x={rect.x} y={rect.y} width={rect.width} height={rect.height} />
               {/each}
             </svg>
@@ -9547,6 +9699,8 @@
       aria-hidden="true"
     ></div>
   {/if}
+  <!-- Progressive blur over the bottom of the view, so the floating toolbar reads clearly. -->
+  <div class="bottom-fade" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div>
   <EditorToolbar bind:activeTool {active} />
   <input
     class="signature-upload-input"
@@ -14034,8 +14188,9 @@
     user-select: none;
   }
 
+  /* The app draws the selection itself (.native-selection-layer); the system highlight stays hidden. */
   :global(.textLayer ::selection) {
-    background: color-mix(in srgb, AccentColor, transparent 75%);
+    background: transparent;
   }
 
   :global(.textLayer br::selection) {
@@ -14505,5 +14660,62 @@
     border-color: #111;
     background: #111;
     color: #fff;
+  }
+
+  /* Bottom 23% of the view: the pages fade to 30% and blur progressively more towards the bottom. */
+  .pdf-viewer,
+  .html-editor-layer {
+    -webkit-mask-image: linear-gradient(to bottom, #000 77%, rgba(0, 0, 0, 0.3) 100%);
+    mask-image: linear-gradient(to bottom, #000 77%, rgba(0, 0, 0, 0.3) 100%);
+  }
+
+  .bottom-fade {
+    position: absolute;
+    z-index: 3;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    height: 23%;
+    pointer-events: none;
+  }
+
+  .bottom-fade span {
+    position: absolute;
+    inset: 0;
+  }
+
+  .bottom-fade span:nth-child(1) {
+    -webkit-backdrop-filter: blur(0.5px);
+    backdrop-filter: blur(0.5px);
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 12.5%, #000 25%, transparent 37.5%);
+    mask-image: linear-gradient(to bottom, transparent 0%, #000 12.5%, #000 25%, transparent 37.5%);
+  }
+
+  .bottom-fade span:nth-child(2) {
+    -webkit-backdrop-filter: blur(1px);
+    backdrop-filter: blur(1px);
+    -webkit-mask-image: linear-gradient(to bottom, transparent 12.5%, #000 25%, #000 37.5%, transparent 50%);
+    mask-image: linear-gradient(to bottom, transparent 12.5%, #000 25%, #000 37.5%, transparent 50%);
+  }
+
+  .bottom-fade span:nth-child(3) {
+    -webkit-backdrop-filter: blur(2px);
+    backdrop-filter: blur(2px);
+    -webkit-mask-image: linear-gradient(to bottom, transparent 25%, #000 37.5%, #000 50%, transparent 62.5%);
+    mask-image: linear-gradient(to bottom, transparent 25%, #000 37.5%, #000 50%, transparent 62.5%);
+  }
+
+  .bottom-fade span:nth-child(4) {
+    -webkit-backdrop-filter: blur(4px);
+    backdrop-filter: blur(4px);
+    -webkit-mask-image: linear-gradient(to bottom, transparent 37.5%, #000 50%, #000 62.5%, transparent 75%);
+    mask-image: linear-gradient(to bottom, transparent 37.5%, #000 50%, #000 62.5%, transparent 75%);
+  }
+
+  .bottom-fade span:nth-child(5) {
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+    -webkit-mask-image: linear-gradient(to bottom, transparent 50%, #000 62.5%);
+    mask-image: linear-gradient(to bottom, transparent 50%, #000 62.5%);
   }
 </style>
