@@ -3,6 +3,7 @@ import { ANALYTICS_ENABLED, buildRecord, isBot, writeRecord } from '$lib/server/
 const MAX_BODY_BYTES = 2048;
 const EVENT_NAMES = new Set(['tool_open', 'export', 'file_open']);
 const TYPES = new Set(['pageview', 'engagement', 'event']);
+const HOST_PATTERN = /^[a-z0-9.-]+(:\d{1,5})?$/i;
 
 /** @type {import('./$types').RequestHandler} */
 export async function POST({ request, getClientAddress }) {
@@ -42,7 +43,10 @@ export async function POST({ request, getClientAddress }) {
       ms,
       scroll,
       pageView: typeof payload.pv === 'string' ? payload.pv.slice(0, 40) : undefined,
-      language: typeof payload.lang === 'string' ? payload.lang : undefined
+      language: typeof payload.lang === 'string' ? payload.lang : undefined,
+      // The page's own document.referrer (host only); the request's Referer
+      // header would just name the Docuflex page that sent this beacon.
+      referrer: typeof payload.ref === 'string' && HOST_PATTERN.test(payload.ref) ? payload.ref.slice(0, 120).toLowerCase() : 'direct'
     })
   );
   return new Response(null, { status: 204 });
