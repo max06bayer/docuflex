@@ -19,6 +19,11 @@ const stripPdfWorkerSourceMapReference = {
 
 export default defineConfig({
   plugins: [sveltekit(), stripPdfWorkerSourceMapReference],
+  build: {
+    // Landing images repeat in the marquees; as base64 they would bloat the
+    // prerendered HTML instead of being cached as files.
+    assetsInlineLimit: (file) => (file.includes('/assets/landing/') ? false : undefined)
+  },
   optimizeDeps: {
     exclude: ['pdfjs-dist']
   }

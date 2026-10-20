@@ -6,6 +6,8 @@ const config = {
   preprocess: vitePreprocess(),
   kit: {
     adapter: adapter(),
+    // Inline small stylesheets so the landing page has no render-blocking CSS requests.
+    inlineStyleThreshold: 20 * 1024,
     files: {
       assets: 'public'
     }

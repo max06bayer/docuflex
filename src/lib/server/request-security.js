@@ -97,7 +97,7 @@ export function applySecurityHeaders(response, url) {
       // (Windows/Linux); without allowing those, invoke() calls like
       // take_pending_pdf/docuflex_save_prompt get silently CSP-blocked.
       + "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: https://ipc.localhost; worker-src 'self' blob:; "
-      + "frame-src 'self' blob: https://www.youtube.com"
+      + "frame-src 'self' blob:"
   );
   if (url.protocol === 'https:' || env.NODE_ENV === 'production') {
     response.headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');

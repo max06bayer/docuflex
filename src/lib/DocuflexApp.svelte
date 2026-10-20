@@ -955,9 +955,6 @@
   <title>Docuflex Editor — Edit PDFs Online, Free</title>
   <meta name="description" content="Edit, sign, merge, split, compress and convert PDFs online for free with Docuflex. Private, open source and hosted in the EU." />
   <link rel="canonical" href="https://docuflex.eu/editor" />
-  <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
-  <link rel="icon" href="/favicon-64.png" sizes="64x64" type="image/png" />
-  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
 </svelte:head>
 
 <main bind:this={shellElement} class="editor-shell" class:website={isWebsite} class:editor-mode={activeTab !== null} class:document-entering={documentEntering} class:ai-docked={aiPanelOpen && aiStatus?.available}>
