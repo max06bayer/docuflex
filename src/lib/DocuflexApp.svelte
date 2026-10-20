@@ -3039,17 +3039,25 @@
     margin-top: 1px;
   }
 
-  /* macOS app: 95% of the base 0.85 scale. The shell's traffic-light position
-     (desktop/src-tauri/src/lib.rs) is derived from this value. */
-  :global(html[data-docuflex-desktop='macos']) .editor-shell {
+  /* macOS app and website: 95% of the base 0.85 scale. The shell's traffic-light
+     position (desktop/src-tauri/src/lib.rs) is derived from this value. */
+  :global(html[data-docuflex-desktop='macos']) .editor-shell,
+  .editor-shell.website {
     --ui-scale: 0.8075;
   }
 
-  /* Public website: 90% of the desktop scale, a wider sidebar, and one header row
+  /* Public website: a wider sidebar, and one header row
      (logo + history on the left, search and home in the toolbar on the right). */
   .editor-shell.website {
-    --ui-scale: 0.765;
     grid-template-columns: 340px minmax(0, 1fr);
+  }
+
+  /* The logo corner closes the header and sidebar lines: its bottom edge continues the
+     top bar's line and its right edge continues the sidebar's, meeting in one cross. */
+  .editor-shell.website .window-head {
+    box-sizing: border-box;
+    border-right: 1px solid #c7c7c7;
+    border-bottom: 1px solid #b3b0b0;
   }
 
   .editor-shell.website .topbar {
@@ -3197,6 +3205,7 @@
   :global(:root[data-theme="dark"]) .sidebar-logo { border: 0; background: transparent; }
   :global(:root[data-theme="dark"]) .sidebar-head-button { border: 1px solid rgba(255, 255, 255, 0.04); background: rgba(255, 255, 255, 0.065); }
   :global(:root[data-theme="dark"]) .sidebar-head-button:hover { border-color: rgba(255, 255, 255, 0.056); background: rgba(255, 255, 255, 0.104); }
+  :global(:root[data-theme="dark"]) .editor-shell.website .window-head { border-right: 1px solid #2a2a2a; border-bottom: 1px solid #343434; }
   :global(:root[data-theme="dark"]) .web-logo { border: 0; background: transparent; }
   /* dark theme: end generated */
 
