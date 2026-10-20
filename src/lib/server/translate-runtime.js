@@ -1,7 +1,7 @@
 import { env } from '$env/dynamic/private';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { constants, createWriteStream } from 'node:fs';
+import { constants, createWriteStream, existsSync } from 'node:fs';
 import { access, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { delimiter, join } from 'node:path';
@@ -14,7 +14,15 @@ export const TRANSLATION_LANGUAGE_CODES = new Set(['en', 'de', 'es', 'fr', 'it',
 /** Argos models, caches and the downloaded engine live here, outside the (read-only) app bundle. */
 export const TRANSLATE_CACHE = join(homedir(), '.cache', 'docuflex');
 const USER_RUNTIME = join(TRANSLATE_CACHE, 'translate-python');
-const DATA_HOME = join(TRANSLATE_CACHE, 'translate-data');
+/**
+ * Where the language models live. The hosted server installs every model at build
+ * time into <app>/.translate-data (scripts/install-translation-models.sh), so all
+ * visitors translate through the server without downloading anything. The desktop
+ * app and local runs keep using the per-user cache.
+ */
+const BUNDLED_DATA_HOME = join(process.cwd(), '.translate-data');
+const DATA_HOME = env.DOCUFLEX_TRANSLATE_DATA?.trim()
+  || (existsSync(join(BUNDLED_DATA_HOME, 'argos-translate', 'packages')) ? BUNDLED_DATA_HOME : join(TRANSLATE_CACHE, 'translate-data'));
 const PACKAGE_DIRECTORY = join(DATA_HOME, 'argos-translate', 'packages');
 const LOCAL_INDEX = join(DATA_HOME, 'argos-translate', 'index.json');
 const DOWNLOAD_DIRECTORY = join(TRANSLATE_CACHE, 'translate-downloads');

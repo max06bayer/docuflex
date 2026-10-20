@@ -1364,6 +1364,25 @@
     });
   }
 
+  /**
+   * Some PDFs carry invisible text boxes: whitespace, or boxes far taller than a
+   * line (scanned pages, form backgrounds). Those keep the app's select arrow
+   * instead of the I-beam, so the text cursor only shows over real text.
+   * @param {HTMLElement} layer
+   */
+  function markCursorlessTextSpans(layer) {
+    const spans = /** @type {HTMLElement[]} */ ([...layer.querySelectorAll('span:not(.markedContent)')]);
+    const heights = spans.map((span) => span.getBoundingClientRect().height).filter((height) => height > 0).sort((a, b) => a - b);
+    const lineHeight = heights.length ? heights[Math.floor(heights.length / 2)] : 0;
+    const layerRect = layer.getBoundingClientRect();
+    for (const span of spans) {
+      const rect = span.getBoundingClientRect();
+      const blank = !span.textContent?.trim();
+      const oversized = lineHeight > 0 && rect.height > lineHeight * 4 && rect.width * rect.height > layerRect.width * layerRect.height * 0.05;
+      span.classList.toggle('no-text-cursor', blank || oversized);
+    }
+  }
+
   /** Lets the card animate to its real content height instead of a fixed max-height guess. @param {HTMLElement} card */
   function measureCommentCard(card) {
     card.style.setProperty('--comment-card-full', `${card.scrollHeight}px`);
@@ -6391,6 +6410,7 @@
       if (!ocrTextLayerActive && ((viewport.rotation % 360) + 360) % 360 === 0) {
         mergeAdjacentTextSpans(textLayerBuilder.div);
       }
+      markCursorlessTextSpans(textLayerBuilder.div);
     }
   }
 
@@ -14290,6 +14310,10 @@
     forced-color-adjust: none;
     caret-color: CanvasText;
     pointer-events: none;
+  }
+
+  :global(.textLayer span.no-text-cursor) {
+    cursor: inherit;
   }
 
   :global(.textLayer span),

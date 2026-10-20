@@ -4,6 +4,10 @@
   import { fade, fly, slide } from 'svelte/transition';
   import { onMathRendered, renderMarkdown } from '$lib/ai-markdown.js';
   import AiFieldBackground from '$lib/AiFieldBackground.svelte';
+  import {
+    deleteVisitorChat, downloadPdf, fileToBase64, listVisitorChats, pickPdf, readVisitorChat,
+    runVisitorMemoryTool, saveVisitorChat, visitorKey, visitorMemories
+  } from '$lib/ai-web.js';
 
   /**
    * AI chat docked next to the document. The model (through /api/ai/chat)
@@ -13,7 +17,7 @@
    */
 
   export let open = false;
-  /** @type {{ available: boolean; model?: string; models?: { id: string; name: string; short?: string }[]; fallbackModel?: string; tools?: { name: string; title: string; readOnly: boolean; needsApproval: boolean }[] } | null} */
+  /** @type {{ available: boolean; mode?: string; model?: string; models?: { id: string; name: string; short?: string }[]; fallbackModel?: string; tools?: { name: string; title: string; readOnly: boolean; needsApproval: boolean }[] } | null} */
   export let status = null;
   /** @type {() => any} */
   export let getContext = () => ({});
@@ -23,6 +27,20 @@
   /** Lets the top bar show that the agent is working while the panel is closed. */
   /** @type {(busy: boolean) => void} */
   export let onBusyChange = () => {};
+  /** Website only: runs a tool in this window (the same handler the desktop's MCP bridge calls). */
+  /** @type {(name: string, args: Record<string, any>) => Promise<any>} */
+  export let runLocalTool = async () => { throw new Error('Tools are not available here.'); };
+  /** Website visitors bring their own key and keep chats and notes in this browser. */
+  $: web = status?.mode === 'web';
+
+  /** Headers for /api/ai/chat; on the website the visitor's key rides along with each request. */
+  function chatHeaders() {
+    /** @type {Record<string, string>} */
+    const headers = { 'Content-Type': 'application/json' };
+    const key = web ? visitorKey() : null;
+    if (key) headers['X-OpenRouter-Key'] = key;
+    return headers;
+  }
 
   /** @typedef {'streaming' | 'running' | 'approval' | 'done' | 'error' | 'denied' | 'cancelled'} ToolStatus */
   /** @typedef {{ x: number; y: number; width: number; height: number }} Region */
@@ -335,8 +353,8 @@
     refreshContext();
     const response = await fetch('/api/ai/chat', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: trimImages(history), context: liveContext, model: selectedModel }),
+      headers: chatHeaders(),
+      body: JSON.stringify({ messages: trimImages(history), context: liveContext, model: selectedModel, memories: web ? visitorMemories(liveContext) : undefined }),
       signal
     });
     /** @type {{ id: string; name: string; arguments: string; entry: ToolEntry | null }[]} */
@@ -425,6 +443,7 @@
    * @returns {Promise<{ text: string; image: string | null; isError: boolean }>}
    */
   async function callTool(name, args, agent) {
+    if (web) return callToolHere(name, args);
     const response = await fetch('/api/ai/tool', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -434,6 +453,58 @@
     const text = (result.content ?? []).filter((/** @type {any} */ part) => part.type === 'text').map((/** @type {any} */ part) => part.text).join('\n');
     const image = (result.content ?? []).find((/** @type {any} */ part) => part.type === 'image');
     return { text: text || (image ? 'Rendered.' : 'Done.'), image: image ? `data:${image.mimeType};base64,${image.data}` : null, isError: Boolean(result.isError) };
+  }
+
+  /**
+   * Website: runs a tool in this window. Files come from and go to the visitor's
+   * own computer: open/insert ask them to pick a PDF (inside the approval click),
+   * save/extract download the result.
+   * @param {string} name @param {Record<string, any>} args
+   * @returns {Promise<{ text: string; image: string | null; isError: boolean }>}
+   */
+  async function callToolHere(name, args) {
+    /** @param {unknown} value */
+    const asText = (value) => (typeof value === 'string' ? value : JSON.stringify(value, null, 2));
+    const fileName = (/** @type {unknown} */ path, /** @type {string} */ fallback) => {
+      const base = String(path ?? '').split(/[\\/]/).pop()?.trim() || fallback;
+      return base.toLowerCase().endsWith('.pdf') ? base : `${base}.pdf`;
+    };
+    try {
+      if (name === 'remember' || name === 'forget') {
+        return { text: asText(runVisitorMemoryTool(name, args, liveContext)), image: null, isError: false };
+      }
+      if (name === 'open_document' || name === 'insert_pdf') {
+        const file = await pickPdf();
+        if (!file) return { text: 'The person did not pick a file.', image: null, isError: true };
+        const base64 = await fileToBase64(file);
+        const result = name === 'open_document'
+          ? await runLocalTool('open_document', { name: file.name, base64, password: args.password })
+          : await runLocalTool('insert_pdf', { base64, after: args.after });
+        return { text: asText(result), image: null, isError: false };
+      }
+      if (name === 'save_document' || name === 'extract_pages') {
+        const { path, ...rest } = args;
+        const result = await runLocalTool(name, rest);
+        const downloadName = fileName(path, name === 'save_document' ? (liveContext?.active?.name ?? 'document.pdf') : 'pages.pdf');
+        downloadPdf(String(result.base64 ?? ''), downloadName);
+        const { base64: _base64, ...details } = result ?? {};
+        return { text: asText({ ...details, downloaded: downloadName }), image: null, isError: false };
+      }
+      if (name === 'add_image' && args.path) {
+        return { text: 'On the website, images come from the chat: ask the person to attach the image, then pass it as dataUrl.', image: null, isError: true };
+      }
+      const result = await runLocalTool(name, args);
+      if (name === 'render_page') {
+        return {
+          text: `Page ${result.page}: ${result.widthPt} × ${result.heightPt} pt, rendered at ${result.width} × ${result.height} px${result.note ? `. ${result.note}` : ''}.`,
+          image: `data:image/png;base64,${result.png}`,
+          isError: false
+        };
+      }
+      return { text: asText(result) || 'Done.', image: null, isError: false };
+    } catch (error) {
+      return { text: error instanceof Error ? error.message : String(error), image: null, isError: true };
+    }
   }
 
   /** @param {any} value @returns {Region | null} */
@@ -566,7 +637,7 @@
         refresh();
         const response = await fetch('/api/ai/chat', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: chatHeaders(),
           body: JSON.stringify({ messages: trimImages(messages), context: liveContext, model: selectedModel, subagent: { page: helper.page, region: helper.region } }),
           signal
         });
@@ -809,6 +880,10 @@
   }
 
   async function loadChatList() {
+    if (web) {
+      savedChats = listVisitorChats();
+      return;
+    }
     try {
       const response = await fetch('/api/ai/chats', { cache: 'no-store' });
       if (response.ok) savedChats = (await response.json()).chats ?? [];
@@ -828,6 +903,20 @@
     const storedHistory = history.map((message) => Array.isArray(message.content)
       ? { ...message, content: message.content.map((/** @type {any} */ part) => (part.type === 'image_url' ? { type: 'text', text: '[image not kept]' } : part)) }
       : message);
+    const stored = {
+      id: chat.id,
+      title: chat.title,
+      createdAt: chat.createdAt,
+      document: liveContext?.active?.name ?? null,
+      entries: storedEntries,
+      history: storedHistory,
+      uncompactedFrom
+    };
+    if (web) {
+      saveVisitorChat(stored);
+      void loadChatList();
+      return;
+    }
     try {
       await fetch('/api/ai/chats', {
         method: 'POST',
@@ -852,9 +941,13 @@
   async function resumeChat(id) {
     if (busy) return;
     try {
-      const response = await fetch(`/api/ai/chats?id=${encodeURIComponent(id)}`, { cache: 'no-store' });
-      if (!response.ok) throw new Error();
-      const stored = await response.json();
+      let stored;
+      if (web) stored = readVisitorChat(id);
+      else {
+        const response = await fetch(`/api/ai/chats?id=${encodeURIComponent(id)}`, { cache: 'no-store' });
+        if (!response.ok) throw new Error();
+        stored = await response.json();
+      }
       entries = (stored.entries ?? []).map((/** @type {Entry} */ entry) => (entry.role === 'assistant' ? { ...entry, showReasoning: false } : entry));
       history = stored.history ?? [];
       uncompactedFrom = typeof stored.uncompactedFrom === 'number' ? stored.uncompactedFrom : null;
@@ -874,7 +967,8 @@
   async function deleteSavedChat(id) {
     savedChats = savedChats.filter((entry) => entry.id !== id);
     if (chat?.id === id) newChat();
-    await fetch(`/api/ai/chats?id=${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => null);
+    if (web) deleteVisitorChat(id);
+    else await fetch(`/api/ai/chats?id=${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => null);
   }
 
   /**

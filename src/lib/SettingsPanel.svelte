@@ -3,6 +3,7 @@
   import { cubicOut } from 'svelte/easing';
   import { fade, fly, scale } from 'svelte/transition';
   import { applyTheme, currentTheme } from '$lib/theme.js';
+  import { removeVisitorKey, saveVisitorKey } from '$lib/ai-web.js';
 
   /** @type {() => void} */
   export let onClose = () => {};
@@ -48,9 +49,13 @@
     keyBusy = true;
     keyError = null;
     try {
-      const response = await fetch('/api/ai/key', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key }) });
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result.error ?? 'The key could not be saved.');
+      // Website: the key stays in this browser. Desktop: saved on this computer.
+      if (/** @type {any} */ (aiStatus)?.mode === 'web') await saveVisitorKey(key);
+      else {
+        const response = await fetch('/api/ai/key', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key }) });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(result.error ?? 'The key could not be saved.');
+      }
       keyDraft = '';
       await onAiKeyChange();
     } catch (error) {
@@ -65,7 +70,8 @@
     keyBusy = true;
     keyError = null;
     try {
-      await fetch('/api/ai/key', { method: 'DELETE' });
+      if (/** @type {any} */ (aiStatus)?.mode === 'web') removeVisitorKey();
+      else await fetch('/api/ai/key', { method: 'DELETE' });
       await onAiKeyChange();
     } finally {
       keyBusy = false;

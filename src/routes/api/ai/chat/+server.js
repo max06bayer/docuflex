@@ -1,5 +1,5 @@
-import { aiAvailable, streamCompletion } from '$lib/server/ai.js';
-import { isLocalRequest } from '$lib/server/mcp-bridge.js';
+import { aiAvailable, streamCompletion, visitorKey, visitorMemories } from '$lib/server/ai.js';
+import { isLocalRequest, mcpAvailable } from '$lib/server/mcp-bridge.js';
 
 /**
  * One model turn of the AI chat. The window runs the agent loop: it sends the
@@ -8,15 +8,27 @@ import { isLocalRequest } from '$lib/server/mcp-bridge.js';
  */
 /** @type {import('./$types').RequestHandler} */
 export async function POST({ request, url }) {
-  if (!isLocalRequest(request, url) || !(await aiAvailable())) return new Response('Not found', { status: 404 });
+  // The desktop app and local development use the key saved on this computer.
+  // Website visitors send their own key with each request; it is used for this call only.
+  const local = isLocalRequest(request, url) && mcpAvailable();
+  /** @type {{ key: string; memories: { text: string; at: string }[] } | null} */
+  let web = null;
+  if (local) {
+    if (!(await aiAvailable())) return new Response('Not found', { status: 404 });
+  }
   const body = await request.json().catch(() => null);
+  if (!local) {
+    const key = visitorKey(request.headers.get('x-openrouter-key'));
+    if (!key) return Response.json({ error: 'Add your OpenRouter API key in Settings.' }, { status: 401 });
+    web = { key, memories: visitorMemories(body?.memories) };
+  }
   if (!Array.isArray(body?.messages)) return Response.json({ error: 'Send { messages: [...] }.' }, { status: 400 });
 
   /** @type {Response} */
   let upstream;
   try {
     const subagent = body.subagent && Number.isInteger(body.subagent.page) ? { page: body.subagent.page, region: body.subagent.region ?? null } : null;
-    upstream = await streamCompletion(body.messages, body.context, request.signal, subagent, typeof body.model === 'string' ? body.model : undefined);
+    upstream = await streamCompletion(body.messages, body.context, request.signal, subagent, typeof body.model === 'string' ? body.model : undefined, web);
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : 'Could not reach the AI service.' }, { status: 502 });
   }

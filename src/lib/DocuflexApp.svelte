@@ -19,6 +19,7 @@
   // @ts-ignore Fontsource exposes CSS through package exports without JS type declarations.
   import '@fontsource-variable/inter/wght.css';
   import '$lib/theme-dark.css';
+  import { visitorKey } from '$lib/ai-web.js';
   import mergeIcon from '../../public/quicktools/merge.svg?raw';
   import splitIcon from '../../public/quicktools/split.svg?raw';
   import convertIcon from '../../public/quicktools/convert.svg?raw';
@@ -166,7 +167,12 @@
     }
     try {
       const response = await fetch('/api/ai/status', { cache: 'no-store' });
-      aiStatus = response.ok ? await response.json() : { available: false };
+      const status = response.ok ? await response.json() : { available: false };
+      // Website: the chat runs with the visitor's own key, kept in this browser.
+      if (status.mode === 'web') {
+        const key = visitorKey();
+        aiStatus = { ...status, available: Boolean(key), keyHint: key ? key.slice(-4) : null };
+      } else aiStatus = status;
     } catch {
       aiStatus = { available: false };
     }
@@ -775,6 +781,32 @@
     activeTab = id;
   }
 
+  /** Open tabs survive a reload: their names (and the active one) are kept, the files come from the recent-documents store. */
+  const OPEN_TABS_KEY = 'docuflex-open-tabs';
+  let openTabsRestored = false;
+  $: if (openTabsRestored && typeof window !== 'undefined') {
+    try {
+      const active = tabs.find((tab) => tab.id === activeTab)?.name ?? null;
+      localStorage.setItem(OPEN_TABS_KEY, JSON.stringify({ names: tabs.map((tab) => tab.name), active }));
+    } catch {}
+  }
+
+  function restoreOpenTabs() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(OPEN_TABS_KEY) ?? 'null');
+      if (saved && Array.isArray(saved.names) && !tabs.length) {
+        const before = activeTab;
+        for (const name of saved.names) {
+          const recent = recentDocuments.find((document) => document.name === name);
+          if (recent && !tabs.some((tab) => tab.name === name)) addFileTab(recent.file, recent.protection, recent.thumbnailUrl);
+        }
+        const active = tabs.find((tab) => tab.name === saved.active);
+        activeTab = saved.active === null ? before : active?.id ?? activeTab;
+      }
+    } catch {}
+    openTabsRestored = true;
+  }
+
   /** @param {RecentDocument} document */
   function openRecentDocument(document) {
     const existing = tabs.find((tab) => tab.name === document.name);
@@ -881,7 +913,7 @@
       activeTab = null;
     };
     window.addEventListener('popstate', handleHistoryBack);
-    void restoreRecentDocuments();
+    void restoreRecentDocuments().finally(restoreOpenTabs);
     /** @param {PointerEvent} event */
     const closeHomepageMenus = (event) => {
       const target = event.target;
@@ -923,7 +955,9 @@
   <title>Docuflex Editor — Edit PDFs Online, Free</title>
   <meta name="description" content="Edit, sign, merge, split, compress and convert PDFs online for free with Docuflex. Private, open source and hosted in the EU." />
   <link rel="canonical" href="https://docuflex.eu/editor" />
-  <link rel="icon" href="/logo.svg" type="image/svg+xml" />
+  <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
+  <link rel="icon" href="/favicon-64.png" sizes="64x64" type="image/png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
 </svelte:head>
 
 <main bind:this={shellElement} class="editor-shell" class:website={isWebsite} class:editor-mode={activeTab !== null} class:document-entering={documentEntering} class:ai-docked={aiPanelOpen && aiStatus?.available}>
@@ -1356,6 +1390,7 @@
       hasDocument={activeTab !== null}
       onClose={() => (aiPanelOpen = false)}
       onBusyChange={(busy) => (aiBusy = busy)}
+      runLocalTool={runMcpTool}
     />
   {/if}
 
@@ -3228,7 +3263,7 @@
   /* Home grid matches the editor canvas: about 5% lighter than the shell. */
   :global(:root[data-theme="dark"]) .workspace { background-color: #1a1a1a; }
   :global(:root[data-theme="dark"]) .sidebar { border-color: #202020; background: rgba(12, 12, 12, 0.85); }
-  :global(:root[data-theme="dark"]) .sidebar-head { border-color: #232323; background: linear-gradient(180deg, rgba(0, 0, 0, 0.85) 0%, rgba(8, 8, 8, 0.85) 100%); }
+  :global(:root[data-theme="dark"]) .sidebar-head { border-color: #232323; background: linear-gradient(180deg, #000 0%, #080808 100%); }
   :global(:root[data-theme="dark"]) .sidebar-head-button { border-color: rgba(255, 255, 255, 0.05); background: rgba(255, 255, 255, 0.05); }
   :global(:root[data-theme="dark"]) .sidebar-head-button:hover { border-color: rgba(255, 255, 255, 0.1); background: rgba(255, 255, 255, 0.09); }
   /* Tabs: inactive PDF tabs carry a dark red wash, the active tab a lifted grey glass with a soft glow. */
