@@ -136,7 +136,8 @@ function mapColor(c, role, context = {}) {
   }
   if (role === 'line') {
     if (g > 225) return c.a < 1 ? black(c.a * 0.8) : white(0.08);
-    if (g < 40) return c.a < 1 ? white(Math.max(0.04, c.a * 0.8)) : solid(236); // edges of black buttons
+    if (c.a < 1 && g < 140) return white(Math.max(0.04, c.a * 0.8)); // translucent dark lines stay translucent
+    if (g < 40) return solid(236); // edges of black buttons
     // Opaque light-grey outlines (panel edges, dividers): dark edges like #202020–#2f2f2f.
     return solid(Math.round(28 + Math.max(0, 230 - g) * 0.45));
   }
@@ -224,6 +225,10 @@ function generate(css) {
     // Tooltips and the on-page comment cards (pins, tethers, highlights) are
     // already dark in light mode and stay exactly as they are.
     if (/tooltip|comment-(card|pin|tether|quote-layer)/i.test(rule.selector)) return;
+    // Handles and the size badge are drawn on the white page, so they keep the light look too.
+    if (/(shape|crop|linear)-[a-z-]*handle|shape-size-badge/.test(rule.selector)) return;
+    // PDF pages and their thumbnails are paper: they stay white.
+    if (/(^|[\s,>])\.(pdf-page|thumbnail-page|quick-thumbnail-page)(?![\w-])[^\s,]*\s*$/m.test(rule.selector) && !/page-pill|page-separator|drop|placeholder/.test(rule.selector)) return;
     /** @type {string[]} */
     const declarations = [];
     const floating = rule.some((node) => node.type === 'decl' && (/^(-webkit-)?backdrop-filter$/.test(node.prop) || (node.prop === 'box-shadow' && node.value !== 'none')));
@@ -259,10 +264,10 @@ function generate(css) {
       if (context.midGrey && !rule.some((other) => other.type === 'decl' && other.prop === 'color')) {
         declarations.push('color: rgba(255, 255, 255, 0.5);');
       }
-      // Colors that stay the same are re-emitted too, so a more specific light rule
-      // (a red danger button, say) still beats the dark version of its base rule.
-      if (mapped !== node.value || colorPattern.test(node.value)) declarations.push(`${node.prop}: ${mapped}${node.important ? ' !important' : ''};`);
-      colorPattern.lastIndex = 0;
+      // Every color declaration of a rule is re-emitted, unchanged ones and keywords
+      // (transparent, none) included, so a more specific light rule (a red danger
+      // button, a transparent override) still beats the dark version of its base rule.
+      declarations.push(`${node.prop}: ${mapped}${node.important ? ' !important' : ''};`);
     });
     if (!declarations.length) return;
     let block = `${darkSelector(rule.selector)} { ${declarations.join(' ')} }`;
@@ -293,6 +298,8 @@ async function listSvgs(directory) {
 const publicRoot = join(root, 'public');
 /** @type {string[]} */
 const monochrome = [];
+/** @type {string[]} */
+const twoTone = [];
 for (const path of await listSvgs(publicRoot)) {
   const svg = await readFile(path, 'utf8');
   if (/<image\b/.test(svg)) continue;
@@ -302,7 +309,11 @@ for (const path of await listSvgs(publicRoot)) {
   if (!colors.length || !colors.every(isNeutral)) continue;
   // Light-only icons (white glyphs meant for dark buttons) stay as they are.
   if (colors.every((color) => grey(color) > 200)) continue;
-  monochrome.push(path.slice(publicRoot.length).split('\\').join('/'));
+  const src = path.slice(publicRoot.length).split('\\').join('/');
+  // Grey shapes with white details (a tile with a cut-out glyph) need the
+  // details to stay visible, so they are inverted instead of tinted.
+  if (colors.some((color) => grey(color) > 225) && colors.some((color) => grey(color) < 200)) twoTone.push(src);
+  else monochrome.push(src);
 }
 monochrome.sort();
 
@@ -337,6 +348,11 @@ ${monochrome.map((src) => `:root[data-theme="dark"] img[src="${src}"]`).join(',\
   filter: ${ICON_FILTER};
 }
 
+/* Two-tone grey icons: light shape, dark details. */
+${twoTone.sort().map((src) => `:root[data-theme="dark"] img[src="${src}"]`).join(',\n')} {
+  filter: invert(1) brightness(1.5);
+}
+
 /* Hovered buttons and menu items lift their grey icons to full white. :where() keeps this
    below any component's own icon rule, so toolbars and buttons that tint icons win. */
 ${monochrome.map((src) => `:root[data-theme="dark"] :where(button:not(:disabled), a, [role="menuitem"]):hover img[src="${src}"]`).join(',\n')} {
@@ -344,4 +360,4 @@ ${monochrome.map((src) => `:root[data-theme="dark"] :where(button:not(:disabled)
 }
 `;
 await writeFile(join(root, 'src/lib/theme-dark.css'), iconCss);
-console.log(`src/lib/theme-dark.css: ${monochrome.length} monochrome icons`);
+console.log(`src/lib/theme-dark.css: ${monochrome.length} monochrome icons, ${twoTone.length} two-tone icons`);

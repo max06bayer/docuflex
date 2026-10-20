@@ -737,7 +737,10 @@
   :global(:root[data-theme="dark"]) .editor-toolbar { border: 1px solid #212121; background: rgba(22, 22, 22, 0.96); box-shadow: inset 0 4px 18.4px rgba(0, 0, 0, 0.03),
       0 0 10px rgba(7, 7, 7, 0.12),
       0 4px 8px rgba(0, 0, 0, 0.3); }
-  :global(:root[data-theme="dark"]) .primary-tool { border: 1px solid #686868; background: #111111; }
+  :global(:root[data-theme="dark"]) .primary-tool,
+  :global(:root[data-theme="dark"]) .expand-tool,
+  :global(:root[data-theme="dark"]) .tool-menu-item { border: 0; }
+  :global(:root[data-theme="dark"]) .primary-tool { border: 1px solid rgba(255, 255, 255, 0.064); background: #111111; }
   :global(:root[data-theme="dark"]) .primary-tool:hover { background: #0f0f0f; }
   :global(:root[data-theme="dark"]) .primary-tool.active,
   :global(:root[data-theme="dark"]) .primary-tool.active:hover { border-color: rgba(255, 255, 255, 0.064); background: #ececec; }
@@ -746,7 +749,7 @@
   :global(:root[data-theme="dark"]) .expand-tool { border: 1px solid rgba(255, 255, 255, 0.08); background: #131313; }
   :global(:root[data-theme="dark"]) .expand-tool:hover { border-color: #212121; background: #111111; }
   :global(:root[data-theme="dark"]) .tool-menu { border: 1px solid rgba(255, 255, 255, 0.144); background: rgba(24, 24, 24, 0.95); box-shadow: 0 7px 18px rgba(0, 0, 0, 0.33), 0 2px 5px rgba(0, 0, 0, 0.15); }
-  :global(:root[data-theme="dark"]) .tool-menu-item { color: rgba(255, 255, 255, 0.753); }
+  :global(:root[data-theme="dark"]) .tool-menu-item { border: 1px solid transparent; background: transparent; color: rgba(255, 255, 255, 0.753); }
   :global(:root[data-theme="dark"]) .tool-menu-item.active { border-color: rgba(255, 255, 255, 0.064); background: rgba(22, 22, 22, 0.96); }
   :global(:root[data-theme="dark"]) .tool-menu-item:hover { color: rgba(255, 255, 255, 0.92); }
   :global(:root[data-theme="dark"]) .tool-menu-item kbd { border: 1px solid rgba(255, 255, 255, 0.04); background: rgba(255, 255, 255, 0.058); color: rgba(255, 255, 255, 0.16); }
