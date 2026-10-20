@@ -521,7 +521,7 @@
   :global(:root[data-theme="dark"]) .settings-action.secondary { border-color: rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.75); }
   :global(:root[data-theme="dark"]) .settings-action.secondary:not(:disabled):hover { background: rgba(255, 255, 255, 0.07); }
   :global(:root[data-theme="dark"]) .panel-header { border-bottom: 1px solid #292929; background: #111111; }
-  :global(:root[data-theme="dark"]) .panel-close span { background: #6d6d6d; }
+  :global(:root[data-theme="dark"]) .panel-close span { color: rgba(255, 255, 255, 0.5); background: rgba(255, 255, 255, 0.14); }
   :global(:root[data-theme="dark"]) .panel-close:hover span { background: #ececec; }
   :global(:root[data-theme="dark"]) .legal-backdrop { background: rgba(22, 22, 22, 0.96); }
   :global(:root[data-theme="dark"]) .legal-panel { border: 1.5px solid #2e2e2e; background: rgba(24, 24, 24, 0.95); box-shadow: 0 28px 85px rgba(0, 0, 0, 0.6), 0 5px 20px rgba(0, 0, 0, 0.3); color: rgba(255, 255, 255, 0.859); }

@@ -113,7 +113,7 @@ const glass = (/** @type {number} */ v, /** @type {number} */ a) => ({ r: v, g: 
 /**
  * @param {{r:number,g:number,b:number,a:number}} c
  * @param {'surface' | 'ink' | 'line' | 'shadow'} role
- * @param {{ floating?: boolean }} [context] floating = the rule casts a shadow or blurs (menus, popovers, tooltips)
+ * @param {{ floating?: boolean; midGrey?: boolean }} [context] floating = the rule casts a shadow or blurs (menus, popovers, tooltips)
  */
 function mapColor(c, role, context = {}) {
   if (role === 'shadow') {
@@ -153,9 +153,11 @@ function mapColor(c, role, context = {}) {
   }
   if (g > 251) return context.floating ? glass(22, 0.96) : white(0.05); // fields, cards, raised controls
   if (g >= 210) return solid(Math.round(10 + (g - 210) * 0.25)); // base layers: canvas, sidebars (#e2e2e2 → #0e0e0e)
-  if (g >= 170) return white(0.06 + (210 - g) / 40 * 0.06); // pressed / badge greys
   if (g <= 60) return solid(236); // black primary buttons flip to white
-  return solid(Math.round(255 - g)); // remaining mid greys
+  // Pressed, disabled and badge greys: a raised white-alpha layer with light text.
+  context.midGrey = true;
+  if (g >= 170) return white(0.06 + (210 - g) / 40 * 0.06);
+  return white(0.14);
 }
 
 const colorPattern = /#[0-9a-fA-F]{3,8}\b|rgba?\(\s*[\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+\s*(?:,\s*[\d.%]+\s*)?\)|\b(?:white|black)\b/g;
@@ -219,6 +221,8 @@ function generate(css) {
   ast.walkRules((rule) => {
     // Keyframes steps are not selectors.
     if (rule.parent?.type === 'atrule' && /keyframes$/.test(/** @type {any} */ (rule.parent).name)) return;
+    // Tooltips are already dark in light mode and stay exactly as they are.
+    if (/tooltip/i.test(rule.selector)) return;
     /** @type {string[]} */
     const declarations = [];
     const floating = rule.some((node) => node.type === 'decl' && (/^(-webkit-)?backdrop-filter$/.test(node.prop) || (node.prop === 'box-shadow' && node.value !== 'none')));
@@ -248,7 +252,12 @@ function generate(css) {
       if (iconUrl && monochrome.includes(iconUrl[1]) && !rule.some((other) => other.type === 'decl' && /filter$/.test(other.prop))) {
         declarations.push(`filter: ${ICON_FILTER};`);
       }
-      const mapped = mapValue(node.value, role, { floating });
+      /** @type {{ floating: boolean; midGrey?: boolean }} */
+      const context = { floating };
+      const mapped = mapValue(node.value, role, context);
+      if (context.midGrey && !rule.some((other) => other.type === 'decl' && other.prop === 'color')) {
+        declarations.push('color: rgba(255, 255, 255, 0.5);');
+      }
       if (mapped !== node.value) declarations.push(`${node.prop}: ${mapped}${node.important ? ' !important' : ''};`);
     });
     if (!declarations.length) return;
@@ -283,6 +292,8 @@ const monochrome = [];
 for (const path of await listSvgs(publicRoot)) {
   const svg = await readFile(path, 'utf8');
   if (/<image\b/.test(svg)) continue;
+  // Blackout/whiteout show the color they paint, so they keep it in dark mode.
+  if (/\/(blackout|whiteout)\.svg$/.test(path)) continue;
   const colors = [...svg.matchAll(/(?:fill|stroke|stop-color|color)\s*[=:]\s*"?\s*(#[0-9a-fA-F]{3,8}|rgba?\([^)]*\)|white|black)/g)].map((match) => parseColor(match[1]));
   if (!colors.length || !colors.every(isNeutral)) continue;
   // Light-only icons (white glyphs meant for dark buttons) stay as they are.
@@ -322,6 +333,11 @@ ${monochrome.map((src) => `:root[data-theme="dark"] img[src="${src}"]`).join(',\
   filter: ${ICON_FILTER};
 }
 
+/* Hovered buttons and menu items lift their grey icons to full white. :where() keeps this
+   below any component's own icon rule, so toolbars and buttons that tint icons win. */
+${monochrome.map((src) => `:root[data-theme="dark"] :where(button:not(:disabled), a, [role="menuitem"]):hover img[src="${src}"]`).join(',\n')} {
+  filter: brightness(0) invert(1);
+}
 `;
 await writeFile(join(root, 'src/lib/theme-dark.css'), iconCss);
 console.log(`src/lib/theme-dark.css: ${monochrome.length} monochrome icons`);

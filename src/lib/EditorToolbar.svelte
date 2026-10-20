@@ -737,9 +737,6 @@
   :global(:root[data-theme="dark"]) .editor-toolbar { border: 1px solid #212121; background: rgba(22, 22, 22, 0.96); box-shadow: inset 0 4px 18.4px rgba(0, 0, 0, 0.03),
       0 0 10px rgba(7, 7, 7, 0.12),
       0 4px 8px rgba(0, 0, 0, 0.3); }
-  :global(:root[data-theme="dark"]) .toolbar-tooltip { border: 1px solid rgba(0, 0, 0, 0.064); background: #ececec; box-shadow: 0 10px 28px rgba(0, 0, 0, 0.6), 0 2px 7px rgba(0, 0, 0, 0.36); color: #111111; }
-  :global(:root[data-theme="dark"]) .toolbar-tooltip strong { color: #111111; }
-  :global(:root[data-theme="dark"]) .toolbar-tooltip span { color: rgba(255, 255, 255, 0.333); }
   :global(:root[data-theme="dark"]) .primary-tool { border: 1px solid #686868; background: #111111; }
   :global(:root[data-theme="dark"]) .primary-tool:hover { background: #0f0f0f; }
   :global(:root[data-theme="dark"]) .primary-tool.active,
@@ -754,5 +751,26 @@
   :global(:root[data-theme="dark"]) .tool-menu-item:hover { color: rgba(255, 255, 255, 0.92); }
   :global(:root[data-theme="dark"]) .tool-menu-item kbd { border: 1px solid rgba(255, 255, 255, 0.04); background: rgba(255, 255, 255, 0.058); color: rgba(255, 255, 255, 0.16); }
   /* dark theme: end generated */
+
+  /* dark theme: manual */
+  /* Toolbar icons are drawn dark-on-light. On the dark toolbar every icon is the
+     opposite of its light-mode treatment: light while unselected, dark on the
+     white selected button. The colored image and highlight icons keep their colors. */
+  :global(:root[data-theme="dark"]) .primary-tool img,
+  :global(:root[data-theme="dark"]) .primary-tool .design-icon img { filter: none; }
+  :global(:root[data-theme="dark"]) .primary-tool:not(.active) > img.tool-icon:not(.preserve-color),
+  :global(:root[data-theme="dark"]) .primary-tool:not(.active) .design-icon:not(.design-icon-select) { filter: invert(1) hue-rotate(180deg); }
+  /* Blackout and whiteout show the color they paint: a black and a white square, opposite each other.
+     The black square gets a faint light edge so it reads on the dark toolbar. */
+  :global(:root[data-theme="dark"]) .primary-tool.active.light-selection { border-color: #b8b8b8; background: #e9e9e9; }
+  :global(:root[data-theme="dark"]) img[src$="/blackout.svg"] { filter: drop-shadow(0 0 0.6px rgba(255, 255, 255, 0.85)); }
+  :global(:root[data-theme="dark"]) .primary-tool.active > img.tool-icon,
+  :global(:root[data-theme="dark"]) .primary-tool.active .design-icon:not(.design-icon-select) { filter: none; }
+  /* The select cursor is a white glyph: white while unselected, black when selected. */
+  :global(:root[data-theme="dark"]) .primary-tool:not(.active) .design-icon-select img { filter: none; }
+  :global(:root[data-theme="dark"]) .primary-tool.active .design-icon-select img { filter: invert(1); }
+  /* Design icons are inverted as a whole, so their drawn parts keep the light colors. */
+  :global(:root[data-theme="dark"]) .design-icon .text-frame { border-color: #9b9b9b; background: #e8e8e8; box-shadow: 0 0 6.8px rgba(0, 0, 0, 0.15); }
+  :global(:root[data-theme="dark"]) .expand-tool img { filter: brightness(0) invert(1) opacity(0.78); }
 
 </style>

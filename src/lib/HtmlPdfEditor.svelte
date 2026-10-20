@@ -5386,7 +5386,7 @@ ${setupScript}`;
   :global(:root[data-theme="dark"]) .text-properties-header { border-bottom: 1px solid #292929; background: #111111; }
   :global(:root[data-theme="dark"]) .text-properties-header > img { filter: brightness(0) invert(1); }
   :global(:root[data-theme="dark"]) .text-properties-header h2 { color: rgba(255, 255, 255, 0.92); }
-  :global(:root[data-theme="dark"]) .text-properties-close span { background: #6d6d6d; }
+  :global(:root[data-theme="dark"]) .text-properties-close span { color: rgba(255, 255, 255, 0.5); background: rgba(255, 255, 255, 0.14); }
   :global(:root[data-theme="dark"]) .text-properties-close:hover span { background: #ececec; }
   :global(:root[data-theme="dark"]) .typography-color-row,
   :global(:root[data-theme="dark"]) .typography-select-row { border: 1px solid #232323; background: #121212; }

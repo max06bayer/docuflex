@@ -14943,7 +14943,7 @@
   :global(:root[data-theme="dark"]) .color-saturation > span,
   :global(:root[data-theme="dark"]) .picker-slider > span { border: 3px solid rgba(255, 255, 255, 0.08); box-shadow: 0 1px 4px rgba(0, 0, 0, 0.6); }
   :global(:root[data-theme="dark"]) .hue-slider { background: linear-gradient(90deg, #ff0000, #ffff00, #00ff00, #00ffff, #0000ff, #ff00ff, #ff0000); }
-  :global(:root[data-theme="dark"]) .alpha-slider { background: linear-gradient(90deg, transparent, var(--picker-color)),
+  :global(:root[data-theme="dark"]) .alpha-slider { color: rgba(255, 255, 255, 0.5); background: linear-gradient(90deg, transparent, var(--picker-color)),
       conic-gradient(rgba(255, 255, 255, 0.05) 25%, rgba(255, 255, 255, 0.065) 0 50%, rgba(255, 255, 255, 0.05) 0 75%, rgba(255, 255, 255, 0.065) 0) 0 0 / 12px 12px; }
   :global(:root[data-theme="dark"]) .search-panel-content { background: #141414; }
   :global(:root[data-theme="dark"]) .watermark-panel-content { background: #141414; }
@@ -14951,7 +14951,7 @@
   :global(:root[data-theme="dark"]) .search-direction:not(:disabled):hover { border-color: #2e2e2e; background: #111111; }
   :global(:root[data-theme="dark"]) .protect-panel-header { border-bottom: 1.5px solid #2c2c2c; background: rgba(0, 0, 0, 0.45); }
   :global(:root[data-theme="dark"]) .protect-panel-header h2 { color: rgba(255, 255, 255, 0.92); }
-  :global(:root[data-theme="dark"]) .protect-panel-close span { background: #626262; }
+  :global(:root[data-theme="dark"]) .protect-panel-close span { color: rgba(255, 255, 255, 0.5); background: rgba(255, 255, 255, 0.14); }
   :global(:root[data-theme="dark"]) .protect-panel-close:hover span { background: #ececec; }
   :global(:root[data-theme="dark"]) .protect-panel .protect-panel-close { filter: brightness(0) invert(1) opacity(0.78); }
   :global(:root[data-theme="dark"]) .protect-panel .protect-panel-close:hover { filter: brightness(0) invert(1); }
@@ -15018,7 +15018,7 @@
   :global(:root[data-theme="dark"]) .saved-signature-row { border-bottom: 1px solid #202020; }
   :global(:root[data-theme="dark"]) .saved-signature { background: #141414; }
   :global(:root[data-theme="dark"]) .saved-signature:hover { background: #131313; }
-  :global(:root[data-theme="dark"]) .saved-signature-remove span { background: #6d6d6d; }
+  :global(:root[data-theme="dark"]) .saved-signature-remove span { color: rgba(255, 255, 255, 0.5); background: rgba(255, 255, 255, 0.14); }
   :global(:root[data-theme="dark"]) .saved-signature-remove:hover span { background: #ececec; }
   :global(:root[data-theme="dark"]) .saved-signature-actions,
   :global(:root[data-theme="dark"]) .signature-actions { background: #141414; }
@@ -15037,7 +15037,7 @@
   :global(:root[data-theme="dark"]) .signature-camera-overlay { background: rgba(22, 22, 22, 0.96); }
   :global(:root[data-theme="dark"]) .signature-camera-card { border: 1.5px solid #292929; background: #141414; box-shadow: 0 12px 34px rgba(0, 0, 0, 0.3); color: rgba(255, 255, 255, 0.522); }
   :global(:root[data-theme="dark"]) .signature-draw-field { border: 1px solid #2f2f2f; background: rgba(255, 255, 255, 0.05); }
-  :global(:root[data-theme="dark"]) .signature-draw-baseline { background: rgba(255, 255, 255, 0.099); }
+  :global(:root[data-theme="dark"]) .signature-draw-baseline { color: rgba(255, 255, 255, 0.5); background: rgba(255, 255, 255, 0.099); }
   :global(:root[data-theme="dark"]) .signature-camera-preview { border: 1px solid #2f2f2f; background: #ececec; }
   :global(:root[data-theme="dark"]) .signature-camera-guide { border: 1.5px solid rgba(0, 0, 0, 0.752); box-shadow: 0 0 0 999px rgba(0, 0, 0, 0.3); }
   :global(:root[data-theme="dark"]) .signature-camera-close { border: 1px solid rgba(0, 0, 0, 0.304); background: rgba(255, 255, 255, 0.2); }
@@ -15048,7 +15048,7 @@
       #0e0e0e; }
   :global(:root[data-theme="dark"]) .preparation-overlay { background: rgba(22, 22, 22, 0.96); }
   :global(:root[data-theme="dark"]) .preparation-dialog { border: 1px solid rgba(255, 255, 255, 0.096); background: rgba(22, 22, 22, 0.96); box-shadow: 0 10px 35px rgba(0, 0, 0, 0.24); }
-  :global(:root[data-theme="dark"]) .preparation-text { background: linear-gradient(90deg, #b8b8b8 0%, #616161 31.877%, #b8b8b8 72.516%); }
+  :global(:root[data-theme="dark"]) .preparation-text { background: linear-gradient(90deg, rgba(255, 255, 255, 0.14) 0%, rgba(255, 255, 255, 0.14) 31.877%, rgba(255, 255, 255, 0.14) 72.516%); }
   :global(:root[data-theme="dark"]) .pdf-page { background: rgba(22, 22, 22, 0.96); box-shadow: 0 0 0 1px rgba(186, 182, 182, 0.6), 3px 8px 16px rgba(0, 0, 0, 0.15); }
   :global(:root[data-theme="dark"]) .watermark-layer text { fill: rgba(255, 255, 255, 0.655); }
   :global(:root[data-theme="dark"]) .redaction-layer rect.blackout { fill: rgba(255, 255, 255, 0.92); }

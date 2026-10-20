@@ -892,7 +892,7 @@
   :global(:root[data-theme="dark"]) .page-drag-count { background: rgba(255, 255, 255, 0.2); color: #111111; }
   :global(:root[data-theme="dark"]) .has-pages .panel-actions { border-top: 1px solid rgba(255, 255, 255, 0.08); }
   :global(:root[data-theme="dark"]) .panel-action { border: 1px solid #ececec; background: #ececec; color: #111111; }
-  :global(:root[data-theme="dark"]) .panel-action:disabled { border-color: #333333; background: rgba(255, 255, 255, 0.105); }
+  :global(:root[data-theme="dark"]) .panel-action:disabled { border-color: #333333; color: rgba(255, 255, 255, 0.5); background: rgba(255, 255, 255, 0.105); }
   :global(:root[data-theme="dark"]) .page-context-menu { border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(24, 24, 24, 0.95); box-shadow: 0 0 100px rgba(0, 0, 0, 0.24); }
   :global(:root[data-theme="dark"]) .page-menu-item { color: rgba(255, 255, 255, 0.75); }
   :global(:root[data-theme="dark"]) .page-menu-item:hover:not(:disabled),
