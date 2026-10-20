@@ -5090,9 +5090,9 @@ ${setupScript}`;
     position: absolute;
     z-index: 40;
     top: 20px;
-    /* The editor layer compensates for the app shell's 0.85 UI zoom. Keep
+    /* The editor layer compensates for the app shell's UI zoom. Keep
        this panel inside the portion of that enlarged layer that is visible. */
-    right: calc(15% + 18px);
+    right: calc((1 - var(--ui-scale, 0.85)) * 100% + 18px);
     display: grid;
     grid-template-rows: 50px 1fr;
     box-sizing: border-box;

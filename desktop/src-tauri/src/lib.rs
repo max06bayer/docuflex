@@ -597,9 +597,10 @@ pub fn run() {
                 .title_bar_style(TitleBarStyle::Overlay)
                 .hidden_title(true)
                 // Centers the native close button on the redesign's close-button spot:
-                // 24.65 × 23.8 pt from the top-left (Figma's 29 × 28 at the 0.85 UI scale).
-                // Tauri places the 14 pt button's left edge at x and its center at y − 2.
-                .traffic_light_position(LogicalPosition::new(17.65, 25.8));
+                // 23.4 × 22.6 pt from the top-left (Figma's 29 × 28 at the macOS UI scale
+                // of 0.8075). Tauri places the 14 pt button's left edge at x and its
+                // center at y − 2.
+                .traffic_light_position(LogicalPosition::new(16.4, 24.6));
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             let window_builder = window_builder.decorations(false).shadow(true);
             #[cfg(any(target_os = "linux", target_os = "windows"))]

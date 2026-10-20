@@ -57,6 +57,19 @@
   let recentDocuments = [];
   /** @type {number | null} */
   let activeTab = null;
+  /** The public website (no desktop shell): one header row with the logo top-left; search and home move to the toolbar. */
+  let isWebsite = false;
+  /** On the website, the browser's Back button returns from a document to the home screen instead of leaving the page. */
+  let documentHistoryEntry = false;
+  $: if (isWebsite && typeof window !== 'undefined') {
+    if (activeTab !== null && !documentHistoryEntry) {
+      history.pushState({ docuflexDocument: true }, '');
+      documentHistoryEntry = true;
+    } else if (activeTab === null && documentHistoryEntry) {
+      documentHistoryEntry = false;
+      if (history.state?.docuflexDocument) history.back();
+    }
+  }
   let nextTabId = 1;
   let closingTabs = new Set();
   let sortExpanded = false;
@@ -861,6 +874,13 @@
   }
 
   onMount(() => {
+    isWebsite = !document.documentElement.dataset.docuflexDesktop;
+    const handleHistoryBack = () => {
+      if (!isWebsite || !documentHistoryEntry) return;
+      documentHistoryEntry = false;
+      activeTab = null;
+    };
+    window.addEventListener('popstate', handleHistoryBack);
     void restoreRecentDocuments();
     /** @param {PointerEvent} event */
     const closeHomepageMenus = (event) => {
@@ -883,6 +903,7 @@
       mcpStream?.close();
       mcpStream = null;
       clearInterval(mcpHeartbeat);
+      window.removeEventListener('popstate', handleHistoryBack);
       window.removeEventListener('pointerdown', closeHomepageMenus);
       window.removeEventListener('keydown', handleQuickToolShortcut);
       window.removeEventListener('docuflex:error', /** @type {EventListener} */ (handleNativeError));
@@ -905,11 +926,17 @@
   <link rel="icon" href="/logo.svg" type="image/svg+xml" />
 </svelte:head>
 
-<main bind:this={shellElement} class="editor-shell" class:editor-mode={activeTab !== null} class:document-entering={documentEntering} class:ai-docked={aiPanelOpen && aiStatus?.available}>
+<main bind:this={shellElement} class="editor-shell" class:website={isWebsite} class:editor-mode={activeTab !== null} class:document-entering={documentEntering} class:ai-docked={aiPanelOpen && aiStatus?.available}>
   <header class="topbar">
     <div class="window-head">
       <span class="window-head-texture" aria-hidden="true"></span>
-      <img class="sidebar-toggle" src="/redesign/sidebar-toggle.svg" alt="" />
+      {#if isWebsite}
+        <button class="web-logo" aria-label="Go to Home" title="Home" onclick={() => (activeTab = null)}>
+          <img src="/redesign/docuflex-logo1.svg" alt="Docuflex" />
+        </button>
+      {:else}
+        <img class="sidebar-toggle" src="/redesign/sidebar-toggle.svg" alt="" />
+      {/if}
       <nav class="history" aria-label="History navigation">
         <button class="history-button back" aria-label="Undo" title="Undo" onclick={() => pdfEditor?.undo()}>
           <img src="/redesign/vector543.svg" alt="" />
@@ -973,6 +1000,34 @@
           onclick={() => { hideUtilityTooltip(); mcpPanelOpen = !mcpPanelOpen; if (mcpPanelOpen) { settingsPanelOpen = false; aiPanelOpen = false; void refreshMcpStatus(); } }}
         >
           <img class="utility-icon-mcp" src="/redesign/icon-code-xml.svg" alt="" />
+        </button>
+      {/if}
+      {#if activeTab !== null && isWebsite}
+        {@const webSearchUtility = { label: 'Search', description: 'Find text in the current PDF.' }}
+        {@const webHomeUtility = { label: 'Home', description: 'Return to the document overview.' }}
+        <button
+          class="utility-button"
+          aria-label={webSearchUtility.label}
+          aria-describedby={utilityTooltip?.label === webSearchUtility.label ? 'utility-tooltip' : undefined}
+          onmouseenter={(event) => scheduleUtilityTooltip(webSearchUtility, event.currentTarget)}
+          onmouseleave={hideUtilityTooltip}
+          onfocus={(event) => scheduleUtilityTooltip(webSearchUtility, event.currentTarget)}
+          onblur={hideUtilityTooltip}
+          onclick={() => { hideUtilityTooltip(); pdfEditor?.openSearchPanel(); }}
+        >
+          <img class="utility-icon-search" src="/redesign/icon-search.svg" alt="" />
+        </button>
+        <button
+          class="utility-button"
+          aria-label={webHomeUtility.label}
+          aria-describedby={utilityTooltip?.label === webHomeUtility.label ? 'utility-tooltip' : undefined}
+          onmouseenter={(event) => scheduleUtilityTooltip(webHomeUtility, event.currentTarget)}
+          onmouseleave={hideUtilityTooltip}
+          onfocus={(event) => scheduleUtilityTooltip(webHomeUtility, event.currentTarget)}
+          onblur={hideUtilityTooltip}
+          onclick={() => { hideUtilityTooltip(); activeTab = null; }}
+        >
+          <img class="utility-icon-home" src="/redesign/vector537.svg" alt="" />
         </button>
       {/if}
       {#if activeTab !== null}
@@ -1061,6 +1116,7 @@
     </nav>
   </header>
 
+  {#if !isWebsite}
   <div class="sidebar-head">
     <button class="sidebar-logo" aria-label="Go to Home" title="Home" onclick={() => (activeTab = null)}>
       <img src="/redesign/docuflex-logo1.svg" alt="Docuflex" />
@@ -1094,6 +1150,7 @@
       </button>
     {/if}
   </div>
+  {/if}
 
   {#if utilityTooltip}
     <div
@@ -1365,8 +1422,8 @@
     grid-template-columns: 310px minmax(0, 1fr);
     padding-right: var(--ai-dock);
     grid-template-rows: 56px minmax(0, 1fr);
-    width: 117.6470588vw;
-    height: 117.6470588dvh;
+    width: calc(100vw / var(--ui-scale));
+    height: calc(100dvh / var(--ui-scale));
     min-width: 760px;
     overflow: clip;
     background: #f5f5f5;
@@ -2982,6 +3039,68 @@
     margin-top: 1px;
   }
 
+  /* macOS app: 95% of the base 0.85 scale. The shell's traffic-light position
+     (desktop/src-tauri/src/lib.rs) is derived from this value. */
+  :global(html[data-docuflex-desktop='macos']) .editor-shell {
+    --ui-scale: 0.8075;
+  }
+
+  /* Public website: 90% of the desktop scale, a wider sidebar, and one header row
+     (logo + history on the left, search and home in the toolbar on the right). */
+  .editor-shell.website {
+    --ui-scale: 0.765;
+    grid-template-columns: 340px minmax(0, 1fr);
+  }
+
+  .editor-shell.website .topbar {
+    grid-template-columns: 340px minmax(0, 1fr) auto;
+  }
+
+  .editor-shell.website .topbar-backdrop {
+    left: 340px;
+  }
+
+  .editor-shell.website .quick-tools {
+    padding-top: 18px;
+  }
+
+  .editor-shell.website :global(.thumbnail-list) {
+    padding-top: 34px;
+  }
+
+  .editor-shell.website .history-button.back {
+    left: 246px;
+  }
+
+  .editor-shell.website .history-button.forward {
+    left: 286px;
+  }
+
+  .web-logo {
+    position: absolute;
+    top: calc((100% - 40.6px) / 2 + 1px);
+    left: 20px;
+    display: block;
+    width: 184px;
+    height: 40.6px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .web-logo img {
+    display: block;
+    width: 184px;
+    height: 40.6px;
+  }
+
+  .utility-icon-search,
+  .utility-icon-home {
+    width: 22px;
+    height: 22px;
+  }
+
   /* dark theme: generated by scripts/generate-dark-theme.mjs — do not edit */
   :global(:root[data-theme="dark"] body) { color: rgba(255, 255, 255, 0.859); background: #131313; }
   :global(:root[data-theme="dark"]) .editor-shell { background: #131313; }
@@ -3078,6 +3197,7 @@
   :global(:root[data-theme="dark"]) .sidebar-logo { border: 0; background: transparent; }
   :global(:root[data-theme="dark"]) .sidebar-head-button { border: 1px solid rgba(255, 255, 255, 0.04); background: rgba(255, 255, 255, 0.065); }
   :global(:root[data-theme="dark"]) .sidebar-head-button:hover { border-color: rgba(255, 255, 255, 0.056); background: rgba(255, 255, 255, 0.104); }
+  :global(:root[data-theme="dark"]) .web-logo { border: 0; background: transparent; }
   /* dark theme: end generated */
 
   /* dark theme: manual */

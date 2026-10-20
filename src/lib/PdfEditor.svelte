@@ -13491,8 +13491,8 @@
     z-index: 2;
     top: 0;
     left: 0;
-    width: 117.6470588%;
-    height: 117.6470588%;
+    width: calc(100% / var(--ui-scale, 0.85));
+    height: calc(100% / var(--ui-scale, 0.85));
     overflow: hidden;
     background:
       linear-gradient(90deg, rgba(0, 0, 0, 0.045) 1px, transparent 1px) 58px 122px / 140px 140px,
