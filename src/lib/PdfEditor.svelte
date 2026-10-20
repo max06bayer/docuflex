@@ -15060,7 +15060,7 @@
       #0e0e0e; }
   :global(:root[data-theme="dark"]) .preparation-overlay { background: rgba(22, 22, 22, 0.96); }
   :global(:root[data-theme="dark"]) .preparation-dialog { border: 1px solid rgba(255, 255, 255, 0.096); background: rgba(22, 22, 22, 0.96); box-shadow: 0 10px 35px rgba(0, 0, 0, 0.24); }
-  :global(:root[data-theme="dark"]) .preparation-text { background: linear-gradient(90deg, rgba(255, 255, 255, 0.14) 0%, rgba(255, 255, 255, 0.14) 31.877%, rgba(255, 255, 255, 0.14) 72.516%); color: transparent; }
+  :global(:root[data-theme="dark"]) .preparation-text { background: linear-gradient(90deg, rgba(255, 255, 255, 0.14) 0%, rgba(255, 255, 255, 0.14) 31.877%, rgba(255, 255, 255, 0.14) 72.516%); color: transparent; -webkit-background-clip: text; background-clip: text; }
   :global(:root[data-theme="dark"]) .annotation-layer path { fill: none; }
   :global(:root[data-theme="dark"]) .search-highlight-layer rect { fill: #ffe43b; }
   :global(:root[data-theme="dark"]) .watermark-layer text { fill: rgba(255, 255, 255, 0.655); }
@@ -15177,6 +15177,19 @@
   /* dark theme: end generated */
 
   /* dark theme: manual */
+  /* Dark mode: the bottom fade reads as a heavy shadow over the black canvas, so it is
+     shorter and lighter (pages keep 75%), and the blur is a quarter as strong. */
+  :global(:root[data-theme="dark"]) .pdf-viewer,
+  :global(:root[data-theme="dark"]) .html-editor-layer {
+    -webkit-mask-image: linear-gradient(to bottom, #000 88%, rgba(0, 0, 0, 0.75) 100%);
+    mask-image: linear-gradient(to bottom, #000 88%, rgba(0, 0, 0, 0.75) 100%);
+  }
+  :global(:root[data-theme="dark"]) .bottom-fade { height: 8%; }
+  :global(:root[data-theme="dark"]) .bottom-fade span:nth-child(1),
+  :global(:root[data-theme="dark"]) .bottom-fade span:nth-child(2) { -webkit-backdrop-filter: none; backdrop-filter: none; }
+  :global(:root[data-theme="dark"]) .bottom-fade span:nth-child(3) { -webkit-backdrop-filter: blur(0.5px); backdrop-filter: blur(0.5px); }
+  :global(:root[data-theme="dark"]) .bottom-fade span:nth-child(4) { -webkit-backdrop-filter: blur(1px); backdrop-filter: blur(1px); }
+  :global(:root[data-theme="dark"]) .bottom-fade span:nth-child(5) { -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px); }
   /* The canvas grid sits a touch lighter than the shell (about 5%) so pages float above it. */
   :global(:root[data-theme="dark"]) .pdf-workspace { background-color: #1a1a1a; }
   /* Comment pins keep their light-mode white icon; the primary comment button brightens on hover. */

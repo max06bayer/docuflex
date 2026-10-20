@@ -2202,7 +2202,7 @@
   :global(:root[data-theme="dark"]) .ai-user-images img { border: 1px solid var(--ai-line); }
   :global(:root[data-theme="dark"]) .ai-work-line { border: 0; background: none; color: var(--ai-muted); }
   :global(:root[data-theme="dark"]) .ai-work-line:hover { color: rgba(255, 255, 255, 0.8); }
-  :global(:root[data-theme="dark"]) .ai-work-line.live .ai-work-label { background: linear-gradient(90deg, rgba(255, 255, 255, 0.2) 0%, rgba(255, 255, 255, 0.2) 50%, rgba(255, 255, 255, 0.2) 100%) 0 0 / 200% 100%; color: transparent; }
+  :global(:root[data-theme="dark"]) .ai-work-line.live .ai-work-label { background: linear-gradient(90deg, rgba(255, 255, 255, 0.2) 0%, rgba(255, 255, 255, 0.2) 50%, rgba(255, 255, 255, 0.2) 100%) 0 0 / 200% 100%; color: transparent; -webkit-background-clip: text; background-clip: text; }
   :global(:root[data-theme="dark"]) .ai-work-log { border: 1px solid var(--ai-line); }
   :global(:root[data-theme="dark"]) .ai-markdown { color: var(--ai-text); }
   :global(:root[data-theme="dark"]) .ai-markdown :global(.table-wrap) { border: 1px solid var(--ai-line); background: rgba(255, 255, 255, 0.05); }
