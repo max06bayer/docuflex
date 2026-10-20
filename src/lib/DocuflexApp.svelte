@@ -3121,11 +3121,11 @@
 
   .web-logo {
     position: absolute;
-    top: calc((100% - 40.6px) / 2 + 1px);
+    top: calc((100% - 42.63px) / 2 + 1px);
     left: 20px;
     display: block;
-    width: 184px;
-    height: 40.6px;
+    width: 193.2px;
+    height: 42.63px;
     padding: 0;
     border: 0;
     background: transparent;
@@ -3134,8 +3134,8 @@
 
   .web-logo img {
     display: block;
-    width: 184px;
-    height: 40.6px;
+    width: 193.2px;
+    height: 42.63px;
   }
 
   .utility-icon-search,
