@@ -5165,7 +5165,14 @@ public class DocuflexPdfServer {
         case '\n' -> escaped.append("\\n");
         case '\r' -> escaped.append("\\r");
         case '\t' -> escaped.append("\\t");
-        default -> escaped.append(ch);
+        default -> {
+          // JSON forbids raw control characters; PDF text often contains them.
+          if (ch < 0x20 || ch == '\u2028' || ch == '\u2029') {
+            escaped.append(String.format("\\u%04x", (int) ch));
+          } else {
+            escaped.append(ch);
+          }
+        }
       }
     }
     return escaped.toString();

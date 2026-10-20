@@ -16,7 +16,7 @@ export async function POST({ request, url }) {
   let upstream;
   try {
     const subagent = body.subagent && Number.isInteger(body.subagent.page) ? { page: body.subagent.page, region: body.subagent.region ?? null } : null;
-    upstream = await streamCompletion(body.messages, body.context, request.signal, subagent);
+    upstream = await streamCompletion(body.messages, body.context, request.signal, subagent, typeof body.model === 'string' ? body.model : undefined);
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : 'Could not reach the AI service.' }, { status: 502 });
   }

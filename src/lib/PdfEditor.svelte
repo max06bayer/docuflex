@@ -5,10 +5,12 @@
   import { fade, fly, scale } from 'svelte/transition';
   import EditorToolbar from '$lib/EditorToolbar.svelte';
   import HtmlPdfEditor from '$lib/HtmlPdfEditor.svelte';
+  import TranslateFilesPanel from '$lib/TranslateFilesPanel.svelte';
+  import { showAppError, translatePdf } from '$lib/translate.js';
   import { renderLatex } from '$lib/math-render.js';
 
   /** @typedef {{ x: number; y: number; pressure: number }} StrokePoint */
-  /** @typedef {{ id: number; type: 'marker' | 'pen'; points: StrokePoint[]; rawPoints?: StrokePoint[]; color?: string; thickness?: number; opacity?: number; falloff?: number; smoothing?: number }} AnnotationStroke */
+  /** @typedef {{ id: number; group?: number; type: 'marker' | 'pen'; points: StrokePoint[]; rawPoints?: StrokePoint[]; color?: string; thickness?: number; opacity?: number; falloff?: number; smoothing?: number }} AnnotationStroke */
   /** @typedef {{ start: number; end: number; color?: string; fontFamily?: string; fontSize?: number; fontWeight?: number; letterSpacing?: number; textAlign?: 'left' | 'center' | 'right'; italic?: boolean; underline?: boolean; strikethrough?: boolean }} TextStyleRange */
   /** @typedef {{ id: number; type: 'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'measure' | 'crop' | 'textfield' | 'signature' | 'image' | 'checkbox' | 'input'; x: number; y: number; width: number; height: number; rotation: number; text?: string; textColor?: string; fontFamily?: string; fontSize?: number; fontWeight?: number; letterSpacing?: number; lineHeight?: number; textAlign?: 'left' | 'center' | 'right'; verticalAlign?: 'top' | 'middle' | 'bottom'; italic?: boolean; underline?: boolean; strikethrough?: boolean; textStyleRanges?: TextStyleRange[]; imageData?: string; latex?: string; latexFontSize?: number; latexColor?: string; latexDisplay?: boolean; fieldName?: string; fieldValue?: string | boolean; existingField?: boolean; originalFieldValue?: string | boolean; originalFrame?: { x: number; y: number; width: number; height: number }; readOnly?: boolean; opacity?: number; cornerRadius?: number; fillPresent?: boolean; fillEnabled?: boolean; fillColor?: string; fillAlpha?: number; strokePresent?: boolean; strokeEnabled?: boolean; strokeColor?: string; strokeAlpha?: number; strokeWidth?: number; shadowPresent?: boolean; shadowEnabled?: boolean; shadowOpacity?: number; shadowBlur?: number; shadowX?: number; shadowY?: number; backgroundBlurPresent?: boolean; backgroundBlurEnabled?: boolean; backgroundBlur?: number }} AnnotationShape */
   /** @typedef {{ id: number; type: 'highlight' | 'underline' | 'crossout' | 'blackout' | 'whiteout'; rects: { x: number; y: number; width: number; height: number; color?: [number, number, number]; thickness?: number }[] }} TextHighlight */
@@ -97,6 +99,10 @@
   let penThickness = 2.05;
   let penOpacity = 0.94;
   let penSmoothing = 55;
+  /** Eraser diameter in page points. */
+  let eraserSize = 34;
+  /** Quick erase removes every stroke drawn in the same pointer-down as the one it touches. */
+  let eraserQuickErase = false;
   /** @type {any} */
   let htmlEditor;
   let htmlEditorStarted = false;
@@ -127,6 +133,7 @@
   /** @type {number | undefined} */
   let searchUpdateFrame;
   let watermarkPanelOpen = false;
+  let translatePanelOpen = false;
   let watermarkText = '';
   let appliedWatermarkText = '';
   /** @type {HTMLInputElement | undefined} */
@@ -159,10 +166,10 @@
   /** @type {{ pageIndex: number; point: StrokePoint } | null} */
   let lastEraserPoint = null;
   let nextAnnotationId = 1;
-  let eraserCursorVisible = false;
-  let eraserCursorX = 0;
-  let eraserCursorY = 0;
-  let eraserCursorSize = 34;
+  let brushCursorVisible = false;
+  let brushCursorX = 0;
+  let brushCursorY = 0;
+  let brushCursorSize = 34;
   /** @type {{ pageIndex: number; id: number } | null} */
   let selectedShape = null;
   /** @type {Set<number>} */
@@ -330,7 +337,8 @@
   const MAX_ZOOM = 4;
   const CLICK_ZOOM_FACTOR = 1.25;
   const MAX_CANVAS_PIXELS = 24_000_000;
-  const ERASER_RADIUS = 17;
+  /** Tools that show a circle the size of their tip instead of the system cursor. */
+  const BRUSH_TOOLS = new Set(['marker', 'pen', 'eraser']);
   const SHAPE_TOOLS = new Set(['triangle', 'rectangle', 'circle', 'check', 'cross', 'arrow', 'line', 'measure', 'crop', 'textfield', 'checkbox', 'input']);
   const LINE_SHAPE_TOOLS = new Set(['arrow', 'line', 'measure']);
   const HTML_VIEW_TOOLS = new Set(['edit', 'pan', 'zoom']);
@@ -349,7 +357,7 @@
     scheduleRasterPreview();
   }
 
-  $: if (activeTool !== 'eraser') eraserCursorVisible = false;
+  $: if (!BRUSH_TOOLS.has(activeTool)) brushCursorVisible = false;
   $: if (!active) {
     pageContextMenu = null;
     shapeContextMenu = null;
@@ -601,6 +609,8 @@
     else if (previousTool === 'search') resetSearchPanel();
     if (nextTool === 'watermark') showWatermarkPanel();
     else if (previousTool === 'watermark') watermarkPanelOpen = false;
+    if (nextTool === 'translate') translatePanelOpen = true;
+    else if (previousTool === 'translate') translatePanelOpen = false;
     if (nextTool === 'protect') protectPanelOpen = true;
     else if (previousTool === 'protect') protectPanelOpen = false;
     if (nextTool === 'sign') {
@@ -1608,6 +1618,39 @@
       editorTransition = '';
       if (activeTool === 'ocr') activeTool = 'select';
     }
+  }
+
+  /** Replaces the document with a translated copy, the way OCR replaces it with a searchable one. @param {string} source @param {string} target */
+  async function translateDocument(source, target) {
+    translatePanelOpen = false;
+    editorTransition = 'Translating Document';
+    try {
+      const sourceBytes = workingPdfBytes?.slice(0) ?? await readWorkingPdf();
+      const translated = await translatePdf(new Blob([sourceBytes], { type: 'application/pdf' }), source, target);
+      workingFile = new File([translated.blob], workingFile.name, {
+        type: 'application/pdf',
+        lastModified: Date.now()
+      });
+      htmlEditorStarted = false;
+      htmlTextEditBaseFile = null;
+      htmlEditorReady = false;
+      htmlViewportMode = false;
+      await loadPdf(false);
+      if (translated.missed) {
+        showAppError('Partly translated', 'Some text could not be replaced and stays in the original language.');
+      }
+    } catch (error) {
+      console.error(error);
+      showAppError('Could not translate this PDF', error);
+    } finally {
+      editorTransition = '';
+      if (activeTool === 'translate') activeTool = 'select';
+    }
+  }
+
+  function closeTranslatePanel() {
+    translatePanelOpen = false;
+    if (activeTool === 'translate') activeTool = 'select';
   }
 
   function handleHtmlEditorReady() {
@@ -3962,8 +4005,52 @@
         text,
         textStyleRanges: remapTextStyleRanges(shape.text ?? '', text, shape.textStyleRanges ?? [])
       });
+      if (WHOLE_FIELD_LATEX.test(text)) void convertTextFieldToMath(pageIndex, id);
     }
     editingTextShape = null;
+  }
+
+  /** A text field holding only $$…$$, \[…\], \(…\) or $…$ becomes a typeset formula. */
+  const WHOLE_FIELD_LATEX = /^\s*(?:\$\$([\s\S]+)\$\$|\\\[([\s\S]+)\\\]|\\\(([\s\S]+)\\\)|\$([^$]+)\$)\s*$/;
+
+  /** @param {number} pageIndex @param {number} id */
+  async function convertTextFieldToMath(pageIndex, id) {
+    const shape = findShape(pageIndex, id);
+    const match = shape?.text?.match(WHOLE_FIELD_LATEX);
+    if (!shape || !match) return;
+    const display = match[1] !== undefined || match[2] !== undefined;
+    const latex = String(match[1] ?? match[2] ?? match[3] ?? match[4]).trim();
+    try {
+      const math = await mcpMathShape(shape, latex, {
+        fontSize: toPt(shape.fontSize ?? 16),
+        color: shape.textColor ?? '#171717',
+        display
+      });
+      // Skip if the field changed while the formula rendered.
+      if (findShape(pageIndex, id)?.text !== shape.text) return;
+      const { text: _text, textStyleRanges: _ranges, ...style } = shape;
+      replaceShape(pageIndex, { ...style, ...math });
+    } catch (error) {
+      showAppError('Could not typeset this formula', error);
+    }
+  }
+
+  /** Turns a formula back into an editable text field holding its LaTeX. @param {number} pageIndex @param {AnnotationShape} shape */
+  function editFormulaSource(pageIndex, shape) {
+    const { imageData: _image, latex, latexFontSize, latexColor, latexDisplay, ...rest } = shape;
+    const fontSize = toPx(latexFontSize ?? 14);
+    const source = latexDisplay === false ? `$${latex}$` : `$$${latex}$$`;
+    replaceShape(pageIndex, {
+      ...rest,
+      type: 'textfield',
+      text: source,
+      textStyleRanges: [],
+      fontSize,
+      textColor: latexColor ?? rest.textColor ?? '#171717',
+      width: Math.max(shape.width, fontSize * 0.62 * source.length + 24),
+      height: Math.max(shape.height, fontSize * 1.6)
+    });
+    openTextEditor(pageIndex, shape.id);
   }
 
   /** @param {Event} event @param {number} pageIndex @param {number} id */
@@ -4695,7 +4782,7 @@
   }
 
   function handleViewerPointerLeave() {
-    hideEraserCursor();
+    hideBrushCursor();
     hoveredShape = null;
   }
 
@@ -5535,36 +5622,61 @@
     };
   }
 
+  /** @param {AnnotationStroke} stroke @param {StrokePoint} point @param {number} radius */
+  function strokeTouches(stroke, point, radius) {
+    const reach = radius + (stroke.thickness ?? (stroke.type === 'marker' ? 16 : 2.05)) / 2;
+    const points = stroke.points;
+    if (points.length === 1) return Math.hypot(points[0].x - point.x, points[0].y - point.y) <= reach;
+    for (let index = 1; index < points.length; index += 1) {
+      const start = points[index - 1];
+      const end = points[index];
+      const dx = end.x - start.x;
+      const dy = end.y - start.y;
+      const lengthSquared = dx * dx + dy * dy;
+      const t = lengthSquared ? clamp(((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared, 0, 1) : 0;
+      if (Math.hypot(start.x + dx * t - point.x, start.y + dy * t - point.y) <= reach) return true;
+    }
+    return false;
+  }
+
   /** @param {number} pageIndex @param {StrokePoint} point */
   function eraseAt(pageIndex, point) {
     const strokes = annotations[pageIndex] ?? [];
+    const radius = eraserSize / 2;
+    if (eraserQuickErase) {
+      // Pieces left over from partial erasing keep their group, so the whole original stroke goes.
+      const groups = new Set(strokes.filter((stroke) => strokeTouches(stroke, point, radius)).map((stroke) => stroke.group ?? stroke.id));
+      if (groups.size) annotations = { ...annotations, [pageIndex]: strokes.filter((stroke) => !groups.has(stroke.group ?? stroke.id)) };
+      return;
+    }
     /** @type {AnnotationStroke[]} */
     const fragments = [];
     for (const stroke of strokes) {
+      const group = stroke.group ?? stroke.id;
       /** @type {StrokePoint[]} */
       let run = [];
       for (const strokePoint of stroke.points) {
-        if (Math.hypot(strokePoint.x - point.x, strokePoint.y - point.y) <= ERASER_RADIUS) {
-          if (run.length) fragments.push({ ...stroke, id: nextAnnotationId++, points: run });
+        if (Math.hypot(strokePoint.x - point.x, strokePoint.y - point.y) <= radius) {
+          if (run.length) fragments.push({ ...stroke, id: nextAnnotationId++, group, points: run });
           run = [];
         } else {
           run.push(strokePoint);
         }
       }
-      if (run.length) fragments.push({ ...stroke, id: nextAnnotationId++, points: run });
+      if (run.length) fragments.push({ ...stroke, id: nextAnnotationId++, group, points: run });
     }
     annotations = { ...annotations, [pageIndex]: fragments };
   }
 
   /** @param {PointerEvent} event */
-  function updateEraserCursor(event) {
-    if (activeTool !== 'eraser') {
-      eraserCursorVisible = false;
+  function updateBrushCursor(event) {
+    if (!BRUSH_TOOLS.has(activeTool)) {
+      brushCursorVisible = false;
       return;
     }
     const pageHit = pageAtPoint(event.clientX, event.clientY);
     if (!pageHit || !workspace) {
-      eraserCursorVisible = false;
+      brushCursorVisible = false;
       return;
     }
     const workspaceRect = workspace.getBoundingClientRect();
@@ -5573,11 +5685,15 @@
     const pageRect = pageHit.shell.getBoundingClientRect();
     const pageWidth = Number.parseFloat(pageHit.shell.style.width) || pageHit.shell.offsetWidth;
     const pageScale = pageRect.width / pageWidth;
-    eraserCursorX = (event.clientX - workspaceRect.left) / workspaceScaleX;
-    eraserCursorY = (event.clientY - workspaceRect.top) / workspaceScaleY;
-    eraserCursorSize = (ERASER_RADIUS * 2 * pageScale) / workspaceScaleX;
-    eraserCursorVisible = true;
+    brushCursorX = (event.clientX - workspaceRect.left) / workspaceScaleX;
+    brushCursorY = (event.clientY - workspaceRect.top) / workspaceScaleY;
+    const diameter = activeTool === 'eraser' ? eraserSize : activeTool === 'marker' ? markerThickness : penThickness;
+    brushCursorSize = Math.max(5, (diameter * pageScale) / workspaceScaleX);
+    brushCursorVisible = true;
   }
+
+  /** @type {{ id: number; at: number } | null} */
+  let lastShapePointerDown = null;
 
   /** @param {PointerEvent} event */
   function handleViewerPointerDown(event) {
@@ -5593,6 +5709,18 @@
       const pages = [...viewer.querySelectorAll('.pdf-page')];
       const shell = pages[shapeHit.pageIndex];
       if (!shape || !(shell instanceof HTMLElement)) return;
+      // pointerdown.detail counts clicks in WebKit only, so also time the clicks.
+      const now = performance.now();
+      const repeatedClick = event.detail >= 2 || (lastShapePointerDown?.id === shape.id && now - lastShapePointerDown.at < 450);
+      lastShapePointerDown = { id: shape.id, at: now };
+      if (repeatedClick && shape.latex && !event.shiftKey && shapeHit.element.dataset.shapeHandle === undefined && shapeHit.element.dataset.shapeRotate === undefined) {
+        lastShapePointerDown = null;
+        event.preventDefault();
+        event.stopPropagation();
+        const pageIndex = shapeHit.pageIndex;
+        setTimeout(() => editFormulaSource(pageIndex, shape), 0);
+        return;
+      }
       if (
         event.detail >= 2 &&
         shape.type === 'textfield' &&
@@ -5741,8 +5869,10 @@
       event.preventDefault();
       window.getSelection()?.removeAllRanges();
       const firstPoint = pointOnPage(event, pageHit.shell);
+      const strokeId = nextAnnotationId++;
       const stroke = {
-        id: nextAnnotationId++,
+        id: strokeId,
+        group: strokeId,
         type: /** @type {'marker' | 'pen'} */ (activeTool),
         points: [firstPoint],
         rawPoints: [firstPoint],
@@ -5794,7 +5924,7 @@
 
   /** @param {PointerEvent} event */
   function handleViewerPointerMove(event) {
-    updateEraserCursor(event);
+    updateBrushCursor(event);
     updateHoveredShape(event);
     updateShapeMarquee(event);
     if (viewer && pendingFormDrag && event.pointerId === pendingFormDrag.pointerId) {
@@ -5864,7 +5994,7 @@
           const samples = appendInterpolatedPoint(
             [lastEraserPoint.point],
             point,
-            ERASER_RADIUS / 2
+            eraserSize / 4
           );
           for (const sample of samples.slice(1)) eraseAt(pageHit.pageIndex, sample);
         } else {
@@ -5955,7 +6085,7 @@
     if (erasingPointerId === event.pointerId) {
       erasingPointerId = null;
       lastEraserPoint = null;
-      eraserCursorVisible = false;
+      brushCursorVisible = false;
     }
     if (panStart && event.pointerId === panStart.pointerId) {
       panStart = null;
@@ -5964,8 +6094,8 @@
     if (viewer.hasPointerCapture(event.pointerId)) viewer.releasePointerCapture(event.pointerId);
   }
 
-  function hideEraserCursor() {
-    if (erasingPointerId === null) eraserCursorVisible = false;
+  function hideBrushCursor() {
+    if (erasingPointerId === null) brushCursorVisible = false;
   }
 
   function handleViewerScroll() {
@@ -7386,7 +7516,7 @@
   /** @param {string} message */
   function reportEditorError(message) {
     if (mcpErrors) mcpErrors.push(message);
-    else window.alert(message);
+    else showAppError('Something went wrong', message);
   }
 
   /** @param {number} value */
@@ -8938,6 +9068,8 @@
     class:shape-mode={SHAPE_TOOLS.has(activeTool)}
     class:highlight-mode={TEXT_MARK_TOOLS.has(activeTool)}
     class:eraser-mode={activeTool === 'eraser'}
+    class:select-mode={activeTool === 'select'}
+    class:brush-active={brushCursorVisible}
     class="pdf-viewer"
     role="region"
     aria-label="Document pages"
@@ -9784,13 +9916,13 @@
     </div>
     </div>
   </div>
-  {#if eraserCursorVisible}
+  {#if brushCursorVisible}
     <div
-      class="eraser-cursor"
-      style:left={`${eraserCursorX}px`}
-      style:top={`${eraserCursorY}px`}
-      style:width={`${eraserCursorSize}px`}
-      style:height={`${eraserCursorSize}px`}
+      class="brush-cursor"
+      style:left={`${brushCursorX}px`}
+      style:top={`${brushCursorY}px`}
+      style:width={`${brushCursorSize}px`}
+      style:height={`${brushCursorSize}px`}
       aria-hidden="true"
     ></div>
   {/if}
@@ -9901,6 +10033,21 @@
         <div class="picker-slider alpha-slider" style:--picker-color={pickerHex} role="slider" aria-label="Color opacity" aria-valuenow={Math.round(colorPicker.alpha * 100)} tabindex="0" onpointerdown={(event) => updateColorControl(event, 'alpha')} onpointermove={(event) => { if (event.buttons) updateColorControl(event, 'alpha'); }}><span style:left={`${colorPicker.alpha * 100}%`} style:--thumb-color={colorWithAlpha(pickerHex, colorPicker.alpha)}></span></div>
       </div>
     {/if}
+  {/if}
+  {#if activeTool === 'eraser'}
+    <div class="protect-panel selection-properties-panel drawing-properties-panel" role="dialog" aria-label="Eraser properties" transition:fly={{ x: 18, duration: 240, easing: cubicOut }}>
+      <header class="protect-panel-header">
+        <img src="/toolbar/small/eraser.svg" alt="" />
+        <h2>Eraser</h2>
+        <button class="protect-panel-close" type="button" aria-label="Close eraser properties" onclick={() => activeTool = 'select'}><span></span><span></span></button>
+      </header>
+      <div class="selection-properties-scroll">
+        <section class="selection-property-section drawing-property-section" aria-label="Eraser">
+          <label class="inspector-field inspector-field-wide"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => eraserSize = value, { min: 4, max: 200 })}>Size</span><input class="scrubbable-number" type="number" min="4" max="200" step="1" value={eraserSize} onpointerdown={(event) => startNumberScrub(event, (value) => eraserSize = value, { min: 4, max: 200 })} oninput={(event) => eraserSize = clamp(Number(event.currentTarget.value), 4, 200)} /></label>
+          <button class:active={eraserQuickErase} class="drawing-toggle" type="button" title="Erase every stroke drawn together with the one you touch" onclick={() => eraserQuickErase = !eraserQuickErase}><span>Quick Erase</span><em>{eraserQuickErase ? 'On' : 'Off'}</em></button>
+        </section>
+      </div>
+    </div>
   {/if}
   {#if ['highlight', 'underline', 'crossout'].includes(activeTool)}
     {@const textMarkPanelType = /** @type {'highlight' | 'underline' | 'crossout'} */ (activeTool)}
@@ -10172,6 +10319,9 @@
       </div>
     </div>
   {/if}
+  {#if translatePanelOpen && active}
+    <TranslateFilesPanel placement="editor" onClose={closeTranslatePanel} onTranslate={translateDocument} />
+  {/if}
   {#if watermarkPanelOpen}
     <div
       class="protect-panel watermark-panel"
@@ -10396,41 +10546,34 @@
     {@const neutral = RASTER_DEFAULTS[key]}
     {@const position = (value - min) / (max - min)}
     {@const origin = (neutral - min) / (max - min)}
-    <div class="raster-slider" class:changed={value !== neutral}>
-      <div class="raster-slider-label">
-        <span>{label}</span>
-        <button
-          type="button"
-          aria-label={`Reset ${label}`}
-          title="Reset"
-          disabled={value === neutral}
-          onclick={() => resetRasterValue(key)}
-        >{display ?? `${value > 0 && min < 0 ? '+' : ''}${value}`}</button>
-      </div>
-      <div
-        class={`raster-track ${track}`}
-        style:--raster-position={`${position * 100}%`}
-        style:--raster-fill-start={`${Math.min(position, origin) * 100}%`}
-        style:--raster-fill-end={`${(1 - Math.max(position, origin)) * 100}%`}
-        style:--raster-hue={`hsl(${(value + 360) % 360} 92% 55%)`}
-        style:--raster-temp={value >= 0 ? `color-mix(in srgb, #ff9a3c ${value}%, #ffffff)` : `color-mix(in srgb, #4a8dff ${-value}%, #ffffff)`}
-        style:--raster-exposure={`hsl(0 0% ${50 + value * 0.5}%)`}
-      >
-        <span class="raster-track-fill" aria-hidden="true"></span>
-        {#if min < 0}<span class="raster-track-origin" aria-hidden="true"></span>{/if}
-        <input
-          type="range"
-          aria-label={label}
-          {min}
-          {max}
-          {step}
-          {value}
-          disabled={rasterizing}
-          ondblclick={() => resetRasterValue(key)}
-          oninput={(event) => setRasterValue(key, Number(event.currentTarget.value))}
-        />
-      </div>
-    </div>
+    <!-- The whole 48px field is the slider: drag anywhere, double-click to reset. -->
+    <label
+      class={`raster-slider ${track}`}
+      class:changed={value !== neutral}
+      style:--raster-position={`${position * 100}%`}
+      style:--raster-fill-start={`${Math.min(position, origin) * 100}%`}
+      style:--raster-fill-end={`${(1 - Math.max(position, origin)) * 100}%`}
+      style:--raster-hue={`hsl(${(value + 360) % 360} 92% 55% / 0.28)`}
+      style:--raster-temp={value >= 0 ? 'rgba(255, 154, 60, 0.28)' : 'rgba(61, 134, 255, 0.24)'}
+    >
+      <span class="raster-fill" aria-hidden="true"></span>
+      {#if min < 0}<span class="raster-origin" aria-hidden="true"></span>{/if}
+      <span class="raster-handle" aria-hidden="true"></span>
+      <span class="raster-label">{label}</span>
+      <input
+        type="range"
+        aria-label={label}
+        aria-valuetext={display ?? `${value > 0 && min < 0 ? '+' : ''}${value}`}
+        title="Double-click to reset"
+        {min}
+        {max}
+        {step}
+        {value}
+        disabled={rasterizing}
+        ondblclick={() => resetRasterValue(key)}
+        oninput={(event) => setRasterValue(key, Number(event.currentTarget.value))}
+      />
+    </label>
   {/snippet}
   {#if rasterPanelOpen}
     {@const sharpKernel = rasterPipeline.sharpen}
@@ -10477,14 +10620,6 @@
       </header>
       <div class="raster-panel-content">
         <div class="raster-scroll">
-          <p class="raster-scope">
-            {#if selectedPages.size}
-              Applies to <strong>{selectedPages.size} selected {selectedPages.size === 1 ? 'page' : 'pages'}</strong>.
-            {:else}
-              Applies to <strong>all {pageCount} {pageCount === 1 ? 'page' : 'pages'}</strong>. Select pages in the sidebar to limit it.
-            {/if}
-          </p>
-
           <section class="raster-section" aria-label="Rotation">
             {@render rasterSlider('rotation', 'Rotation', -45, 45, 0.5, 'rotation-track', `${rasterAdjust.rotation > 0 ? '+' : ''}${rasterAdjust.rotation}°`)}
             <button
@@ -12631,7 +12766,6 @@
     grid-template-rows: minmax(0, 1fr) auto;
     min-height: 0;
     overflow: hidden;
-    background: #fafafa;
   }
 
   .raster-scroll {
@@ -12646,162 +12780,91 @@
     display: none;
   }
 
-  .raster-scope {
-    margin: 0;
-    padding: 14px 18px 13px;
-    border-bottom: 1px solid #dedede;
-    color: #7a7a7a;
-    font-size: 16px;
-    line-height: 1.38;
-    letter-spacing: -0.2px;
-  }
-
-  .raster-scope strong {
-    color: #000;
-    font-weight: 400;
-  }
-
   .raster-section {
     display: grid;
-    gap: 14px;
-    padding: 15px 18px 16px;
-    border-bottom: 1px solid #dedede;
+    gap: 10px;
+    padding: 15px 11px 15px 12px;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.1);
   }
 
   .raster-section:last-child {
     border-bottom: 0;
   }
 
+  /* Sliders are the panels' white 48px field; the fill runs from the neutral value to the current one. */
   .raster-slider {
-    display: grid;
-    gap: 8px;
-  }
-
-  .raster-slider-label {
+    position: relative;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    height: 22px;
-    color: #000;
-    font-size: 18px;
-    line-height: 1;
-    letter-spacing: -0.25px;
-  }
-
-  .raster-slider-label button {
-    min-width: 46px;
-    height: 24px;
-    padding: 0 7px;
-    border: 1px solid transparent;
-    border-radius: 7px;
-    background: transparent;
-    color: #7a7a7a;
-    font: inherit;
-    font-size: 16px;
-    font-variant-numeric: tabular-nums;
-    text-align: right;
-    cursor: pointer;
-    transition: color 160ms ease, background-color 160ms ease, border-color 160ms ease;
-  }
-
-  .raster-slider.changed .raster-slider-label button {
-    color: #0878f9;
-  }
-
-  .raster-slider-label button:not(:disabled):hover {
-    border-color: #d7d7d7;
-    background: #f3f3f3;
-  }
-
-  .raster-slider-label button:disabled {
-    cursor: default;
-  }
-
-  .raster-track {
-    position: relative;
     box-sizing: border-box;
-    height: 18px;
-    border-radius: 999px;
-    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
-    background: #f3f3f3;
+    height: 48px;
+    padding: 0 13px;
+    overflow: hidden;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 15px;
+    background: #fff;
+    color: rgba(0, 0, 0, 0.5);
+    font-size: 21px;
+    letter-spacing: -0.21px;
+    transition: border-color 160ms ease;
   }
 
-  .raster-track-fill {
+  .raster-slider:hover {
+    border-color: rgba(0, 0, 0, 0.16);
+  }
+
+  .raster-slider.changed {
+    color: rgba(0, 0, 0, 0.75);
+  }
+
+  .raster-label {
+    position: relative;
+    pointer-events: none;
+  }
+
+  .raster-fill {
     position: absolute;
-    top: 50%;
+    top: 0;
+    bottom: 0;
     left: var(--raster-fill-start);
     right: var(--raster-fill-end);
-    height: 4px;
-    border-radius: 999px;
-    background: rgba(0, 0, 0, 0.42);
-    transform: translateY(-50%);
+    background: var(--raster-tint, rgba(0, 0, 0, 0.06));
     pointer-events: none;
   }
 
-  .raster-track-origin {
+  .hue-track { --raster-tint: var(--raster-hue); }
+  .temperature-track { --raster-tint: var(--raster-temp); }
+
+  .raster-origin {
     position: absolute;
-    top: 3px;
-    bottom: 3px;
+    top: 16px;
+    bottom: 16px;
     left: 50%;
-    width: 1.5px;
-    border-radius: 999px;
-    background: rgba(0, 0, 0, 0.32);
-    transform: translateX(-50%);
+    width: 1px;
+    background: rgba(0, 0, 0, 0.08);
     pointer-events: none;
   }
 
-  /* Each track previews its own effect from left to right. */
-  .rotation-track {
-    background:
-      repeating-linear-gradient(90deg, transparent 0 calc(10% - 1px), rgba(0, 0, 0, 0.13) calc(10% - 1px) 10%) 9px 50% / calc(100% - 18px) 8px no-repeat,
-      #f3f3f3;
+  .raster-handle {
+    position: absolute;
+    top: 12px;
+    bottom: 12px;
+    left: var(--raster-position);
+    width: 2px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.75);
+    transform: translateX(-50%);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 160ms ease;
   }
 
-  .exposure-track {
-    background: linear-gradient(90deg, #1b1b1b, #8c8c8c 50%, #ffffff);
+  .raster-slider:hover .raster-handle,
+  .raster-slider:focus-within .raster-handle {
+    opacity: 1;
   }
 
-  .contrast-track {
-    background:
-      linear-gradient(90deg, #a3a3a3, rgba(163, 163, 163, 0)),
-      linear-gradient(180deg, #ffffff 50%, #111111 50%);
-  }
-
-  .saturation-track {
-    background:
-      linear-gradient(90deg, #9b9b9b, rgba(155, 155, 155, 0)),
-      linear-gradient(90deg, #ff3b30, #ff9500, #ffcc00, #34c759, #0a84ff, #af52de);
-  }
-
-  .hue-track {
-    background: linear-gradient(90deg, #0ff, #00f, #f0f, #f00, #ff0, #0f0, #0ff);
-  }
-
-  .temperature-track {
-    background: linear-gradient(90deg, #3d86ff, #f4f4f4 50%, #ff9a3c);
-  }
-
-  .sharpness-track {
-    background:
-      linear-gradient(90deg, rgba(243, 243, 243, 0.94), rgba(243, 243, 243, 0) 85%),
-      repeating-linear-gradient(90deg, #1a1a1a 0 2px, #f3f3f3 2px 5px);
-  }
-
-  .exposure-track .raster-track-fill,
-  .contrast-track .raster-track-fill,
-  .saturation-track .raster-track-fill,
-  .hue-track .raster-track-fill,
-  .temperature-track .raster-track-fill,
-  .sharpness-track .raster-track-fill,
-  .exposure-track .raster-track-origin,
-  .contrast-track .raster-track-origin,
-  .saturation-track .raster-track-origin,
-  .hue-track .raster-track-origin,
-  .temperature-track .raster-track-origin {
-    display: none;
-  }
-
-  .raster-track input {
+  .raster-slider input {
     position: absolute;
     inset: 0;
     width: 100%;
@@ -12809,60 +12872,29 @@
     margin: 0;
     background: transparent;
     cursor: ew-resize;
+    opacity: 0;
     -webkit-appearance: none;
     appearance: none;
     touch-action: none;
   }
 
-  .raster-track input:focus-visible {
-    outline: none;
-  }
-
-  .raster-track input::-webkit-slider-runnable-track {
-    height: 18px;
-    background: transparent;
-  }
-
-  .raster-track input::-moz-range-track {
-    height: 18px;
-    background: transparent;
-  }
-
-  .raster-track input::-webkit-slider-thumb {
-    box-sizing: border-box;
-    width: 20px;
-    height: 20px;
-    margin-top: -1px;
-    border: 3px solid #fff;
-    border-radius: 50%;
-    background: var(--raster-thumb, #fff);
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  /* A hairline thumb so the input's travel matches the field edge to edge. */
+  .raster-slider input::-webkit-slider-thumb {
+    width: 1px;
+    height: 48px;
     -webkit-appearance: none;
     appearance: none;
-    transition: transform 140ms ease;
   }
 
-  .raster-track input::-moz-range-thumb {
-    box-sizing: border-box;
-    width: 20px;
-    height: 20px;
-    border: 3px solid #fff;
-    border-radius: 50%;
-    background: var(--raster-thumb, #fff);
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  .raster-slider input::-moz-range-thumb {
+    width: 1px;
+    height: 48px;
+    border: 0;
   }
 
-  .raster-track input:active::-webkit-slider-thumb {
-    transform: scale(1.12);
+  .raster-slider:focus-within {
+    border-color: rgba(0, 0, 0, 0.22);
   }
-
-  .raster-track input:focus-visible::-webkit-slider-thumb {
-    box-shadow: 0 0 0 3px rgba(8, 120, 249, 0.35), 0 1px 4px rgba(0, 0, 0, 0.5);
-  }
-
-  .exposure-track { --raster-thumb: var(--raster-exposure); }
-  .hue-track { --raster-thumb: var(--raster-hue); }
-  .temperature-track { --raster-thumb: var(--raster-temp); }
 
   .raster-toggle {
     width: 100%;
@@ -12875,7 +12907,6 @@
     box-sizing: border-box;
     padding: 17px 18px;
     border-top: 1px solid #cacaca;
-    background: #fafafa;
   }
 
   .raster-actions .signature-action:disabled {
@@ -13617,9 +13648,22 @@
   }
 
   .pdf-viewer.eraser-mode {
-    cursor: none;
+    cursor: crosshair;
     touch-action: none;
     user-select: none;
+  }
+
+  /* Over a page the brush circle stands in for the cursor. */
+  .pdf-viewer.brush-active {
+    cursor: none;
+  }
+
+  /* Text keeps its I-beam (.textLayer span); everywhere else Select uses the app's arrow. */
+  .pdf-viewer.select-mode {
+    /* PNGs per pixel density: WebKit draws SVG cursors at 1x, which blurs them on Retina screens. */
+    cursor: url('/cursors/select.png') 2 2, default;
+    cursor: -webkit-image-set(url('/cursors/select.png') 1x, url('/cursors/select@2x.png') 2x, url('/cursors/select@3x.png') 3x) 2 2, default;
+    cursor: image-set(url('/cursors/select.png') 1x, url('/cursors/select@2x.png') 2x, url('/cursors/select@3x.png') 3x) 2 2, default;
   }
 
   :global(.pdf-viewer.text-selecting),
@@ -14210,7 +14254,7 @@
     opacity: 0.94;
   }
 
-  .eraser-cursor {
+  .brush-cursor {
     position: absolute;
     z-index: 9;
     box-sizing: border-box;
@@ -14448,6 +14492,7 @@
   }
 
   .protect-panel.search-panel {
+    width: min(420px, calc(100% - 26px));
     height: 124px;
   }
 
@@ -14492,25 +14537,6 @@
   .protect-panel.comment-panel,
   .protect-panel.raster-panel {
     max-height: calc(100% - 24px);
-  }
-
-  .raster-scope,
-  .raster-section {
-    border-bottom-color: rgba(0, 0, 0, 0.1);
-  }
-
-  .raster-scope {
-    padding: 14px 12px 13px;
-    color: rgba(0, 0, 0, 0.5);
-  }
-
-  .raster-section {
-    padding: 15px 11px 16px 12px;
-  }
-
-  .raster-slider-label {
-    font-size: 20px;
-    letter-spacing: -0.2px;
   }
 
   .raster-actions {
@@ -14629,8 +14655,23 @@
   }
 
   .drawing-number-grid {
-    grid-template-columns: minmax(0, 118fr) minmax(0, 142fr);
+    grid-template-columns: minmax(0, 112fr) minmax(0, 174fr);
     gap: 10px;
+  }
+
+  .protect-panel.drawing-properties-panel {
+    width: min(320px, calc(100% - 26px));
+  }
+
+  .drawing-properties-panel .protect-panel-header {
+    grid-template-columns: 24px 1fr 28px;
+    padding-left: 15px;
+  }
+
+  .drawing-properties-panel .protect-panel-header > img {
+    width: 24px;
+    height: 24px;
+    margin: 0;
   }
 
   .typography-weight-size-grid,
@@ -14652,6 +14693,11 @@
   .figma-color-picker.drawing-color-picker,
   .figma-color-picker.text-tool-color-picker {
     top: 110px;
+  }
+
+  /* Clears the wider drawing panel (13px inset + 320px + 10px gap). */
+  .figma-color-picker.drawing-color-picker {
+    right: 343px;
   }
 
   /* Background tabs: kept rendered (scroll, pages, edits) but invisible and underneath the active editor. */

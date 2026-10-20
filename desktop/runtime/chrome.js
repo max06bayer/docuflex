@@ -168,18 +168,6 @@
       background: #f8f8f8;
     }
 
-    html[data-docuflex-desktop="macos"] .editor-shell:not(.editor-mode) {
-      --desktop-sidebar-width: 310px;
-      grid-template-columns: var(--desktop-sidebar-width) minmax(0, 1fr) !important;
-    }
-
-    html[data-docuflex-desktop="macos"] .editor-shell:not(.editor-mode) .topbar {
-      grid-template-columns: var(--desktop-sidebar-width) minmax(0, 1fr) auto !important;
-      overflow: visible !important;
-      position: relative !important;
-      z-index: 40 !important;
-    }
-
     html[data-docuflex-desktop="macos"] .topbar,
     html[data-docuflex-desktop="macos"] .brand-area,
     html[data-docuflex-desktop="macos"] .tab-strip,
@@ -187,96 +175,10 @@
       -webkit-app-region: drag;
     }
 
-    html[data-docuflex-desktop="macos"] .brand-area {
-      justify-content: flex-end !important;
-      padding: 0 22px 0 108px !important;
-      position: relative !important;
-    }
-
-    html[data-docuflex-desktop="macos"] .brand-area::after {
-      background: #fff;
-      border-bottom: 1px solid #e5e5e5;
-      border-right: 1px solid #e5e5e5;
-      box-sizing: border-box;
-      content: "";
-      height: 56px;
-      left: 0;
-      pointer-events: none;
-      position: absolute;
-      top: 56px;
-      width: var(--desktop-sidebar-width);
-      z-index: 1;
-    }
-
-    html[data-docuflex-desktop="macos"] .logo-button {
-      height: 56px !important;
-      left: 16px;
-      margin: 0 !important;
-      padding: 0 !important;
-      position: absolute !important;
-      top: 56px;
-      width: 180px !important;
-      z-index: 2;
-    }
-
-    html[data-docuflex-desktop="macos"] .logo {
-      height: auto !important;
-      width: 180px !important;
-    }
-
-    html[data-docuflex-desktop="macos"] .history {
-      gap: 24px !important;
-      margin-left: 0 !important;
-    }
-
     html[data-docuflex-desktop="macos"] .topbar button,
     html[data-docuflex-desktop="macos"] .topbar a,
     html[data-docuflex-desktop="macos"] .topbar input {
       -webkit-app-region: no-drag;
-    }
-
-    html[data-docuflex-desktop="macos"] .sidebar .quick-tools {
-      padding-top: 72px !important;
-    }
-
-    html[data-docuflex-desktop="macos"] .editor-shell:not(.editor-mode) .add-tab {
-      position: relative !important;
-    }
-
-    html[data-docuflex-desktop="macos"] .editor-shell:not(.editor-mode) .add-tab img {
-      display: none !important;
-    }
-
-    html[data-docuflex-desktop="macos"] .editor-shell:not(.editor-mode) .add-tab::before,
-    html[data-docuflex-desktop="macos"] .editor-shell:not(.editor-mode) .add-tab::after {
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      width: 18px;
-      height: 1.5px;
-      border-radius: 99px;
-      background: #9d9d9d;
-      content: "";
-      pointer-events: none;
-      transform: translate(-50%, -50%);
-      transition: background-color 150ms ease, transform 150ms ease;
-    }
-
-    html[data-docuflex-desktop="macos"] .editor-shell:not(.editor-mode) .add-tab::after {
-      transform: translate(-50%, -50%) rotate(90deg);
-    }
-
-    html[data-docuflex-desktop="macos"] .editor-shell:not(.editor-mode) .add-tab:hover::before,
-    html[data-docuflex-desktop="macos"] .editor-shell:not(.editor-mode) .add-tab:hover::after {
-      background: #727272;
-    }
-
-    html[data-docuflex-desktop="macos"] .editor-shell:not(.editor-mode) .add-tab:active::before {
-      transform: translate(-50%, -50%) scale(0.94);
-    }
-
-    html[data-docuflex-desktop="macos"] .editor-shell:not(.editor-mode) .add-tab:active::after {
-      transform: translate(-50%, -50%) rotate(90deg) scale(0.94);
     }
 
     html[data-docuflex-desktop="linux"] .editor-shell {
@@ -443,7 +345,7 @@
     }
 
     const markDragRegion = () => {
-      document.querySelectorAll('.topbar, .brand-area, .tab-strip, .utilities').forEach((element) => {
+      document.querySelectorAll('.topbar, .brand-area, .tab-strip, .utilities, .ai-header').forEach((element) => {
         element.setAttribute('data-tauri-drag-region', '');
         element.querySelectorAll('*').forEach((child) => {
           if (!child.closest('button, a, input, select, textarea, [role="button"]')) {

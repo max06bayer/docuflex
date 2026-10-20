@@ -1,8 +1,57 @@
 /**
  * Minimal Markdown for AI chat replies: paragraphs, headings, lists, quotes,
- * code, bold/italic/strike and links. Everything is escaped first, so model
- * output can never inject HTML.
+ * tables, code, bold/italic/strike, links and LaTeX math. Everything is escaped
+ * first, so model output can never inject HTML.
  */
+
+import { renderMathMarkup } from '$lib/math-render.js';
+
+/** Rendered SVG per formula: a string when done, null when the LaTeX is invalid, undefined while rendering. */
+/** @type {Map<string, string | null | undefined>} */
+const mathCache = new Map();
+/** @type {Set<() => void>} */
+const mathListeners = new Set();
+
+/** Calls back whenever a formula finishes rendering, so the chat can redraw. @param {() => void} listener */
+export function onMathRendered(listener) {
+  mathListeners.add(listener);
+  return () => { mathListeners.delete(listener); };
+}
+
+/**
+ * $$…$$ and \[…\] are display math; \(…\) and $…$ are inline. A single $ only
+ * counts when it hugs its content ("$x^2$", not "costs $5 and $10").
+ */
+const MATH = /\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\]|\\\(([\s\S]+?)\\\)|(?<![\\$\w])\$(?![\s$])((?:\\.|[^$\\\n])+?)(?<!\s)\$(?![\w$])/g;
+
+/** Swaps math for \u0001n\u0001 markers, leaving code spans and fences untouched. @param {string} source */
+function extractMath(source) {
+  /** @type {{ tex: string; display: boolean }[]} */
+  const math = [];
+  const text = source.split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/).map((part, index) => index % 2 ? part : part.replace(MATH, (_, block, bracket, paren, dollar) => {
+    const display = block !== undefined || bracket !== undefined;
+    math.push({ tex: String(block ?? bracket ?? paren ?? dollar).trim(), display });
+    return `\u0001${math.length - 1}\u0001`;
+  })).join('');
+  return { text, math };
+}
+
+/** @param {{ tex: string; display: boolean }} formula */
+function mathHtml({ tex, display }) {
+  const key = `${display ? 'D' : 'I'}${tex}`;
+  const className = display ? 'math display' : 'math';
+  if (!mathCache.has(key) && typeof window !== 'undefined') {
+    mathCache.set(key, undefined);
+    void renderMathMarkup(tex, display).then((svg) => {
+      mathCache.set(key, svg);
+      for (const listener of mathListeners) listener();
+    });
+  }
+  const svg = mathCache.get(key);
+  if (svg) return `<span class="${className}">${svg}</span>`;
+  // Shown while rendering, or as code when the LaTeX is invalid.
+  return `<span class="${className} ${svg === null ? 'invalid' : 'pending'}"><code>${escapeHtml(tex)}</code></span>`;
+}
 
 /** @param {string} text */
 function escapeHtml(text) {
@@ -27,9 +76,23 @@ function inline(text) {
   return html.replace(/\u0000(\d+)\u0000/g, (_, index) => codes[Number(index)]);
 }
 
-/** @param {string} source */
-export function renderMarkdown(source) {
-  const lines = escapeHtml(source.replace(/\r\n?/g, '\n')).split('\n');
+/** Splits `| a | b |` into its cells. @param {string} line */
+function tableCells(line) {
+  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((cell) => cell.trim());
+}
+
+/** A separator row such as `|---|:--:|`. @param {string} line */
+function isTableSeparator(line) {
+  return line.includes('-') && line.includes('|') && /^[\s|:-]+$/.test(line);
+}
+
+/**
+ * @param {string} source
+ * @param {number} [_mathVersion] changes when formulas finish rendering, so callers re-run this
+ */
+export function renderMarkdown(source, _mathVersion) {
+  const { text, math } = extractMath(source.replace(/\r\n?/g, '\n'));
+  const lines = escapeHtml(text).split('\n');
   /** @type {string[]} */
   const out = [];
   /** @type {string[]} */
@@ -56,6 +119,24 @@ export function renderMarkdown(source) {
       index += 1;
       while (index < lines.length && !/^\s*```/.test(lines[index])) code.push(lines[index++]);
       out.push(`<pre><code>${code.join('\n')}</code></pre>`);
+      continue;
+    }
+    if (line.includes('|') && index + 1 < lines.length && isTableSeparator(lines[index + 1])) {
+      flushParagraph();
+      flushList();
+      const header = tableCells(line);
+      const align = tableCells(lines[index + 1]).map((cell) => (cell.startsWith(':') && cell.endsWith(':') ? 'center' : cell.endsWith(':') ? 'right' : ''));
+      /** @param {string} cell @param {number} column @param {'th' | 'td'} tag */
+      const cellHtml = (cell, column, tag) => `<${tag}${align[column] ? ` style="text-align:${align[column]}"` : ''}>${inline(cell)}</${tag}>`;
+      const rows = [];
+      index += 2;
+      while (index < lines.length && lines[index].includes('|') && lines[index].trim()) {
+        const cells = tableCells(lines[index]);
+        rows.push(`<tr>${header.map((_, column) => cellHtml(cells[column] ?? '', column, 'td')).join('')}</tr>`);
+        index += 1;
+      }
+      index -= 1;
+      out.push(`<div class="table-wrap"><table><thead><tr>${header.map((cell, column) => cellHtml(cell, column, 'th')).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table></div>`);
       continue;
     }
     const heading = line.match(/^(#{1,4})\s+(.*)$/);
@@ -102,5 +183,5 @@ export function renderMarkdown(source) {
   }
   flushParagraph();
   flushList();
-  return out.join('');
+  return out.join('').replace(/\u0001(\d+)\u0001/g, (_, index) => math[Number(index)] ? mathHtml(math[Number(index)]) : '');
 }

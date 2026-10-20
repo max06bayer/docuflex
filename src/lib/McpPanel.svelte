@@ -18,7 +18,6 @@
   let copiedTimer;
   /** @type {ReturnType<typeof setInterval> | undefined} */
   let refreshTimer;
-  let now = Date.now();
 
   $: url = status?.url ?? '';
   $: claudeCommand = url ? `claude mcp add --transport http docuflex ${url}` : '';
@@ -42,15 +41,6 @@
     copiedTimer = setTimeout(() => (copied = null), 1600);
   }
 
-  /** @param {number} at */
-  function ago(at) {
-    const seconds = Math.max(0, Math.round((now - at) / 1000));
-    if (seconds < 5) return 'just now';
-    if (seconds < 60) return `${seconds}s ago`;
-    const minutes = Math.round(seconds / 60);
-    return minutes < 60 ? `${minutes} min ago` : `${Math.round(minutes / 60)} h ago`;
-  }
-
   /** @param {KeyboardEvent} event */
   function handleKeydown(event) {
     if (event.key === 'Escape') onClose();
@@ -58,10 +48,7 @@
 
   onMount(() => {
     window.addEventListener('keydown', handleKeydown);
-    refreshTimer = setInterval(() => {
-      now = Date.now();
-      onRefresh();
-    }, 3000);
+    refreshTimer = setInterval(onRefresh, 3000);
   });
 
   onDestroy(() => {
@@ -73,260 +60,154 @@
 
 <div class="mcp-panel" role="dialog" aria-label="MCP Server" transition:fly={{ x: 18, duration: 240, easing: cubicOut }}>
   <header class="panel-header">
-    <img src="/mcp.svg" alt="" />
+    <img src="/redesign/icon-code-xml.svg" alt="" />
     <h2>MCP Server</h2>
-    <button class="panel-close" type="button" aria-label="Close MCP Server" onclick={onClose}><span></span><span></span></button>
+    <button class="panel-close" type="button" aria-label="Close MCP Server" onclick={onClose}></button>
   </header>
 
-  <div class="mcp-content">
-    <section class="mcp-section">
-      <button
-        class:active={status?.enabled}
-        class="mcp-toggle"
-        type="button"
-        aria-pressed={Boolean(status?.enabled)}
-        disabled={!status}
-        onclick={() => onToggle(!status?.enabled)}
-      >
-        <span>Server</span>
-        <em>{status?.enabled ? 'On' : 'Off'}</em>
-      </button>
-      <p class="mcp-status">
-        <span class="mcp-dot" class:live={status?.enabled && status.connectedApps > 0} class:off={!status?.enabled}></span>
-        {#if !status}
-          Checking…
-        {:else if !status.enabled}
-          Off. AI agents can't connect.
-        {:else if status.connectedApps === 0}
-          Running, waiting for the editor window.
-        {:else if status.lastCall}
-          Running. Last action <strong>{status.lastCall.name}</strong> {ago(status.lastCall.at)}.
-        {:else}
-          Running and ready for AI agents.
-        {/if}
-      </p>
-    </section>
+  <section class="mcp-section">
+    <button
+      class:active={status?.enabled}
+      class="mcp-row mcp-toggle"
+      type="button"
+      aria-pressed={Boolean(status?.enabled)}
+      disabled={!status}
+      onclick={() => onToggle(!status?.enabled)}
+    >
+      <span>Server</span>
+      <em>{status?.enabled ? 'On' : 'Off'}</em>
+    </button>
+  </section>
 
-    <section class="mcp-section">
-      <span class="mcp-label">Address</span>
-      <div class="mcp-field">
-        <input value={url} readonly aria-label="MCP server address" onfocus={(event) => event.currentTarget.select()} />
-        <button type="button" onclick={() => copy('url', url)} disabled={!url}>{copied === 'url' ? 'Copied' : 'Copy'}</button>
-      </div>
-
-      <span class="mcp-label">Connect an agent</span>
-      <button class="mcp-copy-row" type="button" onclick={() => copy('claude', claudeCommand)} disabled={!url}>
-        <span>Claude Code command</span>
-        <em>{copied === 'claude' ? 'Copied' : 'Copy'}</em>
-      </button>
-      <button class="mcp-copy-row" type="button" onclick={() => copy('json', jsonConfig)} disabled={!url}>
-        <span>JSON config (Cursor, Claude Desktop …)</span>
-        <em>{copied === 'json' ? 'Copied' : 'Copy'}</em>
-      </button>
-    </section>
-
-    <p class="mcp-footnote">{status?.toolCount ?? 0} tools · only reachable from this computer</p>
-  </div>
+  <section class="mcp-section">
+    <button class="mcp-row mcp-copy mcp-address" type="button" title={url} onclick={() => copy('url', url)} disabled={!url}>
+      <code>{url.replace(/^https?:\/\//, '')}</code>
+      {#if copied === 'url'}<em>Copied</em>{:else}<img src="/redesign/icon-copy2.svg" alt="" />{/if}
+    </button>
+    <button class="mcp-row mcp-copy" type="button" onclick={() => copy('claude', claudeCommand)} disabled={!url}>
+      <span>Claude Code</span>
+      <code></code>
+      {#if copied === 'claude'}<em>Copied</em>{:else}<img src="/redesign/icon-copy2.svg" alt="" />{/if}
+    </button>
+    <button class="mcp-row mcp-copy" type="button" onclick={() => copy('json', jsonConfig)} disabled={!url}>
+      <span>JSON Config</span>
+      <code></code>
+      {#if copied === 'json'}<em>Copied</em>{:else}<img src="/redesign/icon-copy2.svg" alt="" />{/if}
+    </button>
+  </section>
 </div>
 
 <style>
+  /* Matches the editor's right-hand panels (PdfEditor .protect-panel). */
   .mcp-panel {
     position: fixed;
     z-index: 70;
-    top: 70px;
-    right: 14px;
+    top: 68px;
+    right: 13px;
     display: grid;
-    grid-template-rows: 50px auto;
-    width: min(340px, calc(100% - 28px));
-    border: 1.5px solid #c5c5c5;
-    border-radius: 13px;
+    grid-template-columns: minmax(0, 1fr);
+    box-sizing: border-box;
+    width: min(320px, calc(100% - 26px));
     overflow: hidden;
-    background: #fafafa;
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.12);
+    border: 1.5px solid #c3c2c2;
+    border-radius: 21px;
+    background: rgba(240, 236, 236, 0.75);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+    backdrop-filter: blur(1.3px);
+    -webkit-backdrop-filter: blur(1.3px);
     color: #000;
-    font-family: "Inter Variable", Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 21px;
+    letter-spacing: -0.21px;
     -webkit-font-smoothing: antialiased;
   }
 
   .panel-header {
     display: grid;
-    grid-template-columns: 26px 1fr 28px;
+    grid-template-columns: 24px 1fr 28px;
     align-items: center;
+    box-sizing: border-box;
     height: 50px;
-    padding: 0 12px;
-    border-bottom: 1px solid #cacaca;
-    background: #eeeeee;
+    padding: 0 14px 0 15px;
+    border-bottom: 1.5px solid #c3c2c2;
+    background: rgba(214, 214, 214, 0.75);
   }
 
   .panel-header > img { width: 24px; height: 24px; }
 
   .panel-header h2 {
-    margin: 0 0 0 7px;
-    font-size: 18px;
+    margin: 0 0 0 8px;
+    font-size: 20px;
     font-weight: 400;
     line-height: 1.22;
-    letter-spacing: -0.25px;
+    letter-spacing: -0.2px;
   }
 
   .panel-close {
-    position: relative;
     width: 28px;
     height: 28px;
     padding: 0;
     border: 0;
     border-radius: 9px;
-    background: transparent;
+    background: url('/redesign/panel-close.svg') center / 12.67px 12.67px no-repeat;
     cursor: pointer;
-    transition: transform 160ms ease;
+    transition: transform 160ms ease, filter 160ms ease;
   }
 
+  .panel-close:hover { filter: brightness(0); }
   .panel-close:active { transform: scale(0.94); }
-
-  .panel-close span {
-    position: absolute;
-    top: 13px;
-    left: 6px;
-    width: 16px;
-    height: 1.5px;
-    border-radius: 99px;
-    background: #929292;
-    transform: rotate(45deg);
-    transition: background-color 160ms ease;
-  }
-
-  .panel-close span + span { transform: rotate(-45deg); }
-  .panel-close:hover span { background: #000; }
-
-  .mcp-content { display: grid; min-width: 0; }
 
   .mcp-section {
     display: grid;
-    grid-template-columns: minmax(0, 1fr);
     gap: 10px;
-    padding: 16px 18px;
-    border-bottom: 1px solid #dedede;
+    padding: 15px 11px 15px 12px;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.1);
   }
 
-  .mcp-toggle {
-    display: flex;
+  .mcp-section:last-child { border-bottom: 0; }
+
+  .mcp-row {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
-    justify-content: space-between;
-    height: 42px;
-    padding: 0 12px;
-    border: 1px solid #d7d7d7;
-    border-radius: 8px;
-    background: #f3f3f3;
-    color: #111;
+    gap: 10px;
+    box-sizing: border-box;
+    width: 100%;
+    height: 48px;
+    padding: 0 13px;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 15px;
+    background: #fff;
+    color: rgba(0, 0, 0, 0.75);
     font: inherit;
-    font-size: 18px;
+    letter-spacing: inherit;
+    text-align: left;
     cursor: pointer;
     transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease, transform 160ms ease;
   }
 
-  .mcp-toggle:active { transform: scale(0.985); }
-  .mcp-toggle em { color: #7a7a7a; font-style: normal; transition: color 150ms ease; }
-  .mcp-toggle.active { border-color: #111; background: #111; color: #fff; }
+  .mcp-row:active { transform: scale(0.985); }
+  .mcp-row:disabled { cursor: default; opacity: 0.5; }
+  .mcp-row span { color: rgba(0, 0, 0, 0.5); white-space: nowrap; }
+  .mcp-row em { color: rgba(0, 0, 0, 0.5); font-style: normal; }
+
+  .mcp-toggle { grid-template-columns: 1fr auto; }
+  .mcp-toggle span { color: rgba(0, 0, 0, 0.75); }
+  .mcp-toggle.active { border-color: #111; background: #111; }
+  .mcp-toggle.active span,
   .mcp-toggle.active em { color: #fff; }
-  .mcp-toggle:disabled { cursor: default; opacity: 0.6; }
 
-  .mcp-status {
-    margin: 0;
-    overflow-wrap: anywhere;
-    color: #7a7a7a;
-    font-size: 16px;
-    line-height: 1.38;
-    letter-spacing: -0.2px;
-  }
+  .mcp-copy:not(:disabled):hover { background: rgba(255, 255, 255, 0.7); }
+  .mcp-copy img { width: 19px; height: 20px; opacity: 0.85; }
+  .mcp-copy:hover img { opacity: 1; }
 
-  .mcp-status strong { color: #000; font-weight: 400; }
-
-  .mcp-dot {
-    display: inline-block;
-    width: 8px;
-    height: 8px;
-    margin-right: 7px;
-    border-radius: 50%;
-    background: #f0a020;
-    vertical-align: 1px;
-  }
-
-  .mcp-dot.live { background: #2fb344; box-shadow: 0 0 0 3px rgba(47, 179, 68, 0.18); }
-  .mcp-dot.off { background: #b8b8b8; }
-
-  .mcp-label {
-    margin-top: 2px;
-    color: #7a7a7a;
-    font-size: 15px;
-    letter-spacing: -0.2px;
-  }
-
-  .mcp-field {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
-    height: 42px;
+  .mcp-copy code {
     overflow: hidden;
-    border: 1px solid #d7d7d7;
-    border-radius: 8px;
-    background: #f3f3f3;
+    color: rgba(0, 0, 0, 0.75);
+    font-family: inherit;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
-  .mcp-field input {
-    min-width: 0;
-    height: 100%;
-    padding: 0 12px;
-    border: 0;
-    outline: 0;
-    background: transparent;
-    color: #111;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 14px;
-  }
-
-  .mcp-field button {
-    height: 100%;
-    padding: 0 14px;
-    border: 0;
-    border-left: 1px solid #d7d7d7;
-    background: #0878f9;
-    color: #fff;
-    font: inherit;
-    font-size: 16px;
-    cursor: pointer;
-    transition: background-color 180ms ease;
-  }
-
-  .mcp-field button:hover { background: #006ff0; }
-  .mcp-field button:disabled { cursor: default; opacity: 0.5; }
-
-  .mcp-copy-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    height: 40px;
-    padding: 0 12px;
-    border: 1px solid #d7d7d7;
-    border-radius: 8px;
-    background: #f3f3f3;
-    color: #3f3f3f;
-    font: inherit;
-    font-size: 16px;
-    text-align: left;
-    cursor: pointer;
-    transition: background-color 180ms ease, border-color 180ms ease;
-  }
-
-  .mcp-copy-row:hover { border-color: #c8c8c8; background: #eeeeee; }
-  .mcp-copy-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .mcp-copy-row em { flex: none; color: #0878f9; font-style: normal; }
-  .mcp-copy-row:disabled { cursor: default; opacity: 0.5; }
-
-  .mcp-footnote {
-    margin: 0;
-    padding: 12px 18px 14px;
-    color: #9a9a9a;
-    font-size: 14px;
-    letter-spacing: -0.15px;
-  }
+  .mcp-address { grid-template-columns: minmax(0, 1fr) auto; }
 </style>

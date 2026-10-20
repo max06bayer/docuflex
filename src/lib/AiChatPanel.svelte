@@ -2,7 +2,8 @@
   import { onDestroy, onMount, tick } from 'svelte';
   import { cubicOut } from 'svelte/easing';
   import { fade, fly, slide } from 'svelte/transition';
-  import { renderMarkdown } from '$lib/ai-markdown.js';
+  import { onMathRendered, renderMarkdown } from '$lib/ai-markdown.js';
+  import AiFieldBackground from '$lib/AiFieldBackground.svelte';
 
   /**
    * AI chat docked next to the document. The model (through /api/ai/chat)
@@ -12,7 +13,7 @@
    */
 
   export let open = false;
-  /** @type {{ available: boolean; model?: string; fallbackModel?: string; tools?: { name: string; title: string; readOnly: boolean; needsApproval: boolean }[] } | null} */
+  /** @type {{ available: boolean; model?: string; models?: { id: string; name: string; short?: string }[]; fallbackModel?: string; tools?: { name: string; title: string; readOnly: boolean; needsApproval: boolean }[] } | null} */
   export let status = null;
   /** @type {() => any} */
   export let getContext = () => ({});
@@ -27,10 +28,15 @@
   /** @typedef {{ x: number; y: number; width: number; height: number }} Region */
   /** @typedef {{ id: number; task: string; page: number; region: Region | null; status: 'running' | 'done' | 'error' | 'cancelled'; steps: number; current: string; summary: string; objects: number[] }} Helper */
   /** @typedef {{ id: string; name: string; rawArgs: string; args: Record<string, any>; status: ToolStatus; result: string; image: string | null; expanded: boolean; helpers?: Helper[] }} ToolEntry */
-  /** @typedef {{ id: number; role: 'user'; text: string; quote: { text: string; page: number | null } | null; images: string[] }} UserEntry */
+  /** @typedef {{ id: number; role: 'user'; text: string; quote: { text: string; page: number | null } | null; images: string[]; startedAt?: number; doneAt?: number }} UserEntry */
   /** @typedef {{ id: number; role: 'assistant'; text: string; reasoning: string; thinkingStartedAt: number | null; thinkingMs: number; showReasoning: boolean; tools: ToolEntry[]; streaming: boolean }} AssistantEntry */
   /** @typedef {{ id: number; role: 'error' | 'note'; text: string }} ErrorEntry */
   /** @typedef {UserEntry | AssistantEntry | ErrorEntry} Entry */
+  /**
+   * What the thread shows: each request's steps fold into one "Worked for …"
+   * line, and only the final reply is shown as text.
+   * @typedef {{ kind: 'entry'; id: string; entry: UserEntry | ErrorEntry } | { kind: 'work'; id: string; steps: AssistantEntry[]; request: UserEntry | null } | { kind: 'answer'; id: string; entry: AssistantEntry }} Block
+   */
 
   const MAX_STEPS = 32;
   /** More calls than this in one model turn are skipped: the model is flooding. */
@@ -45,18 +51,7 @@
   /** Older page renders are dropped from what the model sees, to keep requests small. */
   const KEEP_IMAGE_MESSAGES = 2;
 
-  const TOOL_ICONS = /** @type {Record<string, string>} */ ({
-    list_documents: '/pdficon.svg', open_document: '/pdficon.svg', switch_document: '/pdficon.svg', close_document: '/pdficon.svg', get_document_info: '/pdficon.svg',
-    unlock_document: '/lock.svg', set_password: '/lock.svg', save_document: '/save.svg', extract_pages: '/save.svg',
-    get_page_text: '/toolbar/small/search.svg', search_text: '/toolbar/small/search.svg', render_page: '/eye.svg',
-    add_text: '/toolbar/small/textfield.svg', add_shape: '/toolbar/small/rectangle.svg', add_line: '/toolbar/small/line.svg', add_image: '/toolbar/small/image.svg',
-    draw: '/toolbar/small/pen.svg', mark_text: '/toolbar/small/highlight.svg', set_watermark: '/toolbar/small/watermark.svg',
-    list_objects: '/toolbar/small/select.svg', update_object: '/toolbar/small/select.svg', delete_object: '/toolbar/small/eraser.svg',
-    replace_text: '/toolbar/small/edit.svg', list_comments: '/comments.svg', add_comment: '/comments.svg', reply_to_comment: '/pages/reply.svg', delete_comment: '/comments.svg',
-    list_form_fields: '/toolbar/small/input.svg', fill_form_field: '/toolbar/small/checkbox.svg', add_form_field: '/toolbar/small/input.svg',
-    rotate_pages: '/pages/rotate-ccw.svg', delete_pages: '/pages/trash.svg', reorder_pages: '/pages/copy.svg', insert_pdf: '/pages/clipboard-plus.svg',
-    measure_text: '/toolbar/small/measure.svg', add_math: '/toolbar/small/textfield.svg', insert_blank_page: '/bigplus.svg', remember: '/brain.svg', forget: '/brain.svg', delegate: '/brain.svg', rasterize_pages: '/color.svg', run_ocr: '/toolbar/small/orc.svg', undo: '/arrowleft.svg', redo: '/arrowright.svg', set_view: '/toolbar/small/zoom.svg'
-  });
+  const MODEL_STORAGE_KEY = 'docuflex-ai-model';
 
   /** @type {Entry[]} */
   let entries = [];
@@ -107,23 +102,113 @@
   let dragging = false;
   /** @type {ReturnType<typeof setInterval> | undefined} */
   let clock;
+  /** Work blocks the person opened. */
+  let openWork = new Set();
+  /** The model chosen in the composer; remembered on this computer. */
+  let selectedModel = '';
+  let modelMenuOpen = false;
 
+  $: blocks = groupEntries(entries);
   $: toolInfo = new Map((status?.tools ?? []).map((tool) => [tool.name, tool]));
-  $: modelLabel = modelName(status?.model ?? '');
+  $: models = status?.models?.length ? status.models : status?.model ? [{ id: status.model, name: modelName(status.model) }] : [];
+  $: if (models.length && !models.some((model) => model.id === selectedModel)) selectedModel = storedModel(models) ?? models[0].id;
+  $: currentModel = models.find((model) => model.id === selectedModel);
+  $: modelLabel = currentModel?.short ?? currentModel?.name ?? modelName(selectedModel);
   $: onBusyChange(busy);
   $: if (open) void onOpen();
   $: activeDocument = liveContext?.active ?? null;
   $: suggestions = hasDocument
     ? [
-        { label: 'Summarize this document', prompt: 'Summarize this document in a few bullet points with page references.' },
-        { label: 'Highlight all dates and amounts', prompt: 'Highlight every date and every money amount in this document.' },
-        { label: 'Check this page for typos', prompt: 'Check the current page for typos and fix them in place.' },
-        { label: 'Fill out the form', prompt: 'List the form fields in this document and help me fill them out.' }
+        { label: 'Summarize', prompt: 'Summarize this document in a few bullet points with page references.', icon: '/redesign/icon-letter-text.svg' },
+        { label: 'Highlight dates and amounts', prompt: 'Highlight every date and every money amount in this document.', icon: '/toolbar/small/highlight.svg' },
+        { label: 'Fill out the form', prompt: 'List the form fields in this document and help me fill them out.', icon: '/toolbar/small/input.svg' }
       ]
-    : [
-        { label: 'What can you do?', prompt: 'What can you do in Docuflex? Keep it short.' },
-        { label: 'Open a PDF from my Downloads', prompt: 'Open the most recent PDF I mention from ~/Downloads. Ask me for the file name first.' }
-      ];
+    : [{ label: 'What can you do?', prompt: 'What can you do in Docuflex? Keep it short.', icon: '/redesign/icon-brain.svg' }];
+
+  /**
+   * Folds each request's steps into one work block; the last step without
+   * tool calls is the reply. A step still waiting for its first words stays
+   * in the work block, so "Thinking" shows there.
+   * @param {Entry[]} list
+   * @returns {Block[]}
+   */
+  function groupEntries(list) {
+    /** @type {Block[]} */
+    const out = [];
+    /** @type {UserEntry | null} */
+    let request = null;
+    /** @type {{ kind: 'work'; id: string; steps: AssistantEntry[]; request: UserEntry | null } | null} */
+    let work = null;
+    for (const [index, entry] of list.entries()) {
+      if (entry.role !== 'assistant') {
+        if (entry.role === 'user') request = entry;
+        work = null;
+        out.push({ kind: 'entry', id: `e${entry.id}`, entry });
+        continue;
+      }
+      const lastOfRun = list[index + 1]?.role !== 'assistant';
+      if (lastOfRun && !entry.tools.length && entry.text.trim()) {
+        out.push({ kind: 'answer', id: `a${entry.id}`, entry });
+        continue;
+      }
+      if (!work) {
+        work = { kind: 'work', id: `w${entry.id}`, steps: [], request };
+        out.push(work);
+      }
+      work.steps.push(entry);
+    }
+    return out;
+  }
+
+  /** @param {string} id */
+  function toggleWork(id) {
+    if (openWork.has(id)) openWork.delete(id);
+    else openWork.add(id);
+    openWork = openWork;
+  }
+
+  /** The step running right now, for the live line. @param {AssistantEntry[]} steps */
+  function currentStep(steps) {
+    for (const step of [...steps].reverse()) {
+      const tool = [...step.tools].reverse().find((item) => item.status === 'running' || item.status === 'streaming');
+      if (tool) return toolInfo.get(tool.name)?.title ?? tool.name;
+      if (step.streaming) return step.reasoning && !step.text ? 'Thinking' : 'Working';
+    }
+    return 'Working';
+  }
+
+  /**
+   * Marks a title that runs past its row, so only those fade at the end.
+   * @param {HTMLElement} node
+   */
+  function fadeWhenClipped(node) {
+    const update = () => node.classList.toggle('clipped', node.scrollWidth > node.clientWidth + 1);
+    const observer = new ResizeObserver(update);
+    observer.observe(node);
+    update();
+    return { destroy: () => observer.disconnect() };
+  }
+
+  /** @param {{ id: string }[]} list */
+  function storedModel(list) {
+    try {
+      const saved = localStorage.getItem(MODEL_STORAGE_KEY);
+      return list.some((model) => model.id === saved) ? saved : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** @param {string} id */
+  function chooseModel(id) {
+    selectedModel = id;
+    modelMenuOpen = false;
+    try {
+      localStorage.setItem(MODEL_STORAGE_KEY, id);
+    } catch {
+      // Remembering the choice is a convenience.
+    }
+  }
 
   /** @param {string} id */
   function modelName(id) {
@@ -251,7 +336,7 @@
     const response = await fetch('/api/ai/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: trimImages(history), context: liveContext }),
+      body: JSON.stringify({ messages: trimImages(history), context: liveContext, model: selectedModel }),
       signal
     });
     /** @type {{ id: string; name: string; arguments: string; entry: ToolEntry | null }[]} */
@@ -482,7 +567,7 @@
         const response = await fetch('/api/ai/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ messages: trimImages(messages), context: liveContext, subagent: { page: helper.page, region: helper.region } }),
+          body: JSON.stringify({ messages: trimImages(messages), context: liveContext, model: selectedModel, subagent: { page: helper.page, region: helper.region } }),
           signal
         });
         let text = '';
@@ -688,6 +773,8 @@
         if (item.role !== 'assistant') continue;
         for (const tool of item.tools) if (tool.status === 'streaming' || tool.status === 'running' || tool.status === 'approval') tool.status = 'cancelled';
       }
+      const request = [...entries].reverse().find((item) => item.role === 'user');
+      if (request?.role === 'user') request.doneAt = Date.now();
       refresh();
       refreshContext();
       void saveChat();
@@ -710,7 +797,7 @@
     uncompactedFrom = history.length;
     chat ??= { id: crypto.randomUUID(), createdAt: new Date().toISOString(), title: (message || 'Image').replace(/\s+/g, ' ').slice(0, 80) };
     showHistory = false;
-    entries = [...entries, { id: nextId++, role: 'user', text: message, quote, images }];
+    entries = [...entries, { id: nextId++, role: 'user', text: message, quote, images, startedAt: Date.now() }];
     draft = '';
     attachments = [];
     if (selectionQuote) usedSelection = selectionQuote.text;
@@ -735,7 +822,7 @@
     if (!chat || !entries.length) return;
     const storedEntries = entries.map((entry) => {
       if (entry.role === 'user') return { ...entry, images: [] };
-      if (entry.role === 'assistant') return { ...entry, streaming: false, tools: entry.tools.map((tool) => ({ ...tool, image: null, expanded: false })) };
+      if (entry.role === 'assistant') return { ...entry, streaming: false, showReasoning: false, tools: entry.tools.map((tool) => ({ ...tool, image: null, expanded: false })) };
       return entry;
     });
     const storedHistory = history.map((message) => Array.isArray(message.content)
@@ -768,7 +855,7 @@
       const response = await fetch(`/api/ai/chats?id=${encodeURIComponent(id)}`, { cache: 'no-store' });
       if (!response.ok) throw new Error();
       const stored = await response.json();
-      entries = stored.entries ?? [];
+      entries = (stored.entries ?? []).map((/** @type {Entry} */ entry) => (entry.role === 'assistant' ? { ...entry, showReasoning: false } : entry));
       history = stored.history ?? [];
       uncompactedFrom = typeof stored.uncompactedFrom === 'number' ? stored.uncompactedFrom : null;
       chat = { id: stored.id, createdAt: stored.createdAt, title: stored.title };
@@ -788,16 +875,6 @@
     savedChats = savedChats.filter((entry) => entry.id !== id);
     if (chat?.id === id) newChat();
     await fetch(`/api/ai/chats?id=${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => null);
-  }
-
-  /** @param {string} iso */
-  function relativeTime(iso) {
-    const seconds = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
-    if (seconds < 60) return 'just now';
-    if (seconds < 3600) return `${Math.round(seconds / 60)} min ago`;
-    if (seconds < 86_400) return `${Math.round(seconds / 3600)} h ago`;
-    if (seconds < 7 * 86_400) return `${Math.round(seconds / 86_400)} d ago`;
-    return new Date(iso).toLocaleDateString();
   }
 
   /**
@@ -953,6 +1030,10 @@
     return { streaming: 'Preparing', running: 'Running', approval: 'Needs approval', done: 'Done', error: 'Failed', denied: 'Not allowed', cancelled: 'Cancelled' }[toolStatus];
   }
 
+  /** Bumped when a formula finishes rendering, so answers redraw with it. */
+  let mathTick = 0;
+  const stopMathUpdates = onMathRendered(() => (mathTick += 1));
+
   onMount(() => {
     document.addEventListener('selectionchange', handleSelectionChange);
     // Rows grow after they render (slide-ins, page images), so keep following the bottom.
@@ -969,12 +1050,15 @@
   });
 
   onDestroy(() => {
+    stopMathUpdates();
     if (typeof document !== 'undefined') document.removeEventListener('selectionchange', handleSelectionChange);
     clearInterval(clock);
     contentObserver?.disconnect();
     controller?.abort();
   });
 </script>
+
+<svelte:window onclick={() => (modelMenuOpen = false)} />
 
 <aside
   class="ai-panel"
@@ -988,73 +1072,91 @@
   ondragleave={(event) => { if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) dragging = false; }}
   ondrop={handleDrop}
 >
+  <!-- Only on the start screen and chat list; a conversation sits on the plain panel. -->
+  <AiFieldBackground active={open && (!entries.length || showHistory)} strength={entries.length && !showHistory ? 0 : 1} />
   <header class="ai-header">
-    <img src="/brain.svg" alt="" />
+    <img src="/redesign/icon-brain.svg" alt="" />
     <h2>{showHistory ? 'Chats' : 'AI Chat'}</h2>
-    <button class="ai-icon-button" class:active={showHistory} type="button" aria-label="Chat history" aria-pressed={showHistory} title="Chats" onclick={() => { showHistory = !showHistory; if (showHistory) void loadChatList(); }}>
-      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-        <path d="M3.2 10a6.8 6.8 0 1 0 2-4.8L3.2 7.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
-        <path d="M3 3.8v3.6h3.6M10 6.6V10l2.4 1.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
-      </svg>
+    <button class="ai-header-button" class:active={showHistory} type="button" aria-label="Chats" aria-pressed={showHistory} title="Chats" onclick={() => { showHistory = !showHistory; if (showHistory) void loadChatList(); }}>
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5M12 7v5l4 2" /></svg>
     </button>
-    <button class="ai-icon-button" type="button" aria-label="New chat" title="New chat" disabled={!entries.length && !showHistory} onclick={newChat}>
-      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-        <path d="M9 3.5H5.5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
-        <path d="M14.6 2.9a1.6 1.6 0 0 1 2.3 2.3l-6.3 6.3-3 .7.7-3 6.3-6.3Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" />
-      </svg>
+    <button class="ai-header-button" type="button" aria-label="New chat" title="New chat" disabled={!entries.length && !showHistory} onclick={newChat}>
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /><path d="M18.4 2.6a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4Z" /></svg>
     </button>
-    <button class="ai-close" type="button" aria-label="Close AI Chat" onclick={onClose}><span></span><span></span></button>
+    <button class="ai-close" type="button" aria-label="Close AI Chat" onclick={onClose}></button>
   </header>
 
   <div class="ai-scroll" bind:this={scroller} onscroll={handleScroll}>
-    <div bind:this={scrollContent}>
+    <div class="ai-scroll-content" bind:this={scrollContent}>
     {#snippet chatRow(/** @type {{ id: string; title: string; document: string | null; updatedAt: string }} */ saved)}
       <div class="ai-chat-row" class:current={chat?.id === saved.id}>
-        <button type="button" class="ai-chat-open" disabled={busy} onclick={() => resumeChat(saved.id)}>
-          <span class="ai-chat-title">{saved.title}</span>
-          <span class="ai-chat-meta">{saved.document ?? 'No document'} · {relativeTime(saved.updatedAt)}</span>
+        <button type="button" class="ai-chat-open" disabled={busy} title={saved.document ?? undefined} onclick={() => resumeChat(saved.id)}>
+          <span class="ai-chat-title" use:fadeWhenClipped>{saved.title}</span>
         </button>
-        <button type="button" class="ai-chat-delete" aria-label={`Delete chat ${saved.title}`} title="Delete" onclick={() => deleteSavedChat(saved.id)}><span></span><span></span></button>
+        <button type="button" class="ai-chat-delete" aria-label={`Delete chat ${saved.title}`} title="Delete" onclick={() => deleteSavedChat(saved.id)}></button>
       </div>
     {/snippet}
     {#if showHistory}
-      <div class="ai-history" in:fade={{ duration: 150 }}>
+      <div class="ai-list" in:fade={{ duration: 150 }}>
         {#if savedChats.length}
           {#each savedChats as saved (saved.id)}{@render chatRow(saved)}{/each}
         {:else}
-          <p class="ai-history-empty">No saved chats yet.</p>
+          <p class="ai-list-empty">No chats yet</p>
         {/if}
       </div>
     {:else if !entries.length}
       <div class="ai-empty" in:fade={{ duration: 180 }}>
-        <span class="ai-empty-mark" aria-hidden="true"><img src="/brain.svg" alt="" /></span>
-        <h3>Docuflex AI</h3>
-        <p>Ask about your document or tell me what to change. I read, edit, comment and organize pages right here, and every change can be undone.</p>
-        <div class="ai-suggestions">
+        <div class="ai-list">
           {#each suggestions as suggestion (suggestion.label)}
             <button type="button" class="ai-suggestion" disabled={!status?.available} onclick={() => send(suggestion.prompt)}>
+              <img src={suggestion.icon} alt="" />
               <span>{suggestion.label}</span>
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
             </button>
           {/each}
         </div>
         {#if savedChats.length}
-          <div class="ai-recent">
-            <div class="ai-recent-heading">
-              <span>Recent chats</span>
-              {#if savedChats.length > 4}<button type="button" onclick={() => (showHistory = true)}>Show all</button>{/if}
-            </div>
-            {#each savedChats.slice(0, 4) as saved (saved.id)}{@render chatRow(saved)}{/each}
+          <hr class="ai-divider" />
+          <div class="ai-list">
+            {#each savedChats.slice(0, 5) as saved (saved.id)}{@render chatRow(saved)}{/each}
           </div>
         {/if}
       </div>
     {:else}
+      <!-- One plain row per step, like Claude Code: what ran, and a chevron for its details. -->
+      {#snippet toolStep(/** @type {ToolEntry} */ tool)}
+        {@const info = toolInfo.get(tool.name)}
+        {@const detail = summarizeArgs(tool.name, tool.args)}
+        <div class="ai-step" class:expanded={tool.expanded} data-status={tool.status}>
+          <button type="button" class="ai-step-row" aria-expanded={tool.expanded} onclick={() => { tool.expanded = !tool.expanded; refresh(); }}>
+            <span class="ai-step-text"><span class="ai-step-title">{info?.title ?? tool.name}</span>{#if detail}<span class="ai-step-detail">{detail}</span>{/if}</span>
+            {#if tool.status === 'streaming' || tool.status === 'running'}
+              <span class="ai-spinner" aria-label={statusLabel(tool.status)}></span>
+            {:else}
+              {#if tool.status !== 'done'}<span class="ai-step-status">{statusLabel(tool.status)}</span>{/if}
+              <svg class="ai-step-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg>
+            {/if}
+          </button>
+          {#if tool.expanded}
+            <div class="ai-step-details" transition:slide={{ duration: 200, easing: cubicOut }}>
+              {#if tool.helpers?.length}
+                {#each tool.helpers as helper (helper.id)}
+                  <p class="ai-step-helper" data-status={helper.status}>{helper.task} <span>Page {helper.page} · {helper.status === 'running' ? (helper.current || 'Starting') : helper.summary}</span></p>
+                {/each}
+              {/if}
+              {#if tool.image}<img class="ai-step-image" src={tool.image} alt={`Rendered page ${tool.args.page ?? ''}`} />{/if}
+              <pre>{displayArgs(tool.args)}</pre>
+              {#if tool.result}<pre class:error={tool.status === 'error'}>{prettyResult(tool.result)}</pre>{/if}
+            </div>
+          {/if}
+        </div>
+      {/snippet}
       <div class="ai-thread">
-        {#each entries as entry (entry.id)}
-          {#if entry.role === 'user'}
+        {#each blocks as block (block.id)}
+          {#if block.kind === 'entry' && block.entry.role === 'user'}
+            {@const entry = block.entry}
             <div class="ai-user" in:fly={{ y: 8, duration: 220, easing: cubicOut }}>
               {#if entry.quote}
-                <p class="ai-quote">{#if entry.quote.page}<span>Page {entry.quote.page}</span>{/if}“{entry.quote.text}”</p>
+                <p class="ai-quote">{#if entry.quote.page}<span>P{entry.quote.page}</span>{/if}{entry.quote.text}</p>
               {/if}
               {#if entry.images.length}
                 <div class="ai-user-images">
@@ -1063,113 +1165,41 @@
               {/if}
               {#if entry.text}<p class="ai-user-text">{entry.text}</p>{/if}
             </div>
-          {:else if entry.role === 'assistant'}
-            <div class="ai-turn">
-              {#if entry.reasoning}
-                <button
-                  type="button"
-                  class="ai-thinking"
-                  class:live={entry.streaming && !entry.text && !entry.tools.length}
-                  aria-expanded={entry.showReasoning}
-                  onclick={() => { entry.showReasoning = !entry.showReasoning; refresh(); }}
-                >
-                  <span>
-                    {#if entry.streaming && !entry.thinkingMs}Thinking{#if entry.thinkingStartedAt} · {duration(now - entry.thinkingStartedAt)}{/if}{:else}Thought for {duration(entry.thinkingMs)}{/if}
-                  </span>
-                  <svg class:open={entry.showReasoning} width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
-                </button>
-                {#if entry.showReasoning}
-                  <p class="ai-reasoning" transition:slide={{ duration: 200, easing: cubicOut }}>{entry.reasoning.trim()}</p>
-                {/if}
-              {:else if entry.streaming && !entry.text && !entry.tools.length}
-                <div class="ai-thinking live static"><span>Working</span></div>
-              {/if}
-
-              {#if entry.text}
-                <div class="ai-markdown" class:streaming={entry.streaming && !entry.tools.length}>{@html renderMarkdown(entry.text)}</div>
-              {/if}
-
-              {#if entry.tools.length}
-                <div class="ai-tools">
-                  {#each entry.tools as tool (tool.id)}
-                    {@const info = toolInfo.get(tool.name)}
-                    <div class="ai-tool" class:expanded={tool.expanded} data-status={tool.status} in:fly={{ y: 6, duration: 200, easing: cubicOut }}>
-                      <button type="button" class="ai-tool-row" aria-expanded={tool.expanded} onclick={() => { tool.expanded = !tool.expanded; refresh(); }}>
-                        <img class="ai-tool-icon" src={TOOL_ICONS[tool.name] ?? '/toolbar/small/select.svg'} alt="" />
-                        <span class="ai-tool-title">{info?.title ?? tool.name}</span>
-                        <span class="ai-tool-detail">{summarizeArgs(tool.name, tool.args)}</span>
-                        <span class="ai-tool-state" title={statusLabel(tool.status)} aria-label={statusLabel(tool.status)}>
-                          {#if tool.status === 'streaming' || tool.status === 'running'}
-                            <span class="ai-spinner"></span>
-                          {:else if tool.status === 'done'}
-                            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="m3.5 8.5 3 3 6-7" stroke="#2fb344" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" /></svg>
-                          {:else if tool.status === 'error'}
-                            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="#c83e3e" stroke-width="1.5" /><path d="M8 4.8v3.7M8 10.9v.1" stroke="#c83e3e" stroke-width="1.6" stroke-linecap="round" /></svg>
-                          {:else if tool.status === 'approval'}
-                            <span class="ai-approval-dot"></span>
-                          {:else}
-                            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7" stroke="#9a9a9a" stroke-width="1.5" stroke-linecap="round" /></svg>
-                          {/if}
-                        </span>
-                      </button>
-
-                      {#if tool.status === 'approval'}
-                        <div class="ai-approval" transition:slide={{ duration: 200, easing: cubicOut }}>
-                          <p>{approvalText(tool)}</p>
-                          <div class="ai-approval-actions">
-                            <button type="button" class="ai-action secondary" onclick={() => answerApproval(tool.id, false)}>Deny</button>
-                            <button type="button" class="ai-action primary" onclick={() => answerApproval(tool.id, true)}>Allow</button>
-                          </div>
-                        </div>
-                      {/if}
-
-                      {#if tool.helpers?.length}
-                        <div class="ai-helpers">
-                          {#each tool.helpers as helper (helper.id)}
-                            <div class="ai-helper" data-status={helper.status}>
-                              <span class="ai-helper-state" aria-label={helper.status}>
-                                {#if helper.status === 'running'}
-                                  <span class="ai-spinner"></span>
-                                {:else if helper.status === 'done'}
-                                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="m3.5 8.5 3 3 6-7" stroke="#2fb344" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
-                                {:else}
-                                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7" stroke={helper.status === 'error' ? '#c83e3e' : '#9a9a9a'} stroke-width="1.6" stroke-linecap="round" /></svg>
-                                {/if}
-                              </span>
-                              <span class="ai-helper-task" title={helper.task}>{helper.task}</span>
-                              <span class="ai-helper-detail" title={helper.summary || undefined}>
-                                Page {helper.page}{helper.region ? ' · area' : ''} ·
-                                {#if helper.status === 'running'}{helper.current || 'Starting'} · {helper.steps} {helper.steps === 1 ? 'step' : 'steps'}{:else}{helper.summary}{/if}
-                              </span>
-                            </div>
-                          {/each}
-                        </div>
-                      {/if}
-
-                      {#if tool.image}
-                        <button type="button" class="ai-tool-image" class:large={tool.expanded} aria-label="Toggle page image size" onclick={() => { tool.expanded = !tool.expanded; refresh(); }}>
-                          <img src={tool.image} alt={`Rendered page ${tool.args.page ?? ''}`} />
-                        </button>
-                      {/if}
-
-                      {#if tool.expanded}
-                        <div class="ai-tool-details" transition:slide={{ duration: 200, easing: cubicOut }}>
-                          <span>Input</span>
-                          <pre>{displayArgs(tool.args)}</pre>
-                          {#if tool.result}
-                            <span>{tool.status === 'error' ? 'Error' : 'Result'}</span>
-                            <pre class:error={tool.status === 'error'}>{prettyResult(tool.result)}</pre>
-                          {/if}
-                        </div>
-                      {/if}
-                    </div>
-                  {/each}
+          {:else if block.kind === 'work'}
+            {@const running = block.steps.some((step) => step.streaming || step.tools.some((tool) => tool.status === 'running' || tool.status === 'streaming'))}
+            {@const tools = block.steps.flatMap((step) => step.tools)}
+            {@const failed = tools.filter((tool) => tool.status === 'error').length}
+            {@const started = block.request?.startedAt}
+            {@const elapsed = started ? (running ? now : (block.request?.doneAt ?? 0)) - started : 0}
+            {@const expanded = openWork.has(block.id)}
+            <div class="ai-work" class:expanded>
+              <button type="button" class="ai-work-line" class:live={running} aria-expanded={expanded} onclick={() => toggleWork(block.id)}>
+                <!-- One string: Svelte trims spaces at the edges of {#if} blocks, which glued "Working·8s". -->
+                <span class="ai-work-label">{running ? `${currentStep(block.steps)}${elapsed > 0 ? ` · ${duration(elapsed)}` : ''}` : elapsed > 0 ? `Worked for ${duration(elapsed)}` : 'Worked'}</span>
+                {#if tools.length}<span class="ai-work-count">{`· ${tools.length} ${tools.length === 1 ? 'step' : 'steps'}${failed ? ` · ${failed} failed` : ''}`}</span>{/if}
+                {#if tools.length}<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>{/if}
+              </button>
+              {#if expanded}
+                <div class="ai-work-log" transition:slide={{ duration: 220, easing: cubicOut }}>
+                  {#each tools as tool (tool.id)}{@render toolStep(tool)}{/each}
                 </div>
               {/if}
+              {#each tools.filter((tool) => tool.status === 'approval') as tool (tool.id)}
+                <div class="ai-approval" transition:slide={{ duration: 200, easing: cubicOut }}>
+                  <p>{approvalText(tool)}</p>
+                  <div class="ai-actions">
+                    <button type="button" class="ai-action secondary" onclick={() => answerApproval(tool.id, false)}>Deny</button>
+                    <button type="button" class="ai-action" onclick={() => answerApproval(tool.id, true)}>Allow</button>
+                  </div>
+                </div>
+              {/each}
             </div>
-          {:else if entry.role === 'note'}
-            <p class="ai-note" in:fade={{ duration: 160 }}><span>{entry.text}</span></p>
-          {:else}
+          {:else if block.kind === 'answer'}
+            <div class="ai-markdown" class:streaming={block.entry.streaming}>{@html renderMarkdown(block.entry.text, mathTick)}</div>
+          {:else if block.kind === 'entry' && block.entry.role === 'note'}
+            <p class="ai-note" in:fade={{ duration: 160 }}><span>{block.entry.text}</span></p>
+          {:else if block.kind === 'entry'}
+            {@const entry = block.entry}
             <div class="ai-error" role="alert" in:fly={{ y: 6, duration: 200, easing: cubicOut }}>
               <p>{entry.text}</p>
               {#if !busy && entry === entries[entries.length - 1]}
@@ -1184,29 +1214,28 @@
   </div>
 
   <footer class="ai-composer">
-    {#if selectionQuote || attachments.length}
-      <div class="ai-chips" transition:slide={{ duration: 180, easing: cubicOut }}>
-        {#if selectionQuote}
-          <div class="ai-chip quote">
-            <span>{#if selectionQuote.page}<em>Page {selectionQuote.page}</em>{/if}“{selectionQuote.text}”</span>
-            <button type="button" aria-label="Remove selected text" onclick={() => { usedSelection = selectionQuote?.text ?? ''; selectionQuote = null; }}><span></span><span></span></button>
-          </div>
-        {/if}
-        {#each attachments as image, index (image)}
-          <div class="ai-chip image">
-            <img src={image} alt="Attachment" />
-            <button type="button" aria-label="Remove image" onclick={() => (attachments = attachments.filter((_, item) => item !== index))}><span></span><span></span></button>
-          </div>
-        {/each}
-      </div>
-    {/if}
-
-    <div class="ai-input" class:focus-ring={dragging}>
+    <div class="ai-input">
+      {#if selectionQuote || attachments.length}
+        <div class="ai-chips" transition:slide={{ duration: 180, easing: cubicOut }}>
+          {#if selectionQuote}
+            <div class="ai-chip quote">
+              <span>{#if selectionQuote.page}<em>P{selectionQuote.page}</em>{/if}{selectionQuote.text}</span>
+              <button type="button" aria-label="Remove selected text" onclick={() => { usedSelection = selectionQuote?.text ?? ''; selectionQuote = null; }}></button>
+            </div>
+          {/if}
+          {#each attachments as image, index (image)}
+            <div class="ai-chip image">
+              <img src={image} alt="Attachment" />
+              <button type="button" aria-label="Remove image" onclick={() => (attachments = attachments.filter((_, item) => item !== index))}></button>
+            </div>
+          {/each}
+        </div>
+      {/if}
       <textarea
         bind:this={input}
         bind:value={draft}
         rows="1"
-        placeholder={busy ? 'Working… Press Esc to stop' : hasDocument ? 'Ask or tell Docuflex AI what to do…' : 'Ask Docuflex AI…'}
+        placeholder={busy ? 'Working… Esc to stop' : 'Ask anything'}
         aria-label="Message"
         disabled={!status?.available}
         oninput={autosize}
@@ -1214,552 +1243,414 @@
         onpaste={handlePaste}
       ></textarea>
       <div class="ai-input-bar">
-        <button class="ai-icon-button attach" type="button" aria-label="Attach image" title="Attach image" disabled={!status?.available || busy} onclick={() => fileInput?.click()}>
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m16.2 9.4-6.3 6.3a4 4 0 0 1-5.7-5.7l6.6-6.6a2.7 2.7 0 0 1 3.8 3.8l-6.6 6.6a1.3 1.3 0 0 1-1.9-1.9l6-6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+        <button class="ai-bar-button" type="button" aria-label="Attach image" title="Attach image" disabled={!status?.available || busy} onclick={() => fileInput?.click()}>
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 4.5v15M4.5 12h15" /></svg>
         </button>
-        <span class="ai-model" title={status?.fallbackModel ? `Falls back to ${modelName(status.fallbackModel)}` : undefined}>{modelLabel}</span>
-        {#if busy}
-          <button class="ai-send stop" type="button" aria-label="Stop" title="Stop (Esc)" onclick={stop} in:fade={{ duration: 120 }}>
-            <span></span>
+        <div class="ai-model-picker">
+          <button class="ai-model" class:open={modelMenuOpen} type="button" aria-haspopup="menu" aria-expanded={modelMenuOpen} disabled={!models.length} onclick={(event) => { event.stopPropagation(); modelMenuOpen = !modelMenuOpen; }}>
+            <span>{modelLabel}</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
           </button>
+          {#if modelMenuOpen}
+            <div class="ai-model-menu" role="menu" transition:fly={{ y: 6, duration: 160, easing: cubicOut }}>
+              {#each models as model (model.id)}
+                <button type="button" role="menuitemradio" aria-checked={model.id === selectedModel} class:active={model.id === selectedModel} onclick={(event) => { event.stopPropagation(); chooseModel(model.id); }}>
+                  <span>{model.name}</span>
+                  {#if model.id === selectedModel}<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7" /></svg>{/if}
+                </button>
+              {/each}
+              {#if usage.tokens}<p class="ai-usage">{usage.tokens.toLocaleString()} tokens · ${usage.cost.toFixed(usage.cost < 0.01 ? 4 : 3)}</p>{/if}
+            </div>
+          {/if}
+        </div>
+        {#if busy}
+          <button class="ai-send stop" type="button" aria-label="Stop" title="Stop (Esc)" onclick={stop} in:fade={{ duration: 120 }}><span></span></button>
         {:else}
           <button class="ai-send" type="button" aria-label="Send" title="Send (Enter)" disabled={(!draft.trim() && !attachments.length) || !status?.available} onclick={() => send()} in:fade={{ duration: 120 }}>
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true"><path d="M9 14.5v-11M4.5 8 9 3.5 13.5 8" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 19V5M5.5 11.5 12 5l6.5 6.5" /></svg>
           </button>
         {/if}
       </div>
     </div>
-
-    <p class="ai-meta">
-      {#if activeDocument}
-        <span class="ai-context" title={activeDocument.name}>
-          <img src="/pdficon.svg" alt="" />
-          <span>{activeDocument.name}</span>
-          {#if activeDocument.currentPage}<em>· Page {activeDocument.currentPage}{#if activeDocument.selectedPages?.length > 1} · {activeDocument.selectedPages.length} selected{/if}</em>{/if}
-        </span>
-      {:else}
-        <span class="ai-context"><span>No document open</span></span>
-      {/if}
-      {#if usage.tokens}<span class="ai-usage" title={`${usage.tokens.toLocaleString()} tokens this chat`}>${usage.cost.toFixed(usage.cost < 0.01 ? 4 : 3)}</span>{/if}
-    </p>
   </footer>
   <input bind:this={fileInput} class="ai-file-input" type="file" accept="image/*" multiple onchange={(event) => { void addImages([...(event.currentTarget.files ?? [])]); event.currentTarget.value = ''; }} />
 </aside>
 
 <style>
-  /* Floating window like Sign, Comments and MCP: same card, header and shadow. */
+  /*
+   * Same card, header and fields as the editor's right-hand panels.
+   * Two voices: Geist for what people and the AI say (black), Geist Mono for
+   * everything the app reports around it (grey).
+   */
   .ai-panel {
-    position: fixed;
-    z-index: 70;
-    top: 70px;
-    right: 14px;
-    bottom: 14px;
+    --ai-text: rgba(0, 0, 0, 0.85);
+    --ai-muted: rgba(0, 0, 0, 0.45);
+    --ai-line: rgba(0, 0, 0, 0.1);
+    --ai-mono: "Geist Mono Variable", "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    /* Docked in the shell's right padding (DocuflexApp .ai-docked), the full height of the window. */
+    position: absolute;
+    z-index: 7;
+    top: 0;
+    right: 0;
+    bottom: 0;
     display: grid;
-    grid-template-rows: 50px minmax(0, 1fr) auto;
-    /* One column at the panel width: long unbroken text must never widen it. */
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 56px minmax(0, 1fr) auto;
+    /*
+     * The panel is as wide as the reserved space (0 to 440px) and clips; the
+     * content keeps a fixed 440px column pinned to the right, so opening reads
+     * as a drawer sliding in, and nothing sticks out past the window.
+     */
+    grid-template-columns: 438.5px;
+    justify-content: end;
     box-sizing: border-box;
-    width: min(400px, calc(100% - 28px));
+    width: var(--ai-dock, 0px);
+    min-width: 0;
     min-height: 0;
     overflow: hidden;
-    border: 1.5px solid #c5c5c5;
-    border-radius: 13px;
-    background: #fafafa;
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.12);
-    color: #000;
-    font-family: "Inter Variable", Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    font-size: 16px;
+    border-left: 1.5px solid #c3c2c2;
+    background: #f4f4f3;
+    color: var(--ai-text);
+    font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 17px;
+    letter-spacing: -0.17px;
     opacity: 0;
-    pointer-events: none;
     visibility: hidden;
-    transform: translateX(18px);
-    transition: opacity 200ms ease, transform 240ms cubic-bezier(0.22, 1, 0.36, 1), visibility 0s linear 240ms, border-color 160ms ease, box-shadow 200ms ease;
+    transition: opacity 220ms ease, visibility 0s linear 280ms;
     -webkit-font-smoothing: antialiased;
   }
 
   .ai-panel.open {
     opacity: 1;
-    pointer-events: auto;
     visibility: visible;
-    transform: none;
-    transition: opacity 200ms ease, transform 240ms cubic-bezier(0.22, 1, 0.36, 1), visibility 0s, border-color 160ms ease, box-shadow 200ms ease;
+    transition: opacity 220ms ease, visibility 0s;
   }
 
-  .ai-panel.dragging {
-    border-color: #0878f9;
-    box-shadow: 0 0 0 3px rgba(8, 120, 249, 0.14), 0 12px 32px rgba(0, 0, 0, 0.12);
+
+  button { font: inherit; letter-spacing: inherit; }
+
+  svg path { stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+
+  /* Everything sits above the character field (AiFieldBackground). */
+  .ai-header,
+  .ai-scroll,
+  .ai-composer {
+    position: relative;
+    z-index: 1;
   }
 
-  /* Header: same strip as the signature, comment and MCP windows. */
+  /* ---- Header ---- */
   .ai-header {
     display: grid;
-    grid-template-columns: 26px minmax(0, 1fr) 30px 30px 28px;
+    grid-template-columns: 24px minmax(0, 1fr) 36px 36px 36px;
     align-items: center;
     gap: 2px;
     box-sizing: border-box;
-    height: 50px;
-    padding: 0 12px;
-    border-bottom: 1px solid #cacaca;
-    background: #eeeeee;
+    height: 56px;
+    padding: 0 10px 0 16px;
+    border-bottom: 1.5px solid #c3c2c2;
+    background: rgba(214, 214, 214, 0.75);
   }
 
-  .ai-header > img {
-    width: 23px;
-    height: 24px;
-  }
+  .ai-header > img { width: 24px; height: 24px; }
 
   .ai-header h2 {
-    margin: 0 0 0 7px;
+    margin: 0 0 0 8px;
     overflow: hidden;
-    font-size: 18px;
+    color: #000;
+    font-size: 20px;
     font-weight: 400;
     line-height: 1.22;
-    letter-spacing: -0.25px;
+    letter-spacing: -0.2px;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .ai-icon-button {
+  .ai-header-button,
+  .ai-bar-button {
     display: grid;
     place-items: center;
-    width: 28px;
-    height: 28px;
+    width: 36px;
+    height: 36px;
     padding: 0;
     border: 0;
-    border-radius: 8px;
+    border-radius: 10px;
     background: transparent;
-    color: #929292;
+    color: #818181;
     cursor: pointer;
-    transition: color 160ms ease, background-color 160ms ease, transform 160ms ease;
+    transition: background-color 150ms ease, color 150ms ease;
   }
 
-  .ai-icon-button:hover:not(:disabled) {
-    background: rgba(0, 0, 0, 0.05);
+  .ai-header-button:hover:not(:disabled),
+  .ai-header-button.active,
+  .ai-bar-button:hover:not(:disabled) {
+    background: rgba(0, 0, 0, 0.06);
     color: #000;
   }
 
-  .ai-icon-button:active:not(:disabled) {
-    transform: scale(0.94);
-  }
-
-  .ai-icon-button:disabled {
-    cursor: default;
-    opacity: 0.4;
-  }
+  .ai-header-button:disabled,
+  .ai-bar-button:disabled { cursor: default; opacity: 0.35; }
 
   .ai-close {
-    position: relative;
-    width: 28px;
-    height: 28px;
+    width: 36px;
+    height: 36px;
     padding: 0;
     border: 0;
-    border-radius: 9px;
-    background: transparent;
+    border-radius: 10px;
+    background: url('/redesign/tab-close.svg') center / 14.4px 14.4px no-repeat;
     cursor: pointer;
-    transition: transform 160ms ease;
+    transition: transform 160ms ease, filter 160ms ease;
   }
 
-  .ai-close:active {
-    transform: scale(0.94);
-  }
+  .ai-close:hover { filter: brightness(0.6); }
+  .ai-close:active { transform: scale(0.94); }
 
-  .ai-close span,
-  .ai-chip button span {
-    position: absolute;
-    top: 13px;
-    left: 6px;
-    width: 16px;
-    height: 1.5px;
-    border-radius: 999px;
-    background: #929292;
-    transform: rotate(45deg);
-    transition: background-color 160ms ease;
-  }
-
-  .ai-close span + span,
-  .ai-chip button span + span {
-    transform: rotate(-45deg);
-  }
-
-  .ai-close:hover span,
-  .ai-chip button:hover span {
-    background: #000;
-  }
-
-  .ai-icon-button.active {
-    background: #111;
-    color: #fff;
-  }
-
-  .ai-icon-button.active:hover:not(:disabled) {
-    background: #000;
-    color: #fff;
-  }
-
-  /* Saved chats */
-  .ai-history {
-    display: grid;
-    gap: 8px;
-    padding: 16px 18px;
-  }
-
-  .ai-history-empty {
-    margin: 24px 0;
-    color: #9a9a9a;
-    font-size: 16px;
-    text-align: center;
-  }
-
-  .ai-recent {
-    display: grid;
-    gap: 8px;
-    width: 100%;
-    margin-top: 14px;
-    text-align: left;
-  }
-
-  .ai-recent-heading {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    padding: 0 2px;
-    color: #7a7a7a;
-    font-size: 14px;
-  }
-
-  .ai-recent-heading button {
-    padding: 0;
-    border: 0;
-    background: none;
-    color: #0878f9;
-    font: inherit;
-    cursor: pointer;
-  }
-
-  .ai-chat-row {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 32px;
-    align-items: center;
-    overflow: hidden;
-    border: 1px solid #d7d7d7;
-    border-radius: 8px;
-    background: #f3f3f3;
-    transition: background-color 180ms ease, border-color 180ms ease;
-  }
-
-  .ai-chat-row:hover {
-    border-color: #c8c8c8;
-    background: #eeeeee;
-  }
-
-  .ai-chat-row.current {
-    border-color: #0878f9;
-  }
-
-  .ai-chat-open {
-    display: grid;
-    gap: 2px;
-    min-width: 0;
-    padding: 8px 4px 9px 12px;
-    border: 0;
-    background: transparent;
-    font: inherit;
-    text-align: left;
-    cursor: pointer;
-  }
-
-  .ai-chat-open:disabled {
-    cursor: default;
-    opacity: 0.6;
-  }
-
-  .ai-chat-title,
-  .ai-chat-meta {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .ai-chat-title {
-    color: #111;
-    font-size: 15px;
-    letter-spacing: -0.2px;
-  }
-
-  .ai-chat-meta {
-    color: #9a9a9a;
-    font-size: 13px;
-  }
-
-  .ai-chat-delete {
-    position: relative;
-    width: 28px;
-    height: 28px;
-    padding: 0;
-    border: 0;
-    background: transparent;
-    cursor: pointer;
-    opacity: 0;
-    transform: scale(0.8);
-    transition: opacity 150ms ease;
-  }
-
-  .ai-chat-row:hover .ai-chat-delete,
-  .ai-chat-delete:focus-visible {
-    opacity: 1;
-  }
-
-  .ai-chat-delete span {
-    position: absolute;
-    top: 13px;
-    left: 6px;
-    width: 16px;
-    height: 1.5px;
-    border-radius: 999px;
-    background: #929292;
-    transform: rotate(45deg);
-  }
-
-  .ai-chat-delete span + span {
-    transform: rotate(-45deg);
-  }
-
-  .ai-chat-delete:hover span {
-    background: #c83e3e;
-  }
-
-  /* Conversation */
+  /* ---- Scroll area ---- */
   .ai-scroll {
-    min-width: 0;
     min-height: 0;
     overflow-x: hidden;
     overflow-y: auto;
     overscroll-behavior: contain;
-    scrollbar-width: thin;
-    scrollbar-color: #d0d0d0 transparent;
+    scrollbar-width: none;
   }
 
-  .ai-empty {
-    display: grid;
-    justify-items: center;
-    gap: 10px;
-    padding: 46px 22px 24px;
-    text-align: center;
-  }
+  .ai-scroll::-webkit-scrollbar { display: none; }
 
-  .ai-empty-mark {
-    display: grid;
-    place-items: center;
-    width: 58px;
-    height: 58px;
-    margin-bottom: 4px;
-    border: 1px solid #d7d7d7;
-    border-radius: 16px;
-    background: #f3f3f3;
-    box-shadow: inset 0 -2px 0 rgba(0, 0, 0, 0.03);
-  }
+  .ai-scroll-content { padding: 15px 14px 18px; }
 
-  .ai-empty-mark img {
-    width: 30px;
-    height: 31px;
-  }
 
-  .ai-empty h3 {
-    margin: 0;
-    font-size: 22px;
-    font-weight: 400;
-    letter-spacing: -0.4px;
-  }
+  /* ---- Empty state, history: rows at the panels' 48px / 21px ---- */
+  .ai-empty { display: grid; gap: 14px; }
 
-  .ai-empty p {
-    max-width: 320px;
-    margin: 0 0 10px;
-    color: #7a7a7a;
-    font-size: 16px;
-    line-height: 1.42;
-    letter-spacing: -0.2px;
-  }
+  .ai-list { display: grid; gap: 8px; }
 
-  .ai-suggestions {
-    display: grid;
-    gap: 8px;
-    width: 100%;
+  .ai-list-empty { margin: 4px 3px; color: var(--ai-muted); }
+
+  .ai-divider { width: 100%; height: 1px; margin: 0; border: 0; background: var(--ai-line); }
+
+  .ai-suggestion,
+  .ai-chat-row {
+    box-sizing: border-box;
+    min-height: 44px;
+    border: 1px solid var(--ai-line);
+    border-radius: 14px;
+    background: #fff;
+    transition: background-color 150ms ease, border-color 150ms ease;
   }
 
   .ai-suggestion {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    min-height: 42px;
-    padding: 0 12px;
-    border: 1px solid #d7d7d7;
-    border-radius: 8px;
-    background: #f3f3f3;
-    color: #3f3f3f;
-    font: inherit;
-    font-size: 16px;
-    letter-spacing: -0.2px;
+    gap: 12px;
+    width: 100%;
+    padding: 0 13px;
+    color: var(--ai-text);
     text-align: left;
     cursor: pointer;
-    transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease, transform 160ms ease;
   }
 
-  .ai-suggestion svg {
-    flex: none;
-    color: #9a9a9a;
-    transition: color 180ms ease, transform 180ms ease;
+  .ai-suggestion img { width: 21px; height: 21px; opacity: 0.85; }
+  .ai-suggestion:hover:not(:disabled) { background: #f2f2f2; }
+  .ai-suggestion:disabled { cursor: default; opacity: 0.5; }
+
+  /* Title only; on hover the row darkens 5% and the title fades out under the cross. */
+  .ai-chat-row { position: relative; overflow: hidden; }
+  .ai-chat-row:hover { background: #f2f2f2; }
+  .ai-chat-row.current { border-color: rgba(0, 0, 0, 0.22); }
+
+  .ai-chat-open {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    height: 42px;
+    padding: 0 13px;
+    border: 0;
+    background: transparent;
+    color: var(--ai-text);
+    text-align: left;
+    cursor: pointer;
   }
 
-  .ai-suggestion:hover {
-    border-color: #c8c8c8;
-    background: #eeeeee;
-    color: #000;
+  .ai-chat-open:disabled { cursor: default; }
+
+  .ai-chat-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
   }
 
-  .ai-suggestion:hover svg {
-    color: #0878f9;
-    transform: translateX(2px);
+  .ai-chat-title:global(.clipped) {
+    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent);
+    mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent);
   }
 
-  .ai-suggestion:active {
-    transform: scale(0.99);
+  .ai-chat-row:hover .ai-chat-title.ai-chat-title,
+  .ai-chat-row:focus-within .ai-chat-title.ai-chat-title {
+    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 92px), transparent calc(100% - 44px));
+    mask-image: linear-gradient(90deg, #000 calc(100% - 92px), transparent calc(100% - 44px));
   }
 
-  .ai-thread {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    gap: 16px;
-    padding: 18px 18px 22px;
+  .ai-chat-delete {
+    position: absolute;
+    top: 50%;
+    right: 6px;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    border: 0;
+    border-radius: 10px;
+    background: url('/redesign/tab-close.svg') center / 14.4px 14.4px no-repeat;
+    opacity: 0;
+    transform: translateY(-50%);
+    cursor: pointer;
+    transition: opacity 150ms ease, filter 150ms ease;
   }
+
+  .ai-chat-row:hover .ai-chat-delete,
+  .ai-chat-delete:focus-visible { opacity: 1; }
+  .ai-chat-delete:hover { filter: brightness(0.6); }
+
+  /* ---- Thread ---- */
+  .ai-thread { display: grid; gap: 14px; }
+
+  /* A request starts a new section: more air above each message. */
+  .ai-thread > .ai-user:not(:first-child) { margin-top: 14px; }
 
   .ai-user {
     display: grid;
-    gap: 8px;
-    justify-self: end;
-    max-width: 88%;
-    padding: 10px 13px 11px;
-    border: 1px solid #d7d7d7;
-    border-radius: 12px 12px 4px 12px;
-    background: #f0f0f0;
+    justify-items: end;
+    gap: 6px;
+    margin-left: 44px;
   }
 
   .ai-user-text {
     margin: 0;
-    color: #111;
-    font-size: 16px;
+    padding: 10px 14px;
+    border-radius: 16px;
+    background: rgba(0, 0, 0, 0.055);
+    color: var(--ai-text);
     line-height: 1.42;
-    letter-spacing: -0.2px;
-    white-space: pre-wrap;
     overflow-wrap: anywhere;
+    white-space: pre-wrap;
+  }
+
+  .ai-quote,
+  .ai-chip.quote span {
+    display: -webkit-box;
+    overflow: hidden;
+    color: var(--ai-muted);
+    line-height: 1.45;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
   }
 
   .ai-quote {
-    display: -webkit-box;
     margin: 0;
-    padding: 6px 10px;
-    overflow: hidden;
-    border-left: 3px solid #ffd60a;
-    border-radius: 6px;
-    background: #fafafa;
-    color: #4a4a4a;
-    font-size: 14px;
-    line-height: 1.38;
-    -webkit-line-clamp: 3;
-    line-clamp: 3;
-    -webkit-box-orient: vertical;
+    padding-left: 10px;
+    border-left: 2px solid rgba(0, 0, 0, 0.14);
+    text-align: left;
   }
 
-  .ai-quote span {
-    margin-right: 6px;
-    color: #9a9a9a;
-  }
+  .ai-quote span,
+  .ai-chip.quote em { margin-right: 7px; color: rgba(0, 0, 0, 0.7); font-style: normal; }
 
-  .ai-user-images {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
+  .ai-user-images { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 
   .ai-user-images img {
-    width: 72px;
-    height: 72px;
-    border: 1px solid #d7d7d7;
-    border-radius: 6px;
+    max-width: 120px;
+    max-height: 90px;
+    border: 1px solid var(--ai-line);
+    border-radius: 11px;
     object-fit: cover;
   }
 
-  .ai-turn {
-    display: grid;
-    gap: 10px;
-    min-width: 0;
-  }
+  /*
+   * Each request's work folds into one quiet line; it opens into the step log.
+   * While it runs, the line names the current step and shimmers.
+   */
+  .ai-work { display: grid; gap: 8px; min-width: 0; }
 
-  .ai-thinking {
+  .ai-work-line {
     display: inline-flex;
     align-items: center;
     justify-self: start;
-    gap: 4px;
+    gap: 6px;
+    max-width: 100%;
     padding: 0;
     border: 0;
-    background: transparent;
-    color: #8a8a8a;
-    font: inherit;
-    font-size: 15px;
-    letter-spacing: -0.2px;
+    background: none;
+    color: var(--ai-muted);
     cursor: pointer;
+    transition: color 150ms ease;
   }
 
-  .ai-thinking.static {
-    cursor: default;
-  }
+  .ai-work-line:hover { color: rgba(0, 0, 0, 0.8); }
+  .ai-work-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ai-work-count { flex: none; }
+  .ai-work-line svg { flex: none; transition: transform 180ms ease; }
+  .ai-work.expanded .ai-work-line svg { transform: rotate(180deg); }
 
-  .ai-thinking svg {
-    transition: transform 200ms ease;
-  }
-
-  .ai-thinking svg.open {
-    transform: rotate(90deg);
-  }
-
-  .ai-thinking:hover:not(.static) {
-    color: #000;
-  }
-
-  /* Shimmer on the label while the model is thinking. */
-  .ai-thinking.live span {
-    background: linear-gradient(90deg, #9a9a9a 0%, #9a9a9a 35%, #1a1a1a 50%, #9a9a9a 65%, #9a9a9a 100%);
-    background-size: 220% 100%;
-    background-clip: text;
+  .ai-work-line.live .ai-work-label {
+    background: linear-gradient(90deg, rgba(0, 0, 0, 0.35) 0%, rgba(0, 0, 0, 0.8) 50%, rgba(0, 0, 0, 0.35) 100%) 0 0 / 200% 100%;
     -webkit-background-clip: text;
+    background-clip: text;
     color: transparent;
     animation: ai-shimmer 1.6s linear infinite;
   }
 
+  /* The opened log: one rounded box, a plain row per step. */
+  .ai-work-log {
+    display: grid;
+    min-width: 0;
+    overflow: hidden;
+    border: 1px solid var(--ai-line);
+    border-radius: 14px;
+  }
+
   @keyframes ai-shimmer {
-    from { background-position: 110% 0; }
-    to { background-position: -110% 0; }
+    from { background-position: 100% 0; }
+    to { background-position: -100% 0; }
   }
 
-  .ai-reasoning {
-    margin: 0;
-    padding: 2px 0 2px 12px;
-    border-left: 2px solid #dedede;
-    color: #8a8a8a;
-    font-size: 14px;
-    line-height: 1.45;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-  }
 
+  /* ---- Answer text ---- */
   .ai-markdown {
     min-width: 0;
-    color: #1a1a1a;
-    font-size: 16px;
-    line-height: 1.5;
-    letter-spacing: -0.2px;
+    color: var(--ai-text);
+    line-height: 1.55;
     overflow-wrap: anywhere;
   }
+
+  .ai-markdown :global(.table-wrap) {
+    margin: 0 0 10px;
+    overflow-x: auto;
+    border: 1px solid var(--ai-line);
+    border-radius: 12px;
+    background: #fff;
+  }
+
+  .ai-markdown :global(table) {
+    width: 100%;
+    border-collapse: collapse;
+    line-height: 1.4;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .ai-markdown :global(th),
+  .ai-markdown :global(td) {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--ai-line);
+    text-align: left;
+    white-space: nowrap;
+  }
+
+  .ai-markdown :global(th) {
+    color: var(--ai-muted);
+    font-weight: 400;
+  }
+
+  .ai-markdown :global(tr:last-child td) { border-bottom: 0; }
 
   .ai-markdown :global(p),
   .ai-markdown :global(ul),
@@ -1770,637 +1661,420 @@
   .ai-markdown :global(h4),
   .ai-markdown :global(h5),
   .ai-markdown :global(h6) {
-    margin: 0 0 9px;
+    margin: 0 0 10px;
   }
 
-  .ai-markdown > :global(:last-child) {
-    margin-bottom: 0;
-  }
+  .ai-markdown > :global(:last-child) { margin-bottom: 0; }
 
   .ai-markdown :global(h3),
   .ai-markdown :global(h4),
   .ai-markdown :global(h5),
   .ai-markdown :global(h6) {
+    color: #000;
     font-size: 17px;
-    font-weight: 600;
-    letter-spacing: -0.3px;
+    font-weight: 560;
   }
 
-  .ai-markdown :global(strong) {
-    font-weight: 600;
-  }
-
+  .ai-markdown :global(strong) { color: #000; font-weight: 560; }
   .ai-markdown :global(ul),
-  .ai-markdown :global(ol) {
-    padding-left: 22px;
+  .ai-markdown :global(ol) { padding-left: 21px; }
+  .ai-markdown :global(li + li) { margin-top: 4px; }
+
+  /* LaTeX rendered by MathJax as SVG in TeX's own fonts; it inherits the text colour. */
+  .ai-markdown :global(.math) {
+    display: inline-block;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    vertical-align: middle;
+    line-height: 0;
   }
 
-  .ai-markdown :global(li + li) {
-    margin-top: 3px;
+  .ai-markdown :global(.math svg) {
+    max-width: none;
+    font-size: 108%;
   }
+
+  .ai-markdown :global(.math.display) {
+    display: block;
+    margin: 10px 0;
+    padding: 4px 0;
+    text-align: center;
+  }
+
+  .ai-markdown :global(.math.display svg) { font-size: 112%; }
+  .ai-markdown :global(.math.pending),
+  .ai-markdown :global(.math.invalid) { line-height: inherit; }
+  .ai-markdown :global(.math.pending code) { opacity: 0.55; }
+  .ai-markdown :global(.math.invalid code) { color: #c83e3e; }
 
   .ai-markdown :global(code) {
     padding: 1px 5px;
-    border: 1px solid #e0e0e0;
-    border-radius: 5px;
-    background: #f0f0f0;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 13.5px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.05);
+    font-family: var(--ai-mono);
+    font-size: 15.5px;
+    letter-spacing: 0;
   }
 
   .ai-markdown :global(pre) {
-    padding: 10px 12px;
     overflow-x: auto;
-    border: 1px solid #d7d7d7;
-    border-radius: 8px;
-    background: #f3f3f3;
+    padding: 11px 13px;
+    border: 1px solid var(--ai-line);
+    border-radius: 12px;
+    background: #fff;
   }
 
-  .ai-markdown :global(pre code) {
-    padding: 0;
-    border: 0;
-    background: transparent;
-  }
+  .ai-markdown :global(pre code) { padding: 0; background: none; }
 
   .ai-markdown :global(blockquote) {
-    padding: 2px 0 2px 12px;
-    border-left: 3px solid #ffd60a;
-    color: #4a4a4a;
+    padding-left: 10px;
+    border-left: 2px solid rgba(0, 0, 0, 0.14);
+    color: var(--ai-muted);
   }
 
-  .ai-markdown :global(a) {
-    color: #0878f9;
-    text-decoration: none;
-  }
+  .ai-markdown :global(a) { color: #1684f8; text-decoration: none; }
+  .ai-markdown :global(a:hover) { text-decoration: underline; }
+  .ai-markdown :global(hr) { height: 1px; margin: 14px 0; border: 0; background: var(--ai-line); }
 
-  .ai-markdown :global(a:hover) {
-    text-decoration: underline;
-  }
-
-  .ai-markdown :global(hr) {
-    margin: 12px 0;
-    border: 0;
-    border-top: 1px solid #dedede;
-  }
-
-  /* Caret while text streams in. */
   .ai-markdown.streaming > :global(:last-child)::after {
     display: inline-block;
     width: 7px;
     height: 15px;
     margin-left: 3px;
     border-radius: 2px;
-    background: #0878f9;
+    background: rgba(0, 0, 0, 0.7);
     vertical-align: -2px;
     content: '';
-    animation: ai-caret 1s steps(2, start) infinite;
+    animation: ai-caret 1s steps(1) infinite;
   }
 
-  @keyframes ai-caret {
-    to { visibility: hidden; }
-  }
+  @keyframes ai-caret { 50% { opacity: 0; } }
 
-  /* Tool calls: grouped like the comment thread list. */
-  .ai-tools {
-    display: grid;
-    overflow: hidden;
-    border: 1px solid #d7d7d7;
-    border-radius: 8px;
-    background: #f3f3f3;
-  }
+  /* ---- Steps ---- */
+  .ai-step { min-width: 0; }
+  .ai-step + .ai-step { border-top: 1px solid var(--ai-line); }
 
-  .ai-tool + .ai-tool {
-    border-top: 1px solid #dedede;
-  }
-
-  .ai-tool-row {
-    display: grid;
-    grid-template-columns: 20px auto minmax(0, 1fr) 18px;
+  .ai-step-row {
+    display: flex;
     align-items: center;
-    gap: 9px;
+    gap: 8px;
     width: 100%;
-    min-height: 40px;
-    padding: 0 11px;
+    min-height: 44px;
+    padding: 0 14px;
     border: 0;
-    background: transparent;
-    color: #111;
-    font: inherit;
-    font-size: 15px;
-    letter-spacing: -0.2px;
+    background: none;
+    color: var(--ai-muted);
     text-align: left;
     cursor: pointer;
-    transition: background-color 160ms ease;
+    transition: background-color 150ms ease, color 150ms ease;
   }
 
-  .ai-tool-row:hover {
-    background: #ececec;
-  }
+  .ai-step-row:hover { background: rgba(0, 0, 0, 0.03); color: rgba(0, 0, 0, 0.8); }
 
-  .ai-tool-icon {
-    width: 19px;
-    height: 19px;
-    object-fit: contain;
-  }
-
-  .ai-tool-title {
-    white-space: nowrap;
-  }
-
-  .ai-tool-detail {
+  .ai-step-text {
+    min-width: 0;
     overflow: hidden;
-    color: #7a7a7a;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .ai-tool[data-status='denied'] .ai-tool-title,
-  .ai-tool[data-status='cancelled'] .ai-tool-title {
-    color: #9a9a9a;
-    text-decoration: line-through;
-    text-decoration-color: #c0c0c0;
-  }
-
-  .ai-tool-state {
-    display: grid;
-    place-items: center;
-    width: 18px;
-    height: 18px;
-  }
+  .ai-step-detail { margin-left: 0.3em; color: rgba(0, 0, 0, 0.35); }
+  .ai-step-status { flex: none; margin-left: auto; color: rgba(0, 0, 0, 0.35); }
+  .ai-step-chevron { flex: none; color: rgba(0, 0, 0, 0.35); transition: transform 160ms ease; }
+  .ai-step-status + .ai-step-chevron { margin-left: 0; }
+  .ai-step-text + .ai-step-chevron { margin-left: 0; }
+  .ai-step.expanded .ai-step-chevron { transform: rotate(90deg); }
+  .ai-step[data-status='error'] .ai-step-status { color: #de3542; }
+  .ai-step[data-status='denied'] .ai-step-title,
+  .ai-step[data-status='cancelled'] .ai-step-title { text-decoration: line-through; }
 
   .ai-spinner {
-    width: 13px;
-    height: 13px;
-    border: 1.6px solid #d0d0d0;
-    border-top-color: #0878f9;
+    flex: none;
+    box-sizing: border-box;
+    width: 15px;
+    height: 15px;
+    margin-left: auto;
+    border: 1.5px solid rgba(0, 0, 0, 0.14);
+    border-top-color: rgba(0, 0, 0, 0.6);
     border-radius: 50%;
     animation: ai-spin 700ms linear infinite;
   }
 
-  @keyframes ai-spin {
-    to { transform: rotate(360deg); }
-  }
+  @keyframes ai-spin { to { transform: rotate(360deg); } }
 
-  .ai-approval-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: #f0a020;
-    box-shadow: 0 0 0 3px rgba(240, 160, 32, 0.2);
-  }
+  .ai-step-details { display: grid; gap: 8px; padding: 0 14px 14px; }
 
-  /* Helper agents under a delegate call */
-  .ai-helpers {
-    display: grid;
-    gap: 6px;
-    padding: 0 11px 11px 40px;
-  }
+  .ai-step-helper { margin: 0; color: rgba(0, 0, 0, 0.7); line-height: 1.45; }
+  .ai-step-helper span { color: var(--ai-muted); }
+  .ai-step-helper[data-status='error'] span { color: #de3542; }
 
-  .ai-helper {
-    display: grid;
-    grid-template-columns: 16px minmax(0, 1fr);
-    column-gap: 8px;
-    row-gap: 1px;
-    align-items: center;
-    padding: 7px 10px 8px;
-    border: 1px solid #e0e0e0;
-    border-radius: 7px;
-    background: #fafafa;
-  }
-
-  .ai-helper-state {
-    display: grid;
-    grid-row: span 2;
-    place-items: center;
-    align-self: start;
-    height: 18px;
-  }
-
-  .ai-helper-task {
-    overflow: hidden;
-    color: #111;
-    font-size: 14px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .ai-helper-detail {
-    display: -webkit-box;
-    overflow: hidden;
-    color: #8a8a8a;
-    font-size: 12.5px;
-    line-height: 1.35;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-    -webkit-box-orient: vertical;
-  }
-
-  .ai-helper[data-status='error'] .ai-helper-detail {
-    color: #c83e3e;
+  .ai-step-image {
+    display: block;
+    max-width: 100%;
+    border: 1px solid var(--ai-line);
+    border-radius: 10px;
   }
 
   .ai-approval {
     display: grid;
     gap: 10px;
-    padding: 2px 11px 12px 40px;
-  }
-
-  .ai-approval p {
     margin: 0;
-    color: #3f3f3f;
-    font-size: 15px;
-    line-height: 1.38;
-    overflow-wrap: anywhere;
+    padding: 12px 13px;
+    border: 1px solid var(--ai-line);
+    border-radius: 15px;
+    background: #fff;
   }
 
-  .ai-approval-actions {
-    display: grid;
-    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.4fr);
-    gap: 8px;
-  }
+  .ai-approval p { margin: 0; line-height: 1.42; }
+
+  .ai-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 
   .ai-action {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    box-sizing: border-box;
-    height: 36px;
-    padding: 0 12px;
-    border-radius: 8px;
-    font: inherit;
-    font-size: 16px;
-    letter-spacing: -0.3px;
-    cursor: pointer;
-    transition: background-color 220ms ease, border-color 180ms ease, box-shadow 220ms ease, transform 160ms ease;
-  }
-
-  .ai-action:active {
-    transform: scale(0.985);
-  }
-
-  .ai-action.primary {
-    border: 0;
-    background: #0878f9;
+    height: 40px;
+    padding: 0 16px;
+    border: 1px solid #111;
+    border-radius: 12px;
+    background: #111;
     color: #fff;
-    box-shadow: 0 5px 16px rgba(8, 120, 249, 0.18);
+    cursor: pointer;
+    transition: background-color 150ms ease, transform 160ms ease;
   }
 
-  .ai-action.primary:hover {
-    background: #006ff0;
-    box-shadow: 0 6px 18px rgba(8, 120, 249, 0.27);
-  }
+  .ai-action:active { transform: scale(0.97); }
 
   .ai-action.secondary {
-    border: 1px solid #d7d7d7;
-    background: #fafafa;
-    color: #7a7a7a;
-  }
-
-  .ai-action.secondary:hover {
-    border-color: #c8c8c8;
-    background: #eeeeee;
-    color: #3f3f3f;
-  }
-
-  .ai-tool-image {
-    display: block;
-    width: calc(100% - 51px);
-    margin: 0 11px 11px 40px;
-    padding: 0;
-    overflow: hidden;
-    border: 1px solid #d7d7d7;
-    border-radius: 6px;
+    border-color: var(--ai-line);
     background: #fff;
-    cursor: zoom-in;
+    color: var(--ai-text);
   }
 
-  .ai-tool-image img {
-    display: block;
-    width: 100%;
-    max-height: 170px;
-    object-fit: cover;
-    object-position: top;
-    transition: max-height 300ms cubic-bezier(0.22, 1, 0.36, 1);
-  }
+  .ai-action.secondary:hover { background: rgba(0, 0, 0, 0.04); }
 
-  .ai-tool-image.large {
-    cursor: zoom-out;
-  }
 
-  .ai-tool-image.large img {
-    max-height: 900px;
-    object-fit: contain;
-  }
 
-  .ai-tool-details {
-    display: grid;
-    gap: 5px;
-    padding: 0 11px 12px 40px;
-  }
 
-  .ai-tool-details span {
-    color: #9a9a9a;
-    font-size: 13px;
-  }
 
-  .ai-tool-details pre {
-    max-height: 220px;
-    margin: 0 0 4px;
-    padding: 8px 10px;
+  .ai-step-details pre {
+    max-height: 200px;
+    margin: 0;
     overflow: auto;
-    border: 1px solid #e0e0e0;
-    border-radius: 6px;
-    background: #fafafa;
-    color: #3f3f3f;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 12px;
-    line-height: 1.45;
+    padding: 10px 12px;
+    border: 1px solid var(--ai-line);
+    border-radius: 12px;
+    background: #fff;
+    color: rgba(0, 0, 0, 0.6);
+    font-family: var(--ai-mono);
+    font-size: 15px;
+    letter-spacing: 0;
+    line-height: 1.5;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
 
-  .ai-tool-details pre.error {
-    border-color: #efcaca;
-    background: #fdf3f3;
-    color: #c83e3e;
-  }
+  .ai-step-details pre.error { color: #de3542; }
 
+  /* Notes read like a divider: ——— CHAT RESUMED ——— */
   .ai-note {
     display: flex;
     align-items: center;
-    gap: 10px;
-    margin: 0;
-    color: #9a9a9a;
-    font-size: 13.5px;
+    gap: 12px;
+    margin: 4px 0;
+    color: var(--ai-muted);
+    text-align: center;
   }
 
   .ai-note::before,
-  .ai-note::after {
-    flex: 1;
-    height: 1px;
-    background: #e2e2e2;
-    content: '';
-  }
+  .ai-note::after { flex: 1; height: 1px; background: var(--ai-line); content: ''; }
 
   .ai-error {
     display: grid;
+    justify-items: start;
     gap: 10px;
-    padding: 10px 12px;
-    border: 1px solid #efcaca;
-    border-radius: 8px;
-    background: #fdf3f3;
   }
 
   .ai-error p {
     margin: 0;
-    color: #c83e3e;
-    font-size: 15px;
-    line-height: 1.38;
+    color: #de3542;
+    line-height: 1.5;
     overflow-wrap: anywhere;
   }
 
-  .ai-error .ai-action {
-    justify-self: start;
-    height: 32px;
-    font-size: 15px;
-  }
+  /* ---- Composer ---- */
+  .ai-composer { padding: 0 11px 11px 12px; }
 
-  /* Composer */
-  .ai-composer {
+  .ai-input {
     display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    min-width: 0;
-    gap: 9px;
-    padding: 12px 14px 11px;
-    border-top: 1px solid #cacaca;
-    background: #fafafa;
+    gap: 2px;
+    padding: 6px 7px 7px;
+    border: 1px solid var(--ai-line);
+    border-radius: 15px;
+    background: #fff;
+    transition: border-color 160ms ease;
   }
 
-  .ai-chips {
-    display: flex;
-    min-width: 0;
-    flex-wrap: wrap;
-    gap: 6px;
+  .ai-input:focus-within { border-color: rgba(0, 0, 0, 0.22); }
+  .ai-panel.dragging .ai-input { border-color: #1684f8; }
+
+  .ai-input textarea {
+    box-sizing: border-box;
+    width: 100%;
+    max-height: 180px;
+    min-height: 34px;
+    margin: 0;
+    padding: 7px 6px 4px;
+    border: 0;
+    outline: 0;
+    resize: none;
+    background: transparent;
+    color: var(--ai-text);
+    font: inherit;
+    line-height: 1.42;
   }
+
+  .ai-input textarea::placeholder { color: rgba(0, 0, 0, 0.4); }
+  .ai-input textarea:disabled { cursor: default; }
+
+  /* One row of 36px controls: same height, radius, grey and stroke for the plus, the model and its chevron. */
+  .ai-input-bar {
+    display: grid;
+    grid-template-columns: 36px minmax(0, 1fr) 36px;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .ai-input-bar svg path { stroke-width: 1.6; }
+  .ai-bar-button { border-radius: 11px; }
+
+  .ai-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 2px 4px; }
 
   .ai-chip {
     position: relative;
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: 6px;
     min-width: 0;
-    border: 1px solid #d7d7d7;
-    border-radius: 8px;
-    background: #f3f3f3;
+    border-radius: 10px;
+    background: rgba(0, 0, 0, 0.04);
   }
 
-  .ai-chip.quote {
-    flex: 1 1 100%;
-    max-width: 100%;
-    box-sizing: border-box;
-    padding: 6px 4px 6px 10px;
-    border-left: 3px solid #ffd60a;
-  }
-
-  .ai-chip.quote > span {
-    overflow: hidden;
-    color: #4a4a4a;
-    font-size: 14px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .ai-chip.quote em {
-    margin-right: 6px;
-    color: #9a9a9a;
-    font-style: normal;
-  }
-
-  .ai-chip.image {
-    padding: 3px;
-  }
-
-  .ai-chip.image img {
-    width: 46px;
-    height: 46px;
-    border-radius: 5px;
-    object-fit: cover;
-  }
+  .ai-chip.quote { flex: 1 1 100%; padding: 7px 34px 7px 10px; }
+  .ai-chip.image { padding: 3px; }
+  .ai-chip.image img { display: block; width: 52px; height: 52px; border-radius: 8px; object-fit: cover; }
 
   .ai-chip button {
-    position: relative;
-    flex: none;
-    width: 28px;
-    height: 28px;
+    position: absolute;
+    top: 5px;
+    right: 5px;
+    width: 22px;
+    height: 22px;
     padding: 0;
     border: 0;
-    background: transparent;
+    border-radius: 7px;
+    background: url('/redesign/panel-close.svg') center / 9px 9px no-repeat;
     cursor: pointer;
-    transform: scale(0.8);
   }
 
-  .ai-chip.image button {
-    position: absolute;
-    top: -9px;
-    right: -9px;
-    border: 1px solid #d7d7d7;
-    border-radius: 50%;
-    background: #fafafa;
-    transform: scale(0.72);
-  }
+  .ai-chip.image button { top: 2px; right: 2px; background-color: rgba(255, 255, 255, 0.9); }
+  .ai-chip button:hover { filter: brightness(0); }
 
-  .ai-input {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    min-width: 0;
-    overflow: hidden;
-    border: 1px solid #d7d7d7;
-    border-radius: 10px;
-    background: #f3f3f3;
-    transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
-  }
-
-  .ai-input:focus-within,
-  .ai-input.focus-ring {
-    border-color: #b8b8b8;
-    background: #f7f7f7;
-  }
-
-  .ai-input textarea {
-    box-sizing: border-box;
-    overflow-wrap: anywhere;
-    width: 100%;
-    min-height: 46px;
-    max-height: 180px;
-    padding: 12px 13px 4px;
-    border: 0;
-    outline: none;
-    background: transparent;
-    color: #000;
-    font: inherit;
-    font-size: 17px;
-    line-height: 1.38;
-    letter-spacing: -0.25px;
-    resize: none;
-  }
-
-  .ai-input textarea::placeholder {
-    color: #8a8a8a;
-  }
-
-  .ai-input-bar {
-    display: grid;
-    grid-template-columns: 28px minmax(0, 1fr) 34px;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 7px 7px;
-  }
+  .ai-model-picker { position: relative; justify-self: end; min-width: 0; }
 
   .ai-model {
-    overflow: hidden;
-    color: #9a9a9a;
-    font-size: 13.5px;
-    text-align: right;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    max-width: 100%;
+    height: 36px;
+    padding: 0 7px 0 11px;
+    border: 0;
+    border-radius: 11px;
+    background: transparent;
+    color: #818181;
+    font-family: var(--ai-mono);
+    font-size: 16px;
+    letter-spacing: -0.2px;
+    line-height: 1;
+    cursor: pointer;
+    transition: background-color 150ms ease, color 150ms ease;
+  }
+
+  .ai-model span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ai-model:hover:not(:disabled),
+  .ai-model.open { background: rgba(0, 0, 0, 0.05); color: #000; }
+  .ai-model svg { flex: none; transition: transform 160ms ease; }
+  .ai-model.open svg { transform: rotate(180deg); }
+
+  /* Same frosted menu as the toolbar's tool menus. */
+  .ai-model-menu {
+    position: absolute;
+    z-index: 5;
+    right: -42px;
+    bottom: calc(100% + 10px);
+    display: grid;
+    width: 270px;
+    padding: 5px;
+    border: 1px solid rgba(0, 0, 0, 0.14);
+    border-radius: 15px;
+    background: rgba(255, 255, 255, 0.92);
+    box-shadow: 0 7px 18px rgba(0, 0, 0, 0.11), 0 2px 5px rgba(0, 0, 0, 0.05);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+  }
+
+  .ai-model-menu button {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 38px;
+    padding: 0 10px;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    background: transparent;
+    color: rgba(0, 0, 0, 0.75);
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .ai-model-menu button:hover { color: #000; background: rgba(0, 0, 0, 0.04); }
+  .ai-model-menu button.active { border-color: rgba(0, 0, 0, 0.06); background: rgba(234, 234, 234, 0.6); color: #000; }
+
+  .ai-usage {
+    margin: 4px 0 0;
+    padding: 8px 10px 4px;
+    border-top: 1px solid var(--ai-line);
+    color: var(--ai-muted);
+    font-family: var(--ai-mono);
+    font-size: 12px;
+    letter-spacing: 0;
   }
 
   .ai-send {
     display: grid;
     place-items: center;
-    width: 34px;
-    height: 34px;
+    width: 36px;
+    height: 36px;
     padding: 0;
     border: 0;
-    border-radius: 8px;
-    background: #0878f9;
-    box-shadow: 0 5px 16px rgba(8, 120, 249, 0.18);
-    cursor: pointer;
-    transition: background-color 200ms ease, box-shadow 200ms ease, opacity 160ms ease, transform 160ms ease;
-  }
-
-  .ai-send:hover:not(:disabled) {
-    background: #006ff0;
-    box-shadow: 0 6px 18px rgba(8, 120, 249, 0.27);
-  }
-
-  .ai-send:active:not(:disabled) {
-    transform: scale(0.94);
-  }
-
-  .ai-send:disabled {
-    background: #c9c9c9;
-    box-shadow: none;
-    cursor: default;
-  }
-
-  .ai-send.stop {
+    border-radius: 11px;
     background: #111;
-    box-shadow: 0 5px 14px rgba(0, 0, 0, 0.16);
+    color: #fff;
+    cursor: pointer;
+    transition: opacity 150ms ease, transform 160ms ease;
   }
 
-  .ai-send.stop:hover {
-    background: #000;
-  }
+  .ai-send svg path { stroke-width: 1.9; }
+  .ai-send:active:not(:disabled) { transform: scale(0.94); }
+  .ai-send:disabled { cursor: default; opacity: 0.2; }
+  .ai-send.stop span { width: 11px; height: 11px; border-radius: 3px; background: #fff; }
 
-  .ai-send.stop span {
-    width: 11px;
-    height: 11px;
-    border-radius: 2.5px;
-    background: #fff;
-  }
-
-  .ai-meta {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    min-width: 0;
-    margin: 0;
-    padding: 0 2px;
-    color: #9a9a9a;
-    font-size: 13.5px;
-  }
-
-  .ai-context {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    min-width: 0;
-  }
-
-  .ai-context img {
-    flex: none;
-    width: 14px;
-    height: 14px;
-  }
-
-  .ai-context span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .ai-context em {
-    flex: none;
-    font-style: normal;
-  }
-
-  .ai-usage {
-    flex: none;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .ai-file-input {
-    display: none;
-  }
+  .ai-file-input { display: none; }
 
   @media (prefers-reduced-motion: reduce) {
     .ai-panel,
-    .ai-thinking.live span,
+    .ai-panel.open { transition: none; }
+    .ai-work-line.live .ai-work-label,
     .ai-spinner,
-    .ai-markdown.streaming > :global(:last-child)::after {
-      transition: none;
-      animation: none;
-    }
+    .ai-markdown.streaming > :global(:last-child)::after { animation: none; }
   }
 </style>

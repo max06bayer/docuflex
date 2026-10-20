@@ -97,3 +97,35 @@ async function renderNow(latex, { display = true, color = '#171717', fontSize = 
   context.drawImage(image, 0, 0, pixelWidth, pixelHeight);
   return { dataUrl: canvas.toDataURL('image/png'), width, height };
 }
+
+/** Commands that could add links, classes or styles to the markup; chat math never needs them. */
+const UNSAFE_COMMANDS = /\\(href|url|class|cssId|style|data|html|unicode|require)\b/;
+
+/**
+ * Renders LaTeX as inline SVG markup for on-screen text (the AI chat). It is
+ * sized in ex units and drawn in currentColor, so it matches the text around it.
+ * Resolves to null when the LaTeX is invalid.
+ * @param {string} latex @param {boolean} display
+ * @returns {Promise<string | null>}
+ */
+export function renderMathMarkup(latex, display) {
+  const result = queue.then(async () => {
+    if (UNSAFE_COMMANDS.test(latex)) return null;
+    const MathJax = await loadMathJax();
+    MathJax.texReset?.();
+    const container = await MathJax.tex2svgPromise(latex, { display });
+    const svg = container.querySelector('svg');
+    if (!svg || container.querySelector('[data-mjx-error], merror')) return null;
+    for (const element of svg.querySelectorAll('*')) {
+      for (const attribute of [...element.attributes]) {
+        if (/^on|href$/i.test(attribute.name)) element.removeAttribute(attribute.name);
+      }
+    }
+    svg.setAttribute('role', 'img');
+    svg.setAttribute('aria-label', latex);
+    svg.removeAttribute('focusable');
+    return svg.outerHTML;
+  });
+  queue = result.catch(() => {});
+  return result.catch(() => null);
+}

@@ -15,6 +15,7 @@
   import TranslateFilesPanel from '$lib/TranslateFilesPanel.svelte';
   // @ts-ignore Fontsource exposes CSS through package exports without JS type declarations.
   import '@fontsource-variable/geist/wght.css';
+  import '@fontsource-variable/geist-mono/wght.css';
   // @ts-ignore Fontsource exposes CSS through package exports without JS type declarations.
   import '@fontsource-variable/inter/wght.css';
   import mergeIcon from '../../public/quicktools/merge.svg?raw';
@@ -80,6 +81,29 @@
   /** @type {{ id: number; name: string; type: 'pdf'; file: File; protection: { enabled: boolean; password: string }; initialTool?: string; sourcePath?: string | null } | undefined} */
   let activeDocument;
   $: activeDocument = tabs.find((tab) => tab.id === activeTab);
+  /** Set for a moment after a document opens, so the editor fades in and its pages settle instead of popping in. */
+  let documentEntering = false;
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let documentEnterTimer;
+  /** @type {number | null} */
+  let previousActiveTab = null;
+  $: if (activeTab !== previousActiveTab) {
+    if (activeTab !== null && previousActiveTab === null) playDocumentEnter();
+    previousActiveTab = activeTab;
+  }
+
+  /** @type {HTMLElement | undefined} */
+  let shellElement;
+
+  async function playDocumentEnter() {
+    clearTimeout(documentEnterTimer);
+    // Drop the class and force a style pass so the animation restarts when it is already running.
+    documentEntering = false;
+    await tick();
+    void shellElement?.offsetWidth;
+    documentEntering = true;
+    documentEnterTimer = setTimeout(() => (documentEntering = false), 1100);
+  }
   $: visibleRecentDocuments = recentDocuments
     .filter((document) => document.name.toLocaleLowerCase().includes(searchQuery.trim().toLocaleLowerCase()))
     .sort((left, right) => {
@@ -113,8 +137,8 @@
   /** @type {ReturnType<typeof setInterval> | undefined} */
   let mcpHeartbeat;
   let aiPanelOpen = false;
-  /** Whether the AI chat can run here (desktop app or dev with an OpenRouter key). */
-  /** @type {{ available: boolean; model?: string; fallbackModel?: string; tools?: { name: string; title: string; readOnly: boolean; needsApproval: boolean }[] } | null} */
+  /** Whether the AI chat can run here (desktop app or dev with a saved OpenRouter key); configurable: a key can be saved in Settings. */
+  /** @type {{ available: boolean; configurable?: boolean; keyHint?: string | null; model?: string; fallbackModel?: string; tools?: { name: string; title: string; readOnly: boolean; needsApproval: boolean }[] } | null} */
   let aiStatus = null;
   /** The agent keeps working while its panel is closed; the brain button shows it. */
   let aiBusy = false;
@@ -129,7 +153,7 @@
     window.location.assign(`/__docuflex/window/${action}`);
   }
 
-  /** The redesigned document view draws its own traffic lights on macOS, so the native ones step aside there. */
+  /** The redesigned window draws its own traffic lights on macOS, so the native ones step aside. */
   /** @param {boolean} hidden @param {boolean} [force] */
   function setNativeWindowButtonsHidden(hidden, force = false) {
     if (typeof document === 'undefined' || document.documentElement.dataset.docuflexDesktop !== 'macos') return;
@@ -138,10 +162,9 @@
     window.location.assign(`/__docuflex/window/native-buttons-${hidden ? 'hide' : 'show'}`);
   }
 
-  $: setNativeWindowButtonsHidden(activeTab !== null);
 
   /** The AI chat is still in testing: its button stays greyed out until this is true. */
-  const AI_CHAT_ENABLED = false;
+  const AI_CHAT_ENABLED = true;
 
   async function refreshAiStatus() {
     if (!AI_CHAT_ENABLED) {
@@ -355,6 +378,8 @@
   let translatePanelOpen = false;
   let flattenPanelOpen = false;
   let settingsPanelOpen = false;
+  /** Opened from the AI button without a key: Settings focuses the key field. */
+  let settingsKeyFocus = false;
   let pendingInitialTool = 'select';
 
   /** @param {{ name: string; description: string }} tool @param {HTMLElement} element */
@@ -753,6 +778,7 @@
     recentDocuments = [recent, ...recentDocuments.filter((document) => document.name !== file.name)].slice(0, MAX_RECENT_DOCUMENTS);
     void persistRecentDocument(recent);
     if (!thumbnailUrl) void renderRecentThumbnail(file, protection.password);
+    if (activeTab !== null) playDocumentEnter();
     activeTab = id;
   }
 
@@ -837,6 +863,7 @@
       convertPanelOpen = false;
       compressPanelOpen = false;
       protectHomePanelOpen = false;
+      flattenPanelOpen = false;
       return;
     }
     const target = event.target;
@@ -878,10 +905,10 @@
     // Leaving full screen can bring the native buttons back; hide them again once the window settles.
     const handleWindowResize = () => {
       clearTimeout(nativeButtonsTimer);
-      nativeButtonsTimer = setTimeout(() => { if (activeTab !== null) setNativeWindowButtonsHidden(true, true); }, 350);
+      nativeButtonsTimer = setTimeout(() => setNativeWindowButtonsHidden(true, true), 350);
     };
     window.addEventListener('resize', handleWindowResize);
-    setNativeWindowButtonsHidden(activeTab !== null);
+    setNativeWindowButtonsHidden(true);
     void refreshMcpStatus().then(() => {
       if (mcpStatus?.available) connectMcpBridge();
     });
@@ -903,6 +930,7 @@
   });
 
   onDestroy(() => {
+    clearTimeout(documentEnterTimer);
     if (shortcutTimer) clearTimeout(shortcutTimer);
     if (quickTooltipTimer) clearTimeout(quickTooltipTimer);
   });
@@ -915,47 +943,31 @@
   <link rel="icon" href="/logo.svg" type="image/svg+xml" />
 </svelte:head>
 
-<main class="editor-shell" class:editor-mode={activeTab !== null}>
+<main bind:this={shellElement} class="editor-shell" class:editor-mode={activeTab !== null} class:document-entering={documentEntering} class:ai-docked={aiPanelOpen && aiStatus?.available}>
   <header class="topbar">
-    {#if activeTab !== null}
-      <div class="window-head">
-        <span class="window-head-texture" aria-hidden="true"></span>
-        <!-- Drawn from the Figma frame on the macOS desktop; the native buttons are hidden while the document view is open. -->
-        <div class="window-controls" class:window-inactive={!windowFocused}>
-          <button class="window-control close" aria-label="Close window" onclick={() => windowAction('close')}></button>
-          <button class="window-control minimize" aria-label="Minimize window" onclick={() => windowAction('minimize')}></button>
-          <button class="window-control zoom" aria-label="Enter full screen" onclick={() => windowAction('fullscreen')}></button>
-        </div>
-        <img class="sidebar-toggle" src="/redesign/sidebar-toggle.svg" alt="" />
-        <nav class="history" aria-label="History navigation">
-          <button class="history-button back" aria-label="Undo" title="Undo" onclick={() => pdfEditor?.undo()}>
-            <img src="/redesign/vector543.svg" alt="" />
-          </button>
-          <button class="history-button forward" aria-label="Redo" title="Redo" onclick={() => pdfEditor?.redo()}>
-            <img src="/redesign/vector542.svg" alt="" />
-          </button>
-        </nav>
+    <div class="window-head">
+      <span class="window-head-texture" aria-hidden="true"></span>
+      <!-- Drawn from the Figma frame on the macOS desktop; the native buttons stay hidden. -->
+      <div class="window-controls" class:window-inactive={!windowFocused}>
+        <button class="window-control close" aria-label="Close window" onclick={() => windowAction('close')}></button>
+        <button class="window-control minimize" aria-label="Minimize window" onclick={() => windowAction('minimize')}></button>
+        <button class="window-control zoom" aria-label="Enter full screen" onclick={() => windowAction('fullscreen')}></button>
       </div>
-      <span class="topbar-backdrop" aria-hidden="true"><img src="/redesign/rectangle997.png" alt="" /></span>
-    {:else}
-      <div class="brand-area">
-        <button class="logo-button" aria-label="Go to Home" title="Home" onclick={() => (activeTab = null)}>
-          <img class="logo" src="/logo.svg" alt="Docuflex" />
+      <img class="sidebar-toggle" src="/redesign/sidebar-toggle.svg" alt="" />
+      <nav class="history" aria-label="History navigation">
+        <button class="history-button back" aria-label="Undo" title="Undo" onclick={() => pdfEditor?.undo()}>
+          <img src="/redesign/vector543.svg" alt="" />
         </button>
-        <nav class="history" aria-label="History navigation">
-          <button class="plain-button" aria-label="Undo" title="Undo" onclick={() => pdfEditor?.undo()}>
-            <img src="/arrowleft.svg" alt="" />
-          </button>
-          <button class="plain-button" aria-label="Redo" title="Redo" onclick={() => pdfEditor?.redo()}>
-            <img src="/arrowright.svg" alt="" />
-          </button>
-        </nav>
-      </div>
-    {/if}
+        <button class="history-button forward" aria-label="Redo" title="Redo" onclick={() => pdfEditor?.redo()}>
+          <img src="/redesign/vector542.svg" alt="" />
+        </button>
+      </nav>
+    </div>
+    <span class="topbar-backdrop" aria-hidden="true"><img src="/redesign/rectangle997.png" alt="" /></span>
 
     <div class="tab-strip" role="tablist" aria-label="Open documents">
       {#each tabs as tab (tab.id)}
-        {@const tabLabel = activeTab !== null ? tab.name.replace(/\.pdf$/i, '') : tab.name}
+        {@const tabLabel = tab.name.replace(/\.pdf$/i, '')}
         <button
           class:active={tab.id === activeTab}
           class:closing={closingTabs.has(tab.id)}
@@ -965,11 +977,7 @@
           aria-selected={tab.id === activeTab}
           onclick={() => (activeTab = tab.id)}
         >
-          {#if activeTab !== null}
-            <img class="tab-file-icon" src={tab.id === activeTab ? '/redesign/subtract2.svg' : '/redesign/pdf-tab-inactive.svg'} alt="" />
-          {:else}
-            <img src="/pdficon.svg" alt="" />
-          {/if}
+          <img class="tab-file-icon" src={tab.id === activeTab ? '/redesign/subtract2.svg' : '/redesign/pdf-tab-inactive.svg'} alt="" />
           {#if tab.protection.enabled}
             <img class="tab-lock-icon" src="/lock.svg" alt="Encrypted" title="Encrypted" />
           {/if}
@@ -982,21 +990,13 @@
             onclick={(event) => closeTab(event, tab.id)}
             onkeydown={(event) => (event.key === 'Enter' || event.key === ' ') && closeTab(event, tab.id)}
           >
-            {#if activeTab !== null}
-              <img class="close-tab-cross" src="/redesign/tab-close.svg" alt="" />
-            {:else}
-              <img src="/close.svg" alt="" />
-            {/if}
+            <img class="close-tab-cross" src="/redesign/tab-close.svg" alt="" />
           </span>
         </button>
       {/each}
 
       <button class="add-tab" data-tab-motion="add" aria-label="Open another document" title="Open document" onclick={() => openFilePicker()}>
-        {#if activeTab !== null}
-          <img class="add-tab-cross" src="/redesign/add-tab-plus.svg" alt="" />
-        {:else}
-          <img src="/plus.svg" alt="" />
-        {/if}
+        <img class="add-tab-cross" src="/redesign/add-tab-plus.svg" alt="" />
       </button>
     </div>
 
@@ -1016,7 +1016,7 @@
           onblur={hideUtilityTooltip}
           onclick={() => { hideUtilityTooltip(); mcpPanelOpen = !mcpPanelOpen; if (mcpPanelOpen) { settingsPanelOpen = false; aiPanelOpen = false; void refreshMcpStatus(); } }}
         >
-          <img class="utility-icon-mcp" src={activeTab !== null ? '/redesign/icon-code-xml.svg' : '/mcp.svg'} alt="" />
+          <img class="utility-icon-mcp" src="/redesign/icon-code-xml.svg" alt="" />
         </button>
       {/if}
       {#if activeTab !== null}
@@ -1069,22 +1069,22 @@
         </button>
       {/if}
       {#each [
-        { id: 'home', icon: '/home.svg', label: 'Home', description: 'Return to the document overview.' },
+        { id: 'home', icon: '/redesign/vector537.svg', label: 'Home', description: 'Return to the document overview.' },
         { id: 'search', icon: '/search.svg', label: 'Search', description: 'Find text in the current PDF.' },
-        { id: 'assistant', icon: activeTab !== null ? '/redesign/icon-brain.svg' : '/brain.svg', label: 'AI Chat', description: aiStatus?.available ? (aiBusy ? 'Docuflex AI is working…' : 'Ask AI about your document or let it edit for you.') : 'Chat with AI about your document.' },
-        { id: 'settings', icon: activeTab !== null ? '/redesign/icon-settings2.svg' : '/settings.svg', label: 'Settings', description: 'Open Docuflex settings.' }
+        { id: 'assistant', icon: '/redesign/icon-brain.svg', label: 'AI Chat', description: aiStatus?.available ? (aiBusy ? 'Docuflex AI is working…' : 'Ask AI about your document or let it edit for you.') : aiStatus?.configurable ? 'Add your OpenRouter API key in Settings to chat with AI.' : 'Chat with AI about your document.' },
+        { id: 'settings', icon: '/redesign/icon-settings2.svg', label: 'Settings', description: 'Open Docuflex settings.' }
       ].filter((utility) => activeTab === null ? utility.id !== 'search' : utility.id !== 'home' && utility.id !== 'search') as utility (utility.id)}
         {@const aiUtility = utility.id === 'assistant'}
         <button
           class="utility-button"
-          class:ai-disabled={aiUtility && !aiStatus?.available}
+          class:ai-disabled={aiUtility && !aiStatus?.configurable}
           class:ai-button={aiUtility}
           class:ai-busy={aiUtility && aiBusy}
           class:active={aiUtility && aiPanelOpen && aiStatus?.available}
           data-utility={utility.id}
           aria-label={utility.label}
           aria-pressed={aiUtility ? aiPanelOpen : undefined}
-          disabled={aiUtility && !aiStatus?.available}
+          disabled={aiUtility && !aiStatus?.configurable}
           aria-describedby={utilityTooltip?.label === utility.label ? 'utility-tooltip' : undefined}
           onmouseenter={(event) => scheduleUtilityTooltip(utility, event.currentTarget)}
           onmouseleave={hideUtilityTooltip}
@@ -1094,7 +1094,8 @@
             hideUtilityTooltip();
             if (utility.id === 'home') activeTab = null;
             else if (utility.id === 'search') pdfEditor?.openSearchPanel();
-            else if (utility.id === 'settings') { settingsPanelOpen = !settingsPanelOpen; mcpPanelOpen = false; if (settingsPanelOpen) aiPanelOpen = false; }
+            else if (utility.id === 'settings') { settingsKeyFocus = false; settingsPanelOpen = !settingsPanelOpen; mcpPanelOpen = false; if (settingsPanelOpen) aiPanelOpen = false; }
+            else if (utility.id === 'assistant' && !aiStatus?.available) { settingsKeyFocus = true; settingsPanelOpen = true; mcpPanelOpen = false; aiPanelOpen = false; }
             else if (utility.id === 'assistant') { aiPanelOpen = !aiPanelOpen; if (aiPanelOpen) { settingsPanelOpen = false; mcpPanelOpen = false; } }
           }}
         >
@@ -1104,13 +1105,13 @@
     </nav>
   </header>
 
-  {#if activeTab !== null}
-    {@const searchUtility = { label: 'Search', description: 'Find text in the current PDF.' }}
-    {@const homeUtility = { label: 'Home', description: 'Return to the document overview.' }}
-    <div class="sidebar-head">
-      <button class="sidebar-logo" aria-label="Go to Home" title="Home" onclick={() => (activeTab = null)}>
-        <img src="/redesign/docuflex-logo1.svg" alt="Docuflex" />
-      </button>
+  <div class="sidebar-head">
+    <button class="sidebar-logo" aria-label="Go to Home" title="Home" onclick={() => (activeTab = null)}>
+      <img src="/redesign/docuflex-logo1.svg" alt="Docuflex" />
+    </button>
+    {#if activeTab !== null}
+      {@const searchUtility = { label: 'Search', description: 'Find text in the current PDF.' }}
+      {@const homeUtility = { label: 'Home', description: 'Return to the document overview.' }}
       <button
         class="sidebar-head-button"
         aria-label={searchUtility.label}
@@ -1135,8 +1136,8 @@
       >
         <img class="sidebar-home-icon" src="/redesign/vector537.svg" alt="" />
       </button>
-    </div>
-  {/if}
+    {/if}
+  </div>
 
   {#if utilityTooltip}
     <div
@@ -1191,7 +1192,7 @@
   <section class="workspace" aria-label="Document workspace">
     <button class="drop-zone" aria-label="Open or drop a document" onclick={() => openFilePicker()} ondragover={(event) => event.preventDefault()} ondrop={handleFileDrop}>
       <span class="drop-zone-content">
-        <img src="/bigplus.svg" alt="" />
+        <img src="/redesign/add-tab-plus.svg" alt="" />
         <span>Drop any Document to edit</span>
       </span>
     </button>
@@ -1203,7 +1204,7 @@
       </button>
 
       <label class="document-search">
-        <img src="/search.svg" alt="" />
+        <img src="/redesign/icon-search.svg" alt="" />
         <input bind:value={searchQuery} type="search" placeholder="Search" aria-label="Search recent documents" />
       </label>
 
@@ -1211,7 +1212,7 @@
         <div class="sort-button">
           <span>Sort By: <strong>{sortModeText}</strong></span>
           <button class="sort-arrow" class:expanded={sortExpanded} aria-label="Toggle sort options" aria-expanded={sortExpanded} onclick={(event) => { event.stopPropagation(); sortExpanded = !sortExpanded; }}>
-            <img src="/arrowright.svg" alt="" />
+            <span class="chevron" aria-hidden="true"></span>
           </button>
           {#if sortExpanded}
             <div class="sort-menu" transition:scale={{ duration: 125, easing: cubicOut, start: 0.94, opacity: 0 }}>
@@ -1287,7 +1288,7 @@
           <kbd>E</kbd>
         </button>
         <button class="recent-menu-item delete-document" role="menuitem" onclick={() => deleteRecentDocument(contextDocument)}>
-          <img src="/pages/trash.svg" alt="" />
+          <img src="/redesign/icon-trash1.svg" alt="" />
           <span>Delete</span>
           <kbd>D</kbd>
         </button>
@@ -1309,7 +1310,7 @@
       <HomeProtectPanel onClose={() => (protectHomePanelOpen = false)} />
     {/if}
     {#if translatePanelOpen}
-      <TranslateFilesPanel onClose={() => (translatePanelOpen = false)} />
+      <TranslateFilesPanel onClose={() => (translatePanelOpen = false)} onOpen={(file) => addFileTab(file)} />
     {/if}
     {#if flattenPanelOpen}
       <FlattenFilesPanel onClose={() => (flattenPanelOpen = false)} />
@@ -1350,7 +1351,7 @@
   {/if}
 
   {#if settingsPanelOpen}
-    <SettingsPanel onClose={() => (settingsPanelOpen = false)} />
+    <SettingsPanel aiStatus={aiStatus} focusKey={settingsKeyFocus} onAiKeyChange={refreshAiStatus} onClose={() => (settingsPanelOpen = false)} />
   {/if}
 
   {#if errorToast}
@@ -1393,53 +1394,43 @@
     font: inherit;
   }
 
+  /*
+   * The AI chat docks on the right, the full height of the window: the shell
+   * reserves its width as right padding (top bar and document shrink), and the
+   * panel sits in that padding. Padding rather than a third grid column, which
+   * WebKit did not collapse to zero while the chat was closed.
+   */
   .editor-shell {
     --ui-scale: 0.85;
+    --ai-dock: 0px;
+    position: relative;
+    box-sizing: border-box;
     display: grid;
     grid-template-columns: 310px minmax(0, 1fr);
+    padding-right: var(--ai-dock);
     grid-template-rows: 56px minmax(0, 1fr);
     width: 117.6470588vw;
     height: 117.6470588dvh;
     min-width: 760px;
+    overflow: clip;
     background: #f5f5f5;
     zoom: var(--ui-scale);
+    transition: padding-right 280ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .editor-shell.ai-docked {
+    --ai-dock: 440px;
   }
 
   .topbar {
     grid-column: 1 / -1;
+    min-width: 0;
     display: grid;
     grid-template-columns: 310px minmax(0, 1fr) auto;
     height: 56px;
     background: #fff;
     border-bottom: 1px solid #cecece;
     overflow: hidden;
-  }
-
-  .brand-area {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    min-width: 0;
-    padding: 0 17px 0 21px;
-    border-right: 1px solid #cfcfcf;
-  }
-
-  .logo {
-    display: block;
-    width: 187px;
-    height: 41px;
-    flex: 0 0 auto;
-  }
-
-  .logo-button {
-    display: grid;
-    place-items: center;
-    width: 187px;
-    height: 41px;
-    padding: 0;
-    border: 0;
-    background: transparent;
-    cursor: pointer;
   }
 
   .history {
@@ -1449,7 +1440,6 @@
     margin-left: 12px;
   }
 
-  .plain-button,
   .add-tab {
     display: grid;
     place-items: center;
@@ -1458,45 +1448,6 @@
     background: transparent;
     cursor: pointer;
     transition: opacity 150ms ease;
-  }
-
-  .plain-button {
-    position: relative;
-    width: 18px;
-    height: 22px;
-  }
-
-  .plain-button img {
-    width: 16px;
-    height: 17px;
-    transition: filter 150ms ease, opacity 150ms ease, transform 150ms ease;
-  }
-
-  .plain-button::after {
-    position: absolute;
-    width: 16px;
-    height: 17px;
-    background: #000;
-    content: "";
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 150ms ease, transform 150ms ease;
-    -webkit-mask: center / contain no-repeat;
-    mask: center / contain no-repeat;
-  }
-
-  .plain-button:first-child::after {
-    -webkit-mask-image: url('/arrowleft.svg');
-    mask-image: url('/arrowleft.svg');
-  }
-
-  .plain-button:last-child::after {
-    -webkit-mask-image: url('/arrowright.svg');
-    mask-image: url('/arrowright.svg');
-  }
-
-  .plain-button:hover::after {
-    opacity: 0.7;
   }
 
   .tab-strip {
@@ -1659,17 +1610,14 @@
     50% { opacity: 0.35; }
   }
 
-  /* Green dot while the MCP server is on and this window is serving it. */
-  .mcp-button.mcp-live::after {
-    position: absolute;
-    top: 6px;
-    right: 6px;
-    width: 7px;
-    height: 7px;
-    border: 1.5px solid #f8f8f8;
-    border-radius: 50%;
-    background: #2fb344;
-    content: '';
+  /* While the MCP server is on and this window is serving it, the button's fill slowly breathes 5% darker. */
+  .mcp-button.mcp-live:not(.active):not(:hover) {
+    animation: mcp-live-pulse 2.6s ease-in-out infinite alternate;
+  }
+
+  @keyframes mcp-live-pulse {
+    from { background-color: #f8f8f8; }
+    to { background-color: #ececec; }
   }
 
   .utility-button.active,
@@ -1707,27 +1655,19 @@
     transition: filter 160ms ease, opacity 160ms ease, transform 160ms ease;
   }
 
-  .plain-button:hover img,
   .add-tab:hover img,
   .close-tab:hover img,
   .utility-button:hover img {
     filter: brightness(0.72);
   }
 
-  .plain-button:active img,
   .add-tab:active img,
   .close-tab:active img,
   .utility-button:active img {
     transform: scale(0.94);
   }
 
-  .plain-button:active::after {
-    transform: scale(0.94);
-  }
-
   @media (prefers-reduced-motion: reduce) {
-    .plain-button,
-    .plain-button img,
     .add-tab,
     .add-tab img,
     .document-tab,
@@ -1826,13 +1766,15 @@
   }
 
   .sidebar {
+    position: relative;
+    z-index: 2;
     grid-column: 1;
     grid-row: 2;
     min-height: 0;
     overflow-y: auto;
-    background: #f1f1f1;
-    border-right: 1px solid #cfcfcf;
-    box-shadow: inset -11px 0 25px 0 rgba(0, 0, 0, 0.03);
+    background: #efefef;
+    border-right: 1px solid #c7c7c7;
+    box-shadow: 0 0 98.6px rgba(0, 0, 0, 0.06);
     scrollbar-width: none;
   }
 
@@ -1845,23 +1787,25 @@
   .quick-tools {
     display: flex;
     flex-direction: column;
-    gap: 14px;
-    padding: 20px 12px 0;
+    gap: 10px;
+    /* Clears the 61px logo row that sits over the sidebar, like the editor's thumbnails. */
+    padding: 79px 13px 24px 12px;
   }
 
   .quick-tool {
     display: flex;
     align-items: center;
-    width: 286px;
-    height: 61px;
-    min-height: 61px;
-    padding: 0 15px;
-    border: 1px solid rgba(0, 0, 0, 0.08);
-    border-radius: 10px;
-    background: rgba(107, 107, 107, 0.05);
-    color: rgba(0, 0, 0, 0.7);
+    box-sizing: border-box;
+    width: 100%;
+    height: 68px;
+    min-height: 68px;
+    padding: 0 12px 0 15px;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 15px;
+    background: rgba(255, 255, 255, 0.6);
+    color: rgba(0, 0, 0, 0.75);
     cursor: pointer;
-    transition: background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease, transform 160ms ease;
+    transition: background-color 180ms ease, border-color 180ms ease, transform 160ms ease;
   }
 
   .quick-tool-tooltip {
@@ -1976,11 +1920,11 @@
   }
 
   .quick-tool-name {
-    font-family: Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    font-size: 18px;
+    font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 21px;
     font-weight: 400;
     line-height: 1;
-    letter-spacing: -0.2px;
+    letter-spacing: -0.21px;
     white-space: nowrap;
     -webkit-font-smoothing: antialiased;
   }
@@ -1988,28 +1932,27 @@
   .quick-tool kbd {
     display: grid;
     place-items: center;
-    width: 27px;
+    box-sizing: border-box;
+    width: 26px;
     height: 27px;
     margin-left: auto;
-    border: 1px solid rgba(0, 0, 0, 0.04);
+    border: 1px solid rgba(0, 0, 0, 0.015);
     border-radius: 6px;
-    background: rgba(0, 0, 0, 0.055);
+    background: rgba(0, 0, 0, 0.025);
     color: rgba(0, 0, 0, 0.165);
-    font-family: Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    font-size: 18px;
+    font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 20px;
     font-weight: 400;
     line-height: 1;
-    letter-spacing: 1.8px;
-    text-indent: 1.8px;
-    transition: background-color 160ms ease, color 160ms ease;
+    letter-spacing: 0;
+    transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
     -webkit-font-smoothing: antialiased;
   }
 
   .quick-tool:hover,
   .quick-tool.keyboard-active {
-    border-color: rgba(0, 0, 0, 0.13);
-    background: rgba(107, 107, 107, 0.09);
-    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.035);
+    border-color: rgba(0, 0, 0, 0.18);
+    background: #fff;
   }
 
   .quick-tool-icon :global([stroke="#777777"]),
@@ -2036,8 +1979,8 @@
 
   .quick-tool:hover kbd,
   .quick-tool.keyboard-active kbd {
-    background: rgba(0, 0, 0, 0.075);
-    color: rgba(0, 0, 0, 0.25);
+    border-color: rgba(0, 0, 0, 0.02);
+    background: rgba(0, 0, 0, 0.055);
   }
 
   .quick-tool:active {
@@ -2057,10 +2000,13 @@
     grid-column: 2;
     grid-row: 2;
     display: grid;
-    grid-template-rows: 155px 65px minmax(0, 1fr);
+    grid-template-rows: 154px 76px minmax(0, 1fr);
     min-width: 0;
     min-height: 0;
-    background: #f5f5f5;
+    background:
+      linear-gradient(90deg, rgba(0, 0, 0, 0.045) 1px, transparent 1px) 58px 122px / 140px 140px,
+      linear-gradient(180deg, rgba(0, 0, 0, 0.045) 1px, transparent 1px) 58px 122px / 140px 140px,
+      #e2e2e2;
   }
 
   .drop-zone {
@@ -2068,35 +2014,29 @@
     display: grid;
     grid-row: 1;
     place-items: center;
-    height: 126px;
-    margin: 14px 17px 15px 14px;
+    height: 130px;
+    margin: 12px 13px 12px;
     padding: 0;
     overflow: hidden;
-    border: 1px solid rgba(202, 202, 202, 0.65);
-    border-radius: 12px;
-    background: rgba(83, 83, 83, 0.05) url('/pattern.jpg') center / cover;
-    color: rgba(0, 0, 0, 0.375);
+    border: 1.5px solid #c3c2c2;
+    border-radius: 21px;
+    background: rgba(240, 236, 236, 0.75);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+    color: rgba(0, 0, 0, 0.5);
     cursor: pointer;
-    transition: border-color 180ms ease, box-shadow 180ms ease, color 180ms ease;
-  }
-
-  .drop-zone::after {
-    position: absolute;
-    inset: 0;
-    border-radius: inherit;
-    box-shadow: inset 0 0 18px rgba(0, 0, 0, 0.025);
-    content: "";
-    pointer-events: none;
+    backdrop-filter: blur(1.3px);
+    -webkit-backdrop-filter: blur(1.3px);
+    transition: border-color 180ms ease, background-color 180ms ease, color 180ms ease;
   }
 
   .drop-zone-content {
     z-index: 1;
     display: flex;
     align-items: center;
-    gap: 13px;
-    font-family: Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    gap: 14px;
+    font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-size: 28px;
-    font-weight: 200;
+    font-weight: 300;
     line-height: 1;
     letter-spacing: -0.28px;
     -webkit-font-smoothing: antialiased;
@@ -2109,13 +2049,13 @@
   }
 
   .drop-zone:hover {
-    border-color: rgba(150, 150, 150, 0.7);
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.035);
-    color: rgba(0, 0, 0, 0.55);
+    border-color: #b3b1b1;
+    background: rgba(246, 243, 243, 0.85);
+    color: rgba(0, 0, 0, 0.75);
   }
 
   .drop-zone:hover .drop-zone-content img {
-    filter: brightness(0.78);
+    filter: brightness(0.6);
     transform: scale(1.04);
   }
 
@@ -2124,36 +2064,46 @@
   }
 
   .drop-zone:active {
-    color: rgba(0, 0, 0, 0.65);
+    color: #000;
   }
 
   .document-browser {
+    position: relative;
+    z-index: 3;
     display: flex;
     align-items: center;
     grid-row: 2;
-    height: 65px;
-    padding: 0 42px;
-    border-top: 1px solid #e0e0e0;
-    border-bottom: 1px solid #e0e0e0;
-    background: rgba(255, 255, 255, 0.65);
-    color: rgba(0, 0, 0, 0.7);
-    font-family: Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    font-size: 18px;
+    box-sizing: border-box;
+    height: 64px;
+    margin: 0 13px 12px;
+    padding: 0 7px 0 18px;
+    border: 1.5px solid #c3c2c2;
+    border-radius: 21px;
+    background: rgba(240, 236, 236, 0.75);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+    color: rgba(0, 0, 0, 0.75);
+    font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 21px;
     font-weight: 400;
-    letter-spacing: -0.18px;
+    letter-spacing: -0.21px;
+    backdrop-filter: blur(1.3px);
+    -webkit-backdrop-filter: blur(1.3px);
     -webkit-font-smoothing: antialiased;
   }
 
   .recent-heading {
     display: flex;
     align-items: center;
-    gap: 7px;
-    width: 200px;
-    height: 40px;
+    gap: 8px;
+    flex: 0 0 auto;
+    height: 48px;
+    margin-right: 22px;
     padding: 0;
     border: 0;
     background: transparent;
-    color: rgba(0, 0, 0, 0.7);
+    color: rgba(0, 0, 0, 0.75);
+    font: inherit;
+    letter-spacing: inherit;
     cursor: pointer;
     white-space: nowrap;
     transition: color 160ms ease;
@@ -2179,7 +2129,7 @@
   }
 
   .recent-heading:hover {
-    color: rgba(0, 0, 0, 0.9);
+    color: #000;
   }
 
   .recent-heading:hover .recent-arrow :global(path) {
@@ -2189,43 +2139,44 @@
   .document-search {
     display: flex;
     align-items: center;
+    box-sizing: border-box;
     width: 314px;
-    height: 40px;
-    padding: 0 8px;
-    border: 1px solid rgba(0, 0, 0, 0.08);
-    border-radius: 10px;
-    background: rgba(107, 107, 107, 0.05);
-    transition: background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+    height: 48px;
+    padding: 0 13px 0 11px;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 15px;
+    background: #fff;
+    transition: border-color 180ms ease;
   }
 
   .document-search:focus-within {
-    border-color: rgba(0, 0, 0, 0.16);
-    background: rgba(255, 255, 255, 0.75);
-    box-shadow: none;
+    border-color: rgba(0, 0, 0, 0.18);
   }
 
   .document-search img {
-    width: 24px;
-    height: 24px;
+    width: 25px;
+    height: 25px;
     flex: 0 0 auto;
+    opacity: 0.75;
   }
 
   .document-search input {
     width: 100%;
     min-width: 0;
-    height: 38px;
-    padding: 0 0 0 6px;
+    height: 46px;
+    padding: 0 0 0 7px;
     border: 0;
     outline: 0;
     background: transparent;
     color: rgba(0, 0, 0, 0.75);
     font: inherit;
+    letter-spacing: inherit;
     appearance: none;
     -webkit-appearance: none;
   }
 
   .document-search input::placeholder {
-    color: rgba(0, 0, 0, 0.47);
+    color: rgba(0, 0, 0, 0.5);
     opacity: 1;
   }
 
@@ -2236,7 +2187,7 @@
   .browser-actions {
     display: flex;
     align-items: center;
-    gap: 13px;
+    gap: 10px;
     margin-left: auto;
   }
 
@@ -2245,99 +2196,119 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    height: 40px;
-    padding: 0 9px 0 12px;
-    border: 1px solid rgba(0, 0, 0, 0.08);
-    border-radius: 10px;
-    background: rgba(107, 107, 107, 0.05);
-    color: rgba(0, 0, 0, 0.7);
+    box-sizing: border-box;
+    height: 48px;
+    padding: 0 11px 0 13px;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 15px;
+    background: #fff;
+    color: rgba(0, 0, 0, 0.5);
+    font: inherit;
+    letter-spacing: inherit;
     cursor: pointer;
-    transition: background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease, transform 150ms ease;
+    transition: border-color 180ms ease, transform 150ms ease;
   }
 
   .sort-button {
     position: relative;
-    width: 175px;
-    padding-right: 3px;
+    width: 212px;
+    padding-right: 4px;
+    white-space: nowrap;
     cursor: default;
   }
 
   .filter-button {
-    width: 120px;
+    width: 128px;
   }
 
   .sort-button strong,
   .filter-button strong {
-    color: #000;
+    color: rgba(0, 0, 0, 0.75);
     font-weight: 400;
   }
 
   .sort-arrow {
     display: grid;
     place-items: center;
-    width: 28px;
-    height: 32px;
+    width: 32px;
+    height: 40px;
     padding: 0;
     border: 0;
     background: transparent;
     cursor: pointer;
   }
 
-  .sort-arrow img {
-    width: 16px;
-    height: 17px;
-    transform: rotate(90deg) translateY(2px);
-    transition: filter 150ms ease, transform 200ms cubic-bezier(0.22, 1, 0.36, 1);
+  .sort-arrow .chevron {
+    width: 8px;
+    height: 8px;
+    margin-top: -5px;
+    border-right: 1.5px solid rgba(0, 0, 0, 0.45);
+    border-bottom: 1.5px solid rgba(0, 0, 0, 0.45);
+    transform: rotate(45deg);
+    transition: border-color 150ms ease, margin-top 200ms cubic-bezier(0.22, 1, 0.36, 1), transform 200ms cubic-bezier(0.22, 1, 0.36, 1);
   }
 
-  .sort-arrow.expanded img {
-    transform: rotate(270deg) translateY(-2px);
+  .sort-arrow:hover .chevron {
+    border-color: rgba(0, 0, 0, 0.75);
+  }
+
+  .sort-arrow.expanded .chevron {
+    margin-top: 4px;
+    transform: rotate(-135deg);
   }
 
   .sort-menu {
     position: absolute;
     z-index: 70;
-    top: calc(100% + 13px);
+    top: calc(100% + 10px);
     right: 0;
-    width: 204px;
-    padding: 5px;
-    border: 1px solid rgba(0, 0, 0, 0.18);
+    box-sizing: border-box;
+    width: 206px;
+    padding: 4px 5px;
+    border: 1px solid rgba(0, 0, 0, 0.15);
     border-radius: 15px;
-    background: rgba(255, 255, 255, 0.78);
-    box-shadow: 0 7px 18px rgba(0, 0, 0, 0.11), 0 2px 5px rgba(0, 0, 0, 0.05);
-    backdrop-filter: blur(18px);
-    -webkit-backdrop-filter: blur(18px);
+    background: rgba(255, 255, 255, 0.75);
+    box-shadow: 0 0 100px rgba(0, 0, 0, 0.08);
+    backdrop-filter: blur(4.05px);
+    -webkit-backdrop-filter: blur(4.05px);
     transform-origin: top right;
   }
 
   .sort-menu-item {
     display: grid;
-    grid-template-columns: 28px 1fr 28px;
+    grid-template-columns: 28px 1fr 26px;
     align-items: center;
+    box-sizing: border-box;
     width: 100%;
-    height: 40px;
-    padding: 0 7px;
+    height: 39px;
+    padding: 0 5px 0 6px;
     border: 1px solid transparent;
-    border-radius: 9px;
+    border-radius: 10px;
     background: transparent;
-    color: #3f3f3f;
-    font-size: 18px;
+    color: rgba(0, 0, 0, 0.75);
+    font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 20px;
+    letter-spacing: -0.2px;
     text-align: left;
     cursor: pointer;
+    transition: color 180ms ease, background-color 180ms ease, border-color 180ms ease;
   }
 
   .sort-menu-item.active {
     border-color: rgba(0, 0, 0, 0.08);
-    background: rgba(234, 234, 234, 0.574);
+    background: rgba(107, 107, 107, 0.05);
+    color: #000;
   }
 
   .sort-menu-item:hover {
+    border-color: rgba(0, 0, 0, 0.08);
+    background: rgba(107, 107, 107, 0.05);
     color: #000;
   }
 
   .sort-check {
     opacity: 0;
-    color: #1684f8;
+    color: #0073ff;
     text-align: center;
   }
 
@@ -2348,18 +2319,17 @@
   .filter-button img {
     width: 24px;
     height: 24px;
-    transition: filter 150ms ease;
+    opacity: 0.75;
+    transition: filter 150ms ease, opacity 150ms ease;
   }
 
   .sort-button:hover,
   .filter-button:hover {
-    border-color: rgba(0, 0, 0, 0.13);
-    background: rgba(107, 107, 107, 0.09);
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.025);
+    border-color: rgba(0, 0, 0, 0.18);
   }
 
   .filter-button:hover img {
-    filter: brightness(0.75);
+    opacity: 1;
   }
 
   .sort-arrow:active,
@@ -2370,14 +2340,56 @@
   .recent-grid {
     display: grid;
     grid-row: 3;
-    grid-template-columns: repeat(5, minmax(0, 264px));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     grid-auto-rows: auto;
-    gap: 45px clamp(18px, 2.4vw, 46px);
-    justify-content: space-between;
+    gap: 17px clamp(9px, 1.2vw, 23px);
     align-content: start;
-    padding: 37px 42px 42px;
+    padding: 13px 21px 21px;
     overflow: auto;
     scrollbar-width: none;
+  }
+
+  /* Home fades in when you come back to it. */
+  .quick-tools,
+  .workspace > :is(.drop-zone, .document-browser, .recent-grid) {
+    animation: home-view-in 240ms ease-out both;
+  }
+
+  @keyframes home-view-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  /* Opening a document: the editor fades in and its pages and thumbnails settle into place. */
+  .editor-shell.document-entering :global(.pdf-workspace:not(.editor-inactive)),
+  .editor-shell.document-entering :global(.editor-sidebar:not(.editor-inactive)) {
+    animation: document-view-in 220ms ease-out both;
+  }
+
+  .editor-shell.document-entering :global(.pdf-workspace:not(.editor-inactive) .pdf-page),
+  .editor-shell.document-entering :global(.editor-sidebar:not(.editor-inactive) .thumbnail-page) {
+    animation: document-page-in 480ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  @keyframes -global-document-view-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  @keyframes -global-document-page-in {
+    from { opacity: 0; transform: translateY(14px) scale(0.985); }
+    to { opacity: 1; transform: none; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .quick-tools,
+    .workspace > :is(.drop-zone, .document-browser, .recent-grid),
+    .editor-shell.document-entering :global(.pdf-workspace),
+    .editor-shell.document-entering :global(.editor-sidebar),
+    .editor-shell.document-entering :global(.pdf-page),
+    .editor-shell.document-entering :global(.thumbnail-page) {
+      animation: none;
+    }
   }
 
   .recent-grid::-webkit-scrollbar {
@@ -2388,7 +2400,7 @@
 
   .recent-document {
     display: grid;
-    grid-template-rows: auto 50px;
+    grid-template-rows: auto 48px;
     width: 100%;
     height: auto;
     padding: 0;
@@ -2402,21 +2414,23 @@
   .document-preview {
     display: grid;
     place-items: center;
+    box-sizing: border-box;
     width: 100%;
     height: auto;
-    aspect-ratio: 264 / 355;
+    aspect-ratio: 266 / 355;
     overflow: hidden;
     border: 1px solid #dadada;
-    border-radius: 7px;
+    border-radius: 8px;
     background: #fff;
     box-shadow: 3px 8px 16px rgba(0, 0, 0, 0.05);
-    transition: border-color 180ms ease, box-shadow 180ms ease, background-color 180ms ease;
+    transition: border-color 170ms ease, box-shadow 170ms ease, background-color 170ms ease;
   }
 
   .recent-thumbnail {
     display: block;
     width: 100%;
     height: 100%;
+    border-radius: 7px;
     object-fit: contain;
     background: #fff;
     animation: recent-thumbnail-in 180ms ease both;
@@ -2433,24 +2447,23 @@
     justify-content: center;
     gap: 6px;
     width: 100%;
-    height: 50px;
+    min-width: 0;
     overflow: hidden;
-    font-family: Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    font-size: 18px;
+    font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 20px;
     font-weight: 400;
     line-height: 1;
-    letter-spacing: -0.18px;
-    text-align: center;
+    letter-spacing: -0.2px;
     white-space: nowrap;
-    -webkit-mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 28px), transparent 100%);
-    mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 28px), transparent 100%);
     -webkit-font-smoothing: antialiased;
   }
+
 
   .document-name > span {
     display: block;
     max-width: 100%;
     overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
   }
 
@@ -2467,7 +2480,9 @@
   }
 
   .open-document .document-preview {
-    background: rgba(255, 255, 255, 0.36);
+    border-color: #c3c2c2;
+    background: rgba(240, 236, 236, 0.75);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
   }
 
   .open-document-plus {
@@ -2492,13 +2507,18 @@
   }
 
   .recent-document:hover {
-    color: rgba(0, 0, 0, 0.7);
+    color: rgba(0, 0, 0, 0.75);
     transform: translateY(-2px);
   }
 
   .recent-document:hover .document-preview {
-    border-color: #cfcfcf;
-    box-shadow: 3px 10px 20px rgba(0, 0, 0, 0.075);
+    border-color: #bbb;
+    box-shadow: 4px 8px 18px rgba(0, 0, 0, 0.08);
+  }
+
+  .open-document:hover .document-preview {
+    border-color: #b3b1b1;
+    background: rgba(246, 243, 243, 0.85);
   }
 
   .open-document:hover .open-document-plus {
@@ -2514,46 +2534,46 @@
     position: fixed;
     z-index: 70;
     box-sizing: border-box;
-    width: 204px;
-    padding: 5px;
-    border: 1px solid rgba(0, 0, 0, 0.18);
+    width: 206px;
+    padding: 4px 5px;
+    border: 1px solid rgba(0, 0, 0, 0.15);
     border-radius: 15px;
-    background: rgba(255, 255, 255, 0.78);
-    box-shadow: 0 7px 18px rgba(0, 0, 0, 0.11), 0 2px 5px rgba(0, 0, 0, 0.05);
-    backdrop-filter: blur(18px);
-    -webkit-backdrop-filter: blur(18px);
+    background: rgba(255, 255, 255, 0.75);
+    box-shadow: 0 0 100px rgba(0, 0, 0, 0.08);
+    backdrop-filter: blur(4.05px);
+    -webkit-backdrop-filter: blur(4.05px);
     transform-origin: top left;
   }
 
   .recent-menu-item {
     display: grid;
-    grid-template-columns: 28px 1fr 28px;
+    grid-template-columns: 28px 1fr 26px;
     align-items: center;
+    box-sizing: border-box;
     width: 100%;
-    height: 40px;
-    padding: 0 7px;
+    height: 39px;
+    padding: 0 5px 0 6px;
     border: 1px solid transparent;
     border-radius: 10px;
     background: transparent;
-    color: #3f3f3f;
-    font-family: Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    font-size: 18px;
+    color: rgba(0, 0, 0, 0.75);
+    font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 20px;
+    letter-spacing: -0.2px;
     text-align: left;
     cursor: pointer;
     transition:
       color 180ms cubic-bezier(0.2, 0.7, 0.2, 1),
       background-color 180ms cubic-bezier(0.2, 0.7, 0.2, 1),
-      border-color 180ms cubic-bezier(0.2, 0.7, 0.2, 1),
-      transform 180ms cubic-bezier(0.2, 0.7, 0.2, 1);
+      border-color 180ms cubic-bezier(0.2, 0.7, 0.2, 1);
   }
 
   .recent-menu-item:hover,
   .recent-menu-item:focus-visible {
-    border-color: rgba(0, 0, 0, 0.07);
-    background: rgba(234, 234, 234, 0.62);
-    color: #111;
+    border-color: rgba(0, 0, 0, 0.08);
+    background: rgba(107, 107, 107, 0.05);
+    color: #000;
     outline: none;
-    transform: translateX(1px);
   }
 
   .recent-menu-item img {
@@ -2561,13 +2581,13 @@
     width: 20px;
     height: 20px;
     object-fit: contain;
-    transform: translateX(-2px);
     transition: filter 180ms cubic-bezier(0.2, 0.7, 0.2, 1), opacity 180ms ease;
   }
 
   .recent-menu-item.export-document img {
     width: 24px;
     height: 24px;
+    margin-left: -2px;
   }
 
   .recent-menu-item:hover:not(.delete-document) img,
@@ -2578,85 +2598,40 @@
   .recent-menu-item kbd {
     display: grid;
     place-items: center;
-    width: 28px;
-    height: 28px;
-    border: 1px solid rgba(0, 0, 0, 0.04);
-    border-radius: 7px;
-    background: rgba(0, 0, 0, 0.045);
-    color: rgba(0, 0, 0, 0.22);
+    box-sizing: border-box;
+    width: 26px;
+    height: 27px;
+    border: 1px solid rgba(0, 0, 0, 0.015);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.025);
+    color: rgba(0, 0, 0, 0.165);
     font-family: inherit;
-    font-size: 17px;
+    font-size: 20px;
+    letter-spacing: 0;
     transition: color 180ms ease, background-color 180ms ease, border-color 180ms ease;
   }
 
   .recent-menu-item:hover kbd,
   .recent-menu-item:focus-visible kbd {
-    border-color: rgba(0, 0, 0, 0.06);
-    background: rgba(0, 0, 0, 0.065);
-    color: rgba(0, 0, 0, 0.34);
+    border-color: rgba(0, 0, 0, 0.02);
+    background: rgba(0, 0, 0, 0.055);
   }
 
   .recent-menu-item.delete-document {
-    color: #ff2f38;
+    color: rgba(255, 0, 0, 0.85);
   }
 
   .file-input {
     display: none;
   }
 
-  @media (max-width: 935px) {
-    .editor-shell {
-      grid-template-columns: 260px minmax(0, 1fr);
-    }
-
-    .topbar {
-      grid-template-columns: 260px minmax(0, 1fr) auto;
-    }
-
-    .brand-area {
-      padding-left: 14px;
-      padding-right: 12px;
-    }
-
-    .logo {
-      width: 154px;
-      height: auto;
-    }
-
-    .logo-button {
-      width: 154px;
-    }
-
-    .history {
-      gap: 12px;
-    }
-
-    .document-tab {
-      padding: 0 14px;
-      font-size: 16px;
-    }
-
-    .quick-tools {
-      padding-right: 14px;
-      padding-left: 14px;
-    }
-
-    .quick-tool {
-      width: 232px;
-    }
-
-    .quick-tool.wide-icon .quick-tool-icon {
-      flex-basis: 106px;
-    }
-  }
-
-  /* ---- Document view redesign (Figma "Redesign" frame). Values are frame px; the shell's 0.85 zoom maps them to the screen. ---- */
+  /* ---- Redesign (Figma "Redesign" frame), shared by home and the document view. Values are frame px; the shell's 0.85 zoom maps them to the screen. ---- */
+  .editor-shell,
   .editor-shell.editor-mode {
-    grid-template-columns: 310px minmax(0, 1fr);
     background: #e2e2e2;
   }
 
-  .editor-mode .topbar {
+  .editor-shell .topbar {
     position: relative;
     z-index: 6;
     grid-template-columns: 310px minmax(0, 1fr) auto;
@@ -2709,7 +2684,7 @@
     pointer-events: none;
   }
 
-  .editor-mode .history {
+  .editor-shell .history {
     position: static;
     margin: 0;
   }
@@ -2792,13 +2767,13 @@
     content: '';
   }
 
-  .editor-mode .tab-strip {
+  .editor-shell .tab-strip {
     position: relative;
     z-index: 1;
     height: 56px;
   }
 
-  .editor-mode .document-tab {
+  .editor-shell .document-tab {
     position: relative;
     gap: 11px;
     max-width: 340px;
@@ -2815,7 +2790,7 @@
     letter-spacing: -0.21px;
   }
 
-  .editor-mode .document-tab.active {
+  .editor-shell .document-tab.active {
     z-index: 1;
     padding-right: 16.5px;
     border-color: #c5c3c3;
@@ -2823,17 +2798,17 @@
     color: #000;
   }
 
-  .editor-mode .document-tab img.tab-file-icon {
+  .editor-shell .document-tab img.tab-file-icon {
     width: 21px;
     height: 21px;
   }
 
   /* Inactive tabs keep the close button folded away; hovering grows the tab to its selected width and reveals it. */
-  .editor-mode .document-tab {
+  .editor-shell .document-tab {
     transition: padding-right 220ms cubic-bezier(0.22, 1, 0.36, 1), background-color 180ms ease, color 180ms ease, opacity 110ms ease;
   }
 
-  .editor-mode .close-tab {
+  .editor-shell .close-tab {
     flex: 0 0 auto;
     width: 20px;
     height: 20px;
@@ -2842,22 +2817,22 @@
     transition: width 220ms cubic-bezier(0.22, 1, 0.36, 1), margin-left 220ms cubic-bezier(0.22, 1, 0.36, 1), opacity 160ms ease;
   }
 
-  .editor-mode .document-tab:not(.active):not(:hover):not(:focus-within) {
+  .editor-shell .document-tab:not(.active):not(:hover):not(:focus-within) {
     padding-right: 27px;
   }
 
-  .editor-mode .document-tab:not(.active):hover,
-  .editor-mode .document-tab:not(.active):focus-within {
+  .editor-shell .document-tab:not(.active):hover,
+  .editor-shell .document-tab:not(.active):focus-within {
     padding-right: 16.5px;
   }
 
-  .editor-mode .document-tab:not(.active):not(:hover):not(:focus-within) .close-tab {
+  .editor-shell .document-tab:not(.active):not(:hover):not(:focus-within) .close-tab {
     width: 0;
     margin-left: -11px;
     opacity: 0;
   }
 
-  .editor-mode .close-tab img.close-tab-cross {
+  .editor-shell .close-tab img.close-tab-cross {
     flex: 0 0 auto;
   }
 
@@ -2867,31 +2842,31 @@
     max-width: none;
   }
 
-  .editor-mode .close-tab img.close-tab-cross {
+  .editor-shell .close-tab img.close-tab-cross {
     width: 14.4px;
     height: 14.4px;
   }
 
-  .editor-mode .close-tab:hover img.close-tab-cross {
+  .editor-shell .close-tab:hover img.close-tab-cross {
     filter: brightness(0.6);
   }
 
-  .editor-mode .add-tab {
+  .editor-shell .add-tab {
     flex-basis: 55px;
     width: 55px;
     height: 56px;
   }
 
-  .editor-mode .add-tab img.add-tab-cross {
+  .editor-shell .add-tab img.add-tab-cross {
     width: 19.5px;
     height: 19.5px;
   }
 
-  .editor-mode .add-tab:hover img.add-tab-cross {
+  .editor-shell .add-tab:hover img.add-tab-cross {
     filter: brightness(0.75);
   }
 
-  .editor-mode .add-tab:active img.add-tab-cross {
+  .editor-shell .add-tab:active img.add-tab-cross {
     transform: scale(0.94);
   }
 
@@ -3008,7 +2983,7 @@
     clip-path: polygon(0 0, 0 100%, 100% 100%);
   }
 
-  .editor-mode .utilities {
+  .editor-shell .utilities {
     position: relative;
     z-index: 1;
     gap: 10px;
@@ -3018,7 +2993,7 @@
     box-shadow: none;
   }
 
-  .editor-mode .utility-button {
+  .editor-shell .utility-button {
     width: 40px;
     height: 40px;
     border: 1px solid rgba(0, 0, 0, 0.05);
@@ -3026,47 +3001,55 @@
     background: rgba(0, 0, 0, 0.05);
   }
 
-  .editor-mode .utility-button:hover {
+  .editor-shell .utility-button:hover {
     border-color: rgba(0, 0, 0, 0.07);
     background: rgba(0, 0, 0, 0.08);
   }
 
-  .editor-mode .utility-button:disabled:hover {
+  .editor-shell .utility-button:disabled:hover {
     border-color: rgba(0, 0, 0, 0.05);
     background: rgba(0, 0, 0, 0.05);
   }
 
-  .editor-mode .utility-button.active,
-  .editor-mode .utility-button.active:hover {
+  .editor-shell .utility-button.active,
+  .editor-shell .utility-button.active:hover {
     border-color: #171717;
     background: #171717;
   }
 
-  .editor-mode .utility-button img,
-  .editor-mode .utility-button:nth-child(n) img {
+  .editor-shell .utility-button img,
+  .editor-shell .utility-button:nth-child(n) img {
     width: 24px;
     height: 24px;
   }
 
-  .editor-mode .utility-button img.utility-icon-mcp,
-  .editor-mode .utility-button img.utility-icon-comments {
+  .editor-shell .utility-button img.utility-icon-mcp,
+  .editor-shell .utility-button img.utility-icon-comments {
     width: 25px;
     height: 25px;
   }
 
-  .editor-mode .utility-button.ai-button img {
+  .editor-shell .utility-button.ai-button img {
     width: 23px;
     height: 24px;
   }
 
-  .editor-mode .utility-button[data-utility='settings'] img {
+  .editor-shell .utility-button[data-utility='settings'] img {
     width: 26px;
     height: 26px;
   }
 
-  .editor-mode .ai-button.ai-busy::after,
-  .editor-mode .mcp-button.mcp-live::after {
+  .editor-shell .ai-button.ai-busy::after {
     border-color: #ececec;
+  }
+
+  .editor-shell .mcp-button.mcp-live:not(.active):not(:hover) {
+    animation-name: mcp-live-pulse-editor;
+  }
+
+  @keyframes mcp-live-pulse-editor {
+    from { background-color: rgba(0, 0, 0, 0.05); }
+    to { background-color: rgba(0, 0, 0, 0.1); }
   }
 
   .sidebar-head {

@@ -75,9 +75,10 @@
     },
     {
       id: 'document',
-      primary: 'ocr',
+      primary: 'translate',
       tools: [
-        { id: 'ocr', smallIcon: 'orc', label: 'OCR', shortcut: '3' },
+        { id: 'translate', label: 'Translate', shortcut: '2' },
+        { id: 'ocr', smallIcon: 'orc', designIcon: 'scan-text', label: 'OCR', shortcut: '3' },
         { id: 'search', label: 'Find', shortcut: '4' },
         { id: 'watermark', label: 'Watermark', shortcut: '5' }
       ]
@@ -85,8 +86,8 @@
   ];
 
   const nonInvertedTools = new Set(['select', 'image', 'blackout', 'whiteout', 'measure', 'highlight']);
-  /** Group primaries drawn with the redesign's own artwork; every other tool keeps its bitmap. */
-  const designIcons = new Set(['select', 'marker', 'triangle', 'textfield', 'protect', 'sign', 'measure', 'ocr']);
+  /** Group primaries built from layered redesign artwork; every other tool shows its 50×50 icon from /redesign/tools. */
+  const designIcons = new Set(['select', 'marker', 'textfield', 'protect', 'sign', 'measure', 'translate']);
   const lightSelectionTools = new Set(['blackout', 'whiteout']);
   /** @type {Record<string, string>} */
   const toolDescriptions = {
@@ -97,7 +98,8 @@
     protect: 'Protect the PDF with a password.', blackout: 'Permanently cover content in black.', whiteout: 'Permanently cover content in white.',
     sign: 'Add a saved or new signature.', checkbox: 'Add a checkbox field.', input: 'Add a fillable input field.',
     measure: 'Measure a distance on the page.', crop: 'Crop the visible page area.',
-    ocr: 'Recognize text in scanned pages.', search: 'Find text in the document.', watermark: 'Add a watermark to every page.'
+    ocr: 'Recognize text in scanned pages.', search: 'Find text in the document.', watermark: 'Add a watermark to every page.',
+    translate: 'Translate the document into another language.'
   };
 
   /** @type {string} */
@@ -127,7 +129,7 @@
     expandedGroup = null;
   }
 
-  /** @param {{ id: string; tools: { id: string; label: string }[] }} group */
+  /** @param {{ id: string; tools: { id: string; label: string; designIcon?: string }[] }} group */
   function selectedTool(group) {
     return group.tools.find((tool) => tool.id === groupSelections[group.id]) ?? group.tools[0];
   }
@@ -259,8 +261,6 @@
                 <img class="highlighter-base" src="/redesign/icon-highlighter.svg" alt="" />
                 <img class="highlighter-tip" src="/redesign/vector647.svg" alt="" />
                 <img class="highlighter-edge" src="/redesign/vector648.svg" alt="" />
-              {:else if icon === 'triangle'}
-                <img class="shape-square" src="/redesign/polygon1.svg" alt="" />
               {:else if icon === 'textfield'}
                 <span class="text-frame"></span>
                 <img class="text-glyph" src="/redesign/icon-letter-text.svg" alt="" />
@@ -271,14 +271,15 @@
                 <img class="signature" src="/redesign/icon-signature.svg" alt="" />
               {:else if icon === 'measure'}
                 <img class="pencil-ruler" src="/redesign/icon-pencil-ruler.svg" alt="" />
-              {:else if icon === 'ocr'}
+              {:else if icon === 'translate'}
                 <img class="languages" src="/redesign/icon-languages.svg" alt="" />
               {/if}
             </span>
           {:else}
             <img
+              class="tool-icon"
               class:preserve-color={nonInvertedTools.has(groupSelections[group.id])}
-              src={`/toolbar/big/${groupSelections[group.id]}.webp`}
+              src={`/redesign/tools/${selectedTool(group).designIcon ?? groupSelections[group.id]}.svg`}
               alt=""
             />
           {/if}
@@ -524,12 +525,11 @@
     height: 27.91px;
   }
 
-  .shape-square {
-    top: 7px;
-    left: 7px;
-    width: 41.985px;
-    height: 41.985px;
-    transform: rotate(-45deg);
+  .primary-tool img.tool-icon {
+    width: 50px;
+    height: 50px;
+    max-width: none;
+    max-height: none;
   }
 
   .text-frame {

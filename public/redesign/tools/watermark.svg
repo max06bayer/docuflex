@@ -1,0 +1,15 @@
+<svg width="50" height="50" viewBox="0 0 50 50" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="Full Icons">
+<g id="Frame 26">
+<g id="Icon / droplet">
+<path id="Vector" d="M24.5 37.4167C26.898 37.4167 29.1978 36.4641 30.8935 34.7684C32.5891 33.0728 33.5417 30.773 33.5417 28.375C33.5417 25.7917 32.25 23.3375 29.6667 21.2708C27.0834 19.2042 25.1459 16.1042 24.5 12.875C23.8542 16.1042 21.9167 19.2042 19.3334 21.2708C16.75 23.3375 15.4584 25.7917 15.4584 28.375C15.4584 30.773 16.411 33.0728 18.1066 34.7684C19.8023 36.4641 22.102 37.4167 24.5 37.4167Z" fill="url(#paint0_radial_0_1)" stroke="#0645C2" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+</g>
+</g>
+</g>
+<defs>
+<radialGradient id="paint0_radial_0_1" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(24.9999 29) rotate(-90) scale(14 10.3158)">
+<stop stop-color="#00B3FF"/>
+<stop offset="1" stop-color="#0059FF"/>
+</radialGradient>
+</defs>
+</svg>

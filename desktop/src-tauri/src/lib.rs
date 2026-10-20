@@ -348,6 +348,9 @@ fn spawn_services(
         // Turns on the local MCP server (/mcp) so AI agents on this computer
         // can drive the editor. The hosted web build never sets this.
         .env("DOCUFLEX_MCP", "1")
+        // The bundle leaves out the ~1 GB translation engine; the server
+        // downloads it into ~/.cache/docuflex the first time Translate runs.
+        .env("DOCUFLEX_TRANSLATE_AUTO_INSTALL", "1")
         // The desktop invokes only its checksum-pinned bundled tools. Linux's
         // RLIMIT_NPROC counts every process owned by the logged-in user, so the
         // server profile's limit can prevent pdf2htmlEX from forking on a

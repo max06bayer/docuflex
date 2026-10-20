@@ -1,0 +1,16 @@
+<svg width="50" height="50" viewBox="0 0 50 50" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="Full Icons">
+<g id="Frame 17">
+<g id="Icon / zoom-in">
+<path id="Vector" d="M23.375 33.375C28.3456 33.375 32.375 29.3456 32.375 24.375C32.375 19.4044 28.3456 15.375 23.375 15.375C18.4044 15.375 14.375 19.4044 14.375 24.375C14.375 29.3456 18.4044 33.375 23.375 33.375Z" fill="url(#paint0_radial_0_1)" stroke="#404040" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<path id="Vector_2" d="M34.625 35.625L29.7312 30.7313" stroke="#404040" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+</g>
+</g>
+</g>
+<defs>
+<radialGradient id="paint0_radial_0_1" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(26 26) rotate(-147.724) scale(11.2361)">
+<stop stop-color="white"/>
+<stop offset="1" stop-color="#7A7A7A"/>
+</radialGradient>
+</defs>
+</svg>
