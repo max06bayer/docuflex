@@ -130,43 +130,72 @@
 </div>
 
 <style>
-  .protect-panel { position: absolute; z-index: 45; top: 20px; left: 14px; display: grid; grid-template-rows: 50px 1fr; box-sizing: border-box; width: min(320px, calc(100% - 28px)); height: 472px; max-height: calc(100% - 40px); overflow: hidden; border: 1.5px solid #c5c5c5; border-radius: 13px; background: #fafafa; box-shadow: 0 9px 24px rgba(0,0,0,.07); color: #000; font-family: "Inter Variable", Inter, sans-serif; font-size: 16px; transition: height 300ms cubic-bezier(.22,1,.36,1); }
-  .protect-panel.has-error { height: 508px; }
-  .panel-header { display: grid; grid-template-columns: 26px 1fr 28px; align-items: center; box-sizing: border-box; height: 50px; padding: 0 12px; border-bottom: 1px solid #cacaca; background: #eee; }
-  .panel-header > img { width: 24px; height: 24px; }
-  .panel-header h2 { margin: 0 0 0 7px; font-size: 18px; font-weight: 400; line-height: 1.22; letter-spacing: -.25px; }
-  .panel-close { position: relative; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 9px; background: transparent; cursor: pointer; transition: transform 160ms ease; }
-  .panel-close:active { transform: scale(.94); }
-  .panel-close span { position: absolute; top: 13px; left: 6px; width: 16px; height: 1.5px; border-radius: 99px; background: #929292; transform: rotate(45deg); }
-  .panel-close span + span { transform: rotate(-45deg); }
-  .panel-close:hover span { background: #000; }
-  .protect-form { display: grid; grid-template-rows: 78px 124px 140px 78px; min-height: 0; }
-  .protect-panel.has-error .protect-form { grid-template-rows: 78px 160px 140px 78px; }
-  .upload-section { display: grid; align-content: center; padding: 17px 18px; border-bottom: 1px solid #cacaca; }
-  .upload-file { display: flex; align-items: center; justify-content: center; gap: 7px; min-width: 0; height: 44px; padding: 0 12px; border: 1px solid #d7d7d7; border-radius: 8px; background: #f3f3f3; color: #7a7a7a; font: inherit; font-size: 18px; cursor: pointer; }
+  /* Matches the redesign panels (TranslateFilesPanel, SettingsPanel, PdfEditor .protect-panel). */
+  .protect-panel { position: absolute; z-index: 45; top: 12px; left: 13px; display: grid; box-sizing: border-box; width: min(320px, calc(100% - 26px)); border: 1.5px solid #c3c2c2; border-radius: 21px; background: rgba(240, 236, 236, 0.75); box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05); backdrop-filter: blur(1.3px); -webkit-backdrop-filter: blur(1.3px); color: #000; font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 19px; letter-spacing: -0.19px; -webkit-font-smoothing: antialiased; grid-template-rows: 50px 1fr; height: 480px; max-height: calc(100% - 24px); overflow: hidden; transition: height 300ms cubic-bezier(0.22, 1, 0.36, 1); }
+  .panel-header { display: grid; grid-template-columns: 24px 1fr 28px; align-items: center; box-sizing: border-box; height: 50px; padding: 0 14px 0 15px; border-bottom: 1.5px solid #c3c2c2; border-radius: 19.5px 19.5px 0 0; background: rgba(214, 214, 214, 0.75); }
+  .panel-header > img { width: 24px; height: 24px; object-fit: contain; }
+  .panel-header h2 { margin: 0 0 0 8px; overflow: hidden; font-size: 20px; font-weight: 400; line-height: 1.22; letter-spacing: -0.2px; text-overflow: ellipsis; white-space: nowrap; }
+  .panel-close { width: 28px; height: 28px; padding: 0; border: 0; border-radius: 9px; background: url('/redesign/panel-close.svg') center / 12.67px 12.67px no-repeat; cursor: pointer; transition: transform 160ms ease, filter 160ms ease; }
+  .panel-close span { display: none; }
+  .panel-close:hover { filter: brightness(0); }
+  .panel-close:active { transform: scale(0.94); }
+  .protect-panel.has-error { height: 516px; }
+  .protect-form { display: grid; grid-template-rows: 78px 130px 140px 78px; min-height: 0; }
+  .protect-panel.has-error .protect-form { grid-template-rows: 78px 166px 140px 78px; }
+  .upload-section { display: grid; align-content: center; padding: 15px 11px 15px 12px; border-bottom: 1px solid rgba(0, 0, 0, 0.1); }
+  .upload-file { display: flex; align-items: center; justify-content: center; gap: 8px; box-sizing: border-box; min-width: 0; height: 48px; padding: 0 13px; border: 1px solid rgba(0, 0, 0, 0.1); border-radius: 15px; background: #fff; color: rgba(0, 0, 0, 0.5); font: inherit; letter-spacing: inherit; cursor: pointer; transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease, transform 160ms ease; }
+  .upload-file:hover { border-color: rgba(0, 0, 0, 0.18); color: rgba(0, 0, 0, 0.75); }
+  .upload-file:active { transform: scale(0.985); }
   .upload-file span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .action-plus { position: relative; flex: 0 0 auto; width: 20px; height: 20px; }
-  .action-plus::before, .action-plus::after { position: absolute; top: 50%; left: 50%; width: 14px; height: 1.5px; border-radius: 99px; background: currentColor; content: ''; transform: translate(-50%,-50%); }
-  .action-plus::after { transform: translate(-50%,-50%) rotate(90deg); }
-  .protect-fields { position: relative; display: grid; align-content: center; box-sizing: border-box; min-height: 0; padding: 10px 18px 14px; overflow: hidden; border-bottom: 1px solid #cacaca; }
+  .action-plus::before, .action-plus::after { position: absolute; top: 50%; left: 50%; width: 14px; height: 1.5px; border-radius: 99px; background: currentColor; content: ''; transform: translate(-50%, -50%); }
+  .action-plus::after { transform: translate(-50%, -50%) rotate(90deg); }
+  .protect-fields { position: relative; display: grid; align-content: center; box-sizing: border-box; min-height: 0; padding: 12px 11px 12px 12px; overflow: hidden; border-bottom: 1px solid rgba(0, 0, 0, 0.1); }
   .password-fields-enter { display: grid; gap: 10px; }
-  .password-field { display: grid; grid-template-columns: minmax(0,1fr) 44px; box-sizing: border-box; height: 40px; overflow: hidden; border: 1px solid #d7d7d7; border-radius: 8px; background: #f3f3f3; }
-  .password-field:focus-within { border-color: #a9a9a9; box-shadow: 0 0 0 3px rgba(0,117,255,.09); }
-  .password-field.error { border-color: #e15757; box-shadow: 0 0 0 3px rgba(225,87,87,.09); }
-  .password-field input { min-width: 0; height: 100%; padding: 0 11px; border: 0; outline: 0; background: transparent; color: #343434; font: inherit; font-size: 18px; }
-  .password-field input::placeholder { color: #7a7a7a; opacity: 1; }
-  .password-visibility { position: relative; display: grid; place-items: center; width: 44px; height: 100%; padding: 0; border: 0; border-left: 1px solid #d7d7d7; background: transparent; cursor: pointer; }
-  .password-visibility img { position: absolute; top: 50%; left: 50%; width: 24px; height: 24px; opacity: 0; transform: translate(-50%,-50%) scale(.9); transition: opacity 170ms ease, transform 190ms ease; }
-  .password-visibility img.visible { opacity: 1; transform: translate(-50%,-50%) scale(1); }
-  .protection-error { width: 100%; max-height: 0; margin: 0; overflow: hidden; color: #c83e3e; font-size: 18px; line-height: 1; opacity: 0; transition: max-height 240ms ease, margin-top 240ms ease, opacity 170ms ease; }
-  .protection-error.visible { max-height: 22px; margin-top: 6px; opacity: 1; }
-  .protect-warning { padding: 18px 19px 10px; overflow: hidden; border-bottom: 1px solid #cacaca; }
-  .protect-warning h3 { margin: 0 0 7px; font-size: 18px; font-weight: 400; line-height: 1; }
-  .protect-warning p { margin: 0; color: #7a7a7a; font-size: 18px; line-height: 1.42; letter-spacing: -.25px; }
-  .protect-warning p span { color: #0878f9; }
-  .protect-actions { display: grid; place-items: center; padding: 17px 18px; }
-  .protect-submit { display: flex; align-items: center; justify-content: center; gap: 7px; width: 100%; height: 44px; padding: 0 12px; border: 0; border-radius: 8px; background: #000; color: #fff; font: inherit; font-size: 18px; cursor: pointer; }
+  .password-field { display: grid; grid-template-columns: minmax(0, 1fr) 46px; box-sizing: border-box; height: 48px; overflow: hidden; border: 1px solid rgba(0, 0, 0, 0.1); border-radius: 15px; background: #fff; transition: border-color 150ms ease; }
+  .password-field:focus-within { border-color: rgba(0, 0, 0, 0.18); }
+  .password-field.error { border-color: rgba(222, 53, 66, 0.6); }
+  .password-field input { min-width: 0; height: 100%; padding: 0 13px; border: 0; outline: 0; background: transparent; color: rgba(0, 0, 0, 0.75); font: inherit; letter-spacing: inherit; }
+  .password-field input::placeholder { color: rgba(0, 0, 0, 0.5); opacity: 1; }
+  .password-visibility { position: relative; display: grid; place-items: center; width: 46px; height: 100%; padding: 0; border: 0; background: transparent; cursor: pointer; }
+  .password-visibility img { position: absolute; top: 50%; left: 50%; width: 24px; height: 24px; opacity: 0; transform: translate(-50%, -50%) scale(0.9); transition: opacity 170ms ease, transform 190ms ease; }
+  .password-visibility img.visible { opacity: 0.75; transform: translate(-50%, -50%) scale(1); }
+  .protection-error { width: 100%; max-height: 0; margin: 0; overflow: hidden; color: #de3542; font-size: 17px; line-height: 1.1; opacity: 0; transition: max-height 240ms ease, margin-top 240ms ease, opacity 170ms ease; }
+  .protection-error.visible { max-height: 24px; margin-top: 8px; opacity: 1; }
+  .protect-warning { padding: 16px 14px 10px; overflow: hidden; border-bottom: 1px solid rgba(0, 0, 0, 0.1); }
+  .protect-warning h3 { margin: 0 0 7px; font-size: 20px; font-weight: 400; line-height: 1; letter-spacing: -0.2px; }
+  .protect-warning p { margin: 0; color: rgba(0, 0, 0, 0.5); font-size: 18px; line-height: 1.42; letter-spacing: -0.18px; }
+  .protect-warning p span { color: #0073ff; }
+  .protect-actions { display: grid; align-content: center; padding: 15px 11px 15px 12px; }
+  .protect-submit { display: flex; align-items: center; justify-content: center; gap: 10px; box-sizing: border-box; width: 100%; min-width: 0; height: 48px; padding: 0 17px; border: 1px solid #111; border-radius: 15px; background: #111; color: #fff; font: inherit; letter-spacing: inherit; cursor: pointer; transition: opacity 150ms ease, background-color 150ms ease, transform 160ms ease; }
+  .protect-submit:active { transform: scale(0.97); }
   .protect-submit img { width: 24px; height: 24px; filter: brightness(0) invert(1); }
-  .protect-submit:disabled { cursor: wait; opacity: .8; }
+  .protect-submit:disabled { cursor: wait; opacity: 0.8; }
   .file-input { display: none; }
+
+  /* dark theme: generated by scripts/generate-dark-theme.mjs — do not edit */
+  :global(:root[data-theme="dark"]) .protect-panel { border: 1.5px solid #2c2c2c; background: rgba(22, 22, 22, 0.96); box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15); color: rgba(255, 255, 255, 0.92); }
+  :global(:root[data-theme="dark"]) .panel-header { border-bottom: 1.5px solid #2c2c2c; background: rgba(0, 0, 0, 0.45); }
+  :global(:root[data-theme="dark"]) .panel-close { border: 0; filter: brightness(0) invert(1) opacity(0.78); background: url('/redesign/panel-close.svg') center / 12.67px 12.67px no-repeat; }
+  :global(:root[data-theme="dark"]) .panel-close:hover { filter: brightness(0) invert(1); }
+  :global(:root[data-theme="dark"]) .upload-section { border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+  :global(:root[data-theme="dark"]) .upload-file { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .upload-file:hover { border-color: rgba(255, 255, 255, 0.144); color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .action-plus::before,
+  :global(:root[data-theme="dark"]) .action-plus::after { background: currentColor; }
+  :global(:root[data-theme="dark"]) .protect-fields { border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+  :global(:root[data-theme="dark"]) .password-field { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); }
+  :global(:root[data-theme="dark"]) .password-field:focus-within { border-color: rgba(255, 255, 255, 0.144); }
+  :global(:root[data-theme="dark"]) .password-field.error { border-color: rgba(222, 53, 66, 0.6); }
+  :global(:root[data-theme="dark"]) .password-field input { border: 0; outline: 0; background: transparent; color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .password-field input::placeholder { color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .password-visibility { border: 0; background: transparent; }
+  :global(:root[data-theme="dark"]) .protection-error { color: #de3542; }
+  :global(:root[data-theme="dark"]) .protect-warning { border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+  :global(:root[data-theme="dark"]) .protect-warning p { color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .protect-warning p span { color: #0073ff; }
+  :global(:root[data-theme="dark"]) .protect-submit { border: 1px solid #ececec; background: #ececec; color: #111111; }
+  :global(:root[data-theme="dark"]) .protect-submit img { filter: brightness(0); }
+  /* dark theme: end generated */
+
 </style>

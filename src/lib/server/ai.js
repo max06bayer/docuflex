@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { env } from '$env/dynamic/private';
@@ -8,14 +8,27 @@ import { MCP_INSTRUCTIONS, MCP_TOOLS } from '$lib/server/mcp-tools.js';
 /**
  * AI chat: an agent that edits the open documents with the same tools the
  * local MCP server exposes. Like the MCP server it only exists in the desktop
- * app and local development, and only when an OpenRouter key is configured
- * on this computer (OPENROUTER_API_KEY or ~/.docuflex/openrouter-key). The
- * key never reaches the window.
+ * app and local development, and only when an OpenRouter key has been saved
+ * from Settings (stored in ~/.docuflex/openrouter-key). The key never reaches
+ * the window.
  */
 
 export const AI_MODEL = env.DOCUFLEX_AI_MODEL || 'xiaomi/mimo-v2.6-flash';
 /** Used by OpenRouter when the main model fails or is unavailable. */
 export const AI_FALLBACK_MODEL = env.DOCUFLEX_AI_FALLBACK_MODEL || 'google/gemini-3-flash-preview';
+/** Models the chat can switch between; all of them take tool calls and page images on OpenRouter. */
+export const AI_MODELS = [
+  { id: AI_MODEL, name: 'MiMo V2.6 Flash', short: 'MiMo Flash' },
+  { id: 'xiaomi/mimo-v2.6-pro', name: 'MiMo V2.6 Pro', short: 'MiMo Pro' },
+  { id: 'google/gemini-4-argon', name: 'Gemini 4 Argon', short: 'Argon' },
+  { id: 'google/gemini-3.8-flash', name: 'Gemini 3.8 Flash', short: 'Gemini Flash' },
+  { id: 'anthropic/claude-haiku-5.5', name: 'Claude Haiku 5.5', short: 'Haiku' },
+  { id: 'anthropic/claude-sonnet-5.5', name: 'Claude Sonnet 5.5', short: 'Sonnet' },
+  { id: 'anthropic/claude-opus-5.5', name: 'Claude Opus 5.5', short: 'Opus' },
+  { id: 'openai/gpt-6.1-sol', name: 'GPT-6.1 Sol', short: 'Sol' },
+  { id: 'openai/gpt-6-luna', name: 'GPT-6 Luna', short: 'Luna' },
+  { id: 'moonshotai/kimi-k3', name: 'Kimi K3', short: 'Kimi' }
+].filter((model, index, list) => list.findIndex((other) => other.id === model.id) === index);
 const KEY_FILE = join(homedir(), '.docuflex', 'openrouter-key');
 const MEMORY_FILE = join(homedir(), '.docuflex', 'ai-memory.json');
 /** Thinking budget per model turn. MiMo otherwise thinks for a long time on simple steps. */
@@ -25,12 +38,43 @@ const REASONING_TOKENS = 1024;
 export const AI_APPROVAL_TOOLS = new Set(['save_document', 'extract_pages', 'close_document']);
 
 export async function openRouterKey() {
-  if (env.OPENROUTER_API_KEY) return env.OPENROUTER_API_KEY.trim();
   try {
     return (await readFile(KEY_FILE, 'utf8')).trim() || null;
   } catch {
     return null;
   }
+}
+
+/** The last characters of the saved key, so Settings can show which key is in use. */
+export async function openRouterKeyHint() {
+  const key = await openRouterKey();
+  return key ? key.slice(-4) : null;
+}
+
+/**
+ * Checks the key with OpenRouter before saving it, readable only by this user.
+ * @param {string} key
+ */
+export async function saveOpenRouterKey(key) {
+  const trimmed = key.trim();
+  if (!/^\S{20,300}$/.test(trimmed)) throw new Error('That doesn\'t look like an OpenRouter API key.');
+  let response = null;
+  try {
+    response = await fetch('https://openrouter.ai/api/v1/key', {
+      headers: { Authorization: `Bearer ${trimmed}` },
+      signal: AbortSignal.timeout(8000)
+    });
+  } catch {
+    // Offline: keep the key; the chat reports a bad key when it is used.
+  }
+  if (response && (response.status === 401 || response.status === 403)) throw new Error('OpenRouter rejected this key.');
+  await mkdir(join(homedir(), '.docuflex'), { recursive: true });
+  await writeFile(KEY_FILE, `${trimmed}\n`, { mode: 0o600 });
+  await chmod(KEY_FILE, 0o600);
+}
+
+export async function deleteOpenRouterKey() {
+  await rm(KEY_FILE, { force: true });
 }
 
 export async function aiAvailable() {
@@ -193,6 +237,7 @@ export function systemPrompt(context, memories = []) {
     'How to answer:',
     '- Be short and concrete. Say what you did, not how tools work. Use Markdown sparingly (short lists, **bold** for key facts).',
     '- Answer in the language the person writes in.',
+    '- Write all math in LaTeX: \\( ... \\) inline and \\[ ... \\] on its own line for display formulas, e.g. \\( (g\\circ f)^{-1} = f^{-1}\\circ g^{-1} \\). The chat renders it in proper math type, so never write formulas as plain text or Unicode symbols. On pages, formulas go in add_math.',
     '- For summaries and questions about content, quote or cite page numbers.',
     '',
     `Today is ${now.toISOString().slice(0, 10)}.`,
@@ -231,8 +276,10 @@ export function subagentPrompt(scope, context) {
 /**
  * @param {any[]} messages @param {any} context @param {AbortSignal} signal
  * @param {{ page: number; region?: any } | null} [subagent] a helper's scope; helpers get fewer tools and their own prompt
+ * @param {string} [model] one of AI_MODELS; anything else uses AI_MODEL
  */
-export async function streamCompletion(messages, context, signal, subagent = null) {
+export async function streamCompletion(messages, context, signal, subagent = null, model = AI_MODEL) {
+  const chosen = AI_MODELS.some((candidate) => candidate.id === model) ? model : AI_MODEL;
   const key = await openRouterKey();
   if (!key) throw new Error('No OpenRouter key is configured on this computer.');
   const system = subagent ? subagentPrompt(subagent, context) : systemPrompt(context, await documentMemories(context));
@@ -246,7 +293,7 @@ export async function streamCompletion(messages, context, signal, subagent = nul
       'X-Title': 'Docuflex'
     },
     body: JSON.stringify({
-      models: [AI_MODEL, AI_FALLBACK_MODEL],
+      models: chosen === AI_FALLBACK_MODEL ? [chosen] : [chosen, AI_FALLBACK_MODEL],
       stream: true,
       messages: [{ role: 'system', content: system }, ...messages],
       tools: subagent ? SUBAGENT_FUNCTIONS : AI_TOOLS,

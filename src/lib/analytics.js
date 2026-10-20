@@ -20,6 +20,14 @@ function send(payload) {
   }
 }
 
+function referrerHost() {
+  try {
+    return document.referrer ? new URL(document.referrer).host : '';
+  } catch {
+    return '';
+  }
+}
+
 /** @param {string} name @param {Record<string, unknown>} [extra] */
 export function trackEvent(name, extra = {}) {
   send({ type: 'event', name, page: location.pathname, ...extra });
@@ -32,7 +40,7 @@ export function trackEvent(name, extra = {}) {
  */
 export function trackPage(page) {
   if (typeof window === 'undefined') return () => {};
-  send({ type: 'pageview', page });
+  send({ type: 'pageview', page, ref: referrerHost() });
 
   let visibleMs = 0;
   let visibleSince = document.visibilityState === 'visible' ? performance.now() : null;

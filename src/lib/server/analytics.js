@@ -105,9 +105,9 @@ function refererHost(referer) {
 
 /**
  * Builds the stored record from the request. Only the fields below are kept.
- * @param {{ request: Request; address: string; type: string; page?: string; name?: string; tool?: string; ms?: number; scroll?: number; pageView?: string; language?: string }} input
+ * @param {{ request: Request; address: string; type: string; page?: string; name?: string; tool?: string; ms?: number; scroll?: number; pageView?: string; language?: string; referrer?: string }} input
  */
-export async function buildRecord({ request, address, type, page, name, tool, ms, scroll, pageView, language }) {
+export async function buildRecord({ request, address, type, page, name, tool, ms, scroll, pageView, language, referrer }) {
   const now = new Date();
   const day = now.toISOString().slice(0, 10);
   const userAgent = request.headers.get('user-agent') ?? '';
@@ -118,7 +118,7 @@ export async function buildRecord({ request, address, type, page, name, tool, ms
     page: (page ?? '/').slice(0, 120),
     visitor: await dailyVisitorHash(address, userAgent, day),
     ...(await locate(address)),
-    referrer: refererHost(request.headers.get('referer')),
+    referrer: referrer ?? refererHost(request.headers.get('referer')),
     language: (language ?? request.headers.get('accept-language')?.split(',')[0] ?? 'unknown').slice(0, 16),
     ...describeUserAgent(userAgent),
     pageView: (pageView ?? '').slice(0, 40)

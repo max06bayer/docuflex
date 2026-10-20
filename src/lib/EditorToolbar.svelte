@@ -75,9 +75,10 @@
     },
     {
       id: 'document',
-      primary: 'ocr',
+      primary: 'translate',
       tools: [
-        { id: 'ocr', smallIcon: 'orc', label: 'OCR', shortcut: '3' },
+        { id: 'translate', label: 'Translate', shortcut: '2' },
+        { id: 'ocr', smallIcon: 'orc', designIcon: 'scan-text', label: 'OCR', shortcut: '3' },
         { id: 'search', label: 'Find', shortcut: '4' },
         { id: 'watermark', label: 'Watermark', shortcut: '5' }
       ]
@@ -85,6 +86,8 @@
   ];
 
   const nonInvertedTools = new Set(['select', 'image', 'blackout', 'whiteout', 'measure', 'highlight']);
+  /** Group primaries built from layered redesign artwork; every other tool shows its 50×50 icon from /redesign/tools. */
+  const designIcons = new Set(['select', 'marker', 'textfield', 'protect', 'sign', 'measure', 'translate']);
   const lightSelectionTools = new Set(['blackout', 'whiteout']);
   /** @type {Record<string, string>} */
   const toolDescriptions = {
@@ -95,11 +98,14 @@
     protect: 'Protect the PDF with a password.', blackout: 'Permanently cover content in black.', whiteout: 'Permanently cover content in white.',
     sign: 'Add a saved or new signature.', checkbox: 'Add a checkbox field.', input: 'Add a fillable input field.',
     measure: 'Measure a distance on the page.', crop: 'Crop the visible page area.',
-    ocr: 'Recognize text in scanned pages.', search: 'Find text in the document.', watermark: 'Add a watermark to every page.'
+    ocr: 'Recognize text in scanned pages.', search: 'Find text in the document.', watermark: 'Add a watermark to every page.',
+    translate: 'Translate the document into another language.'
   };
 
   /** @type {string} */
   export let activeTool = 'select';
+  /** False while this toolbar's tab is in the background; it then ignores shortcuts. */
+  export let active = true;
   let groupSelections = Object.fromEntries(groups.map((group) => [group.id, group.primary]));
   /** @type {string | null} */
   let expandedGroup = null;
@@ -123,7 +129,7 @@
     expandedGroup = null;
   }
 
-  /** @param {{ id: string; tools: { id: string; label: string }[] }} group */
+  /** @param {{ id: string; tools: { id: string; label: string; designIcon?: string }[] }} group */
   function selectedTool(group) {
     return group.tools.find((tool) => tool.id === groupSelections[group.id]) ?? group.tools[0];
   }
@@ -168,6 +174,7 @@
 
   /** @param {KeyboardEvent} event */
   function handleToolShortcut(event) {
+    if (!active) return;
     const target = event.target;
     if (event.metaKey || event.ctrlKey || event.altKey || event.repeat) return;
     if (target instanceof HTMLElement && (target.matches('input, textarea, select') || target.isContentEditable)) return;
@@ -202,9 +209,9 @@
 </script>
 
 <div class="editor-toolbar-wrap" aria-label="Editor toolbar">
-  <div class="editor-toolbar" style="corner-shape: squircle;">
+  <div class="editor-toolbar">
     {#each groups as group}
-      <div class="tool-group">
+      <div class="tool-group" class:current={group.tools.some((tool) => tool.id === activeTool)} class:open={expandedGroup === group.id}>
         {#if expandedGroup === group.id}
           <div
             class="tool-menu"
@@ -235,7 +242,7 @@
           class:active={activeTool === groupSelections[group.id]}
           class:light-selection={lightSelectionTools.has(groupSelections[group.id])}
           class="primary-tool"
-          style="corner-shape: squircle;"
+         
           aria-label={selectedTool(group).label}
           aria-pressed={activeTool === groupSelections[group.id]}
           aria-describedby={toolbarTooltip?.label === selectedTool(group).label ? 'editor-toolbar-tooltip' : undefined}
@@ -245,16 +252,42 @@
           onblur={hideToolbarTooltip}
           onclick={() => selectTool(group.id, groupSelections[group.id])}
         >
-          <img
-            class:preserve-color={nonInvertedTools.has(groupSelections[group.id])}
-            src={`/toolbar/big/${groupSelections[group.id]}.webp`}
-            alt=""
-          />
+          {#if designIcons.has(groupSelections[group.id])}
+            {@const icon = groupSelections[group.id]}
+            <span class={`design-icon design-icon-${icon}`} aria-hidden="true">
+              {#if icon === 'select'}
+                <img class="select-cursor" src="/redesign/vector595.svg" alt="" />
+              {:else if icon === 'marker'}
+                <img class="highlighter-base" src="/redesign/icon-highlighter.svg" alt="" />
+                <img class="highlighter-tip" src="/redesign/vector647.svg" alt="" />
+                <img class="highlighter-edge" src="/redesign/vector648.svg" alt="" />
+              {:else if icon === 'textfield'}
+                <span class="text-frame"></span>
+                <img class="text-glyph" src="/redesign/icon-letter-text.svg" alt="" />
+              {:else if icon === 'protect'}
+                <img class="shield-fill" src="/redesign/vector603.svg" alt="" />
+                <img class="shield-outline" src="/redesign/icon-shield-ban.svg" alt="" />
+              {:else if icon === 'sign'}
+                <img class="signature" src="/redesign/icon-signature.svg" alt="" />
+              {:else if icon === 'measure'}
+                <img class="pencil-ruler" src="/redesign/icon-pencil-ruler.svg" alt="" />
+              {:else if icon === 'translate'}
+                <img class="languages" src="/redesign/icon-languages.svg" alt="" />
+              {/if}
+            </span>
+          {:else}
+            <img
+              class="tool-icon"
+              class:preserve-color={nonInvertedTools.has(groupSelections[group.id])}
+              src={`/redesign/tools/${selectedTool(group).designIcon ?? groupSelections[group.id]}.svg`}
+              alt=""
+            />
+          {/if}
         </button>
         <button
           class:expanded={expandedGroup === group.id}
           class="expand-tool"
-          style="corner-shape: squircle;"
+         
           aria-label={`Show ${group.tools[0].label} tools`}
           aria-expanded={expandedGroup === group.id}
           onmouseenter={(event) => scheduleToolbarTooltip({ id: 'menu', label: 'More Tools' }, event.currentTarget)}
@@ -263,7 +296,7 @@
           onblur={hideToolbarTooltip}
           onclick={(event) => toggleGroup(event, group.id)}
         >
-          <img src="/toolbar/expand.svg" alt="" />
+          <img src="/redesign/vector596.svg" alt="" />
         </button>
       </div>
     {/each}
@@ -288,7 +321,7 @@
   .editor-toolbar-wrap {
     position: absolute;
     z-index: 10;
-    bottom: 34px;
+    bottom: 30px;
     left: 50%;
     transform: translateX(-50%);
   }
@@ -298,11 +331,14 @@
     display: flex;
     align-items: center;
     height: 73px;
-    padding: 8px 8px;
-    border: 1px solid #d1d1d1;
-    border-radius: 20px;
+    padding: 8px 10px 8px 9px;
+    border: 1px solid #dcdcdc;
+    border-radius: 30px;
     background: #fff;
-    box-shadow: 0 13px 28px rgba(0, 0, 0, 0.22), 0 3px 8px rgba(0, 0, 0, 0.1);
+    box-shadow:
+      inset 0 4px 18.4px rgba(255, 255, 255, 0.05),
+      0 0 10px rgba(7, 7, 7, 0.03),
+      0 4px 8px rgba(0, 0, 0, 0.1);
   }
 
   .toolbar-tooltip {
@@ -360,8 +396,16 @@
 
   .tool-group {
     position: relative;
-    width: 80px;
+    width: 56px;
     height: 56px;
+    transition: width 200ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .tool-group.current,
+  .tool-group.open,
+  .tool-group:hover,
+  .tool-group:focus-within {
+    width: 80px;
   }
 
   .tool-group + .tool-group {
@@ -390,20 +434,25 @@
     width: 56px;
     height: 56px;
     padding: 0;
-    border: 1px solid #e4e4e4;
-    border-radius: 14px;
+    border: 1px solid rgba(61, 60, 60, 0.08);
+    border-radius: 23px;
     overflow: hidden;
-    background: #f8f8f8;
-    transition: transform 150ms ease;
+    background: #ececec;
+    transition: transform 150ms ease, background-color 160ms ease;
+  }
+
+  .primary-tool:hover {
+    background: #e4e4e4;
   }
 
   .primary-tool:active {
     transform: scale(0.96);
   }
 
-  .primary-tool.active {
-    border-color: #171717;
-    background: #171717;
+  .primary-tool.active,
+  .primary-tool.active:hover {
+    border-color: rgba(0, 0, 0, 0.08);
+    background: #000;
   }
 
   .primary-tool.active.light-selection {
@@ -419,8 +468,123 @@
     max-height: 90%;
   }
 
-  .primary-tool.active img:not(.preserve-color) {
+  .primary-tool.active > img:not(.preserve-color) {
     filter: invert(1) hue-rotate(180deg);
+  }
+
+  .design-icon {
+    position: absolute;
+    inset: -1px;
+    pointer-events: none;
+  }
+
+  .primary-tool .design-icon img {
+    position: absolute;
+    max-width: none;
+    max-height: none;
+  }
+
+  .primary-tool.active .design-icon:not(.design-icon-select) {
+    filter: invert(1) hue-rotate(180deg);
+  }
+
+  .primary-tool:not(.active) .design-icon-select img {
+    filter: invert(1);
+  }
+
+  .select-cursor {
+    top: 17.53px;
+    left: 19.22px;
+    width: 19.6886px;
+    height: 23.0904px;
+  }
+
+  .highlighter-base {
+    top: 16.92px;
+    left: 10px;
+    width: 28px;
+    height: 28px;
+  }
+
+  .highlighter-tip,
+  .highlighter-edge {
+    transform: rotate(-2.51deg);
+  }
+
+  .highlighter-tip {
+    top: 9.55px;
+    left: 20.26px;
+    width: 25.91px;
+    height: 27.144px;
+  }
+
+  .highlighter-edge {
+    top: 9.07px;
+    left: 19.85px;
+    width: 26.84px;
+    height: 27.91px;
+  }
+
+  .primary-tool img.tool-icon {
+    width: 50px;
+    height: 50px;
+    max-width: none;
+    max-height: none;
+  }
+
+  .text-frame {
+    position: absolute;
+    top: 13px;
+    left: 11px;
+    box-sizing: border-box;
+    width: 34px;
+    height: 30px;
+    border: 1.5px solid #9b9b9b;
+    border-radius: 8px;
+    background: #e8e8e8;
+    box-shadow: 0 0 6.8px rgba(0, 0, 0, 0.15);
+  }
+
+  .text-glyph {
+    top: 15px;
+    left: 14px;
+    width: 27px;
+    height: 27px;
+  }
+
+  .shield-fill {
+    top: 16.5px;
+    left: 18.5px;
+    width: 19px;
+    height: 19px;
+  }
+
+  .shield-outline {
+    top: 14px;
+    left: 13px;
+    width: 29px;
+    height: 29px;
+  }
+
+  .signature {
+    top: 12px;
+    left: 12px;
+    width: 31px;
+    height: 31px;
+  }
+
+  .pencil-ruler {
+    top: 13px;
+    left: 13px;
+    width: 29px;
+    height: 29px;
+  }
+
+  .languages {
+    top: 14px;
+    left: 13px;
+    width: 28px;
+    height: 28px;
   }
 
   .expand-tool {
@@ -431,12 +595,23 @@
     box-sizing: border-box;
     display: grid;
     place-items: center;
-    width: 51px;
+    width: 69px;
     height: 56px;
-    padding: 0 0 0 25px;
-    border: 1px solid #e4e4e4;
-    border-radius: 14px;
-    background: #f8f8f8;
+    padding: 0 0 0 45px;
+    border: 1px solid #e5e5e5;
+    border-radius: 23px;
+    background: #f6f5f5;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 160ms ease, background-color 160ms ease;
+  }
+
+  .tool-group.current .expand-tool,
+  .tool-group.open .expand-tool,
+  .tool-group:hover .expand-tool,
+  .tool-group:focus-within .expand-tool {
+    opacity: 1;
+    pointer-events: auto;
   }
 
   .expand-tool:hover {
@@ -445,8 +620,8 @@
   }
 
   .expand-tool img {
-    width: 14px;
-    height: 7px;
+    width: 12.5px;
+    height: 6.76378px;
     transition: transform 160ms ease;
   }
 
@@ -550,9 +725,55 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
+    .tool-group,
     .primary-tool,
+    .expand-tool,
     .expand-tool img {
       transition: none;
     }
   }
+
+  /* dark theme: generated by scripts/generate-dark-theme.mjs — do not edit */
+  :global(:root[data-theme="dark"]) .editor-toolbar { border: 1px solid #212121; background: rgba(22, 22, 22, 0.96); box-shadow: inset 0 4px 18.4px rgba(0, 0, 0, 0.03),
+      0 0 10px rgba(7, 7, 7, 0.12),
+      0 4px 8px rgba(0, 0, 0, 0.3); }
+  :global(:root[data-theme="dark"]) .primary-tool,
+  :global(:root[data-theme="dark"]) .expand-tool,
+  :global(:root[data-theme="dark"]) .tool-menu-item { border: 0; }
+  :global(:root[data-theme="dark"]) .primary-tool { border: 1px solid rgba(255, 255, 255, 0.064); background: #111111; }
+  :global(:root[data-theme="dark"]) .primary-tool:hover { background: #0f0f0f; }
+  :global(:root[data-theme="dark"]) .primary-tool.active,
+  :global(:root[data-theme="dark"]) .primary-tool.active:hover { border-color: rgba(255, 255, 255, 0.064); background: #ececec; }
+  :global(:root[data-theme="dark"]) .primary-tool.active.light-selection { border-color: #313131; background: #101010; }
+  :global(:root[data-theme="dark"]) .text-frame { border: 1.5px solid #3e3e3e; background: #101010; box-shadow: 0 0 6.8px rgba(0, 0, 0, 0.45); }
+  :global(:root[data-theme="dark"]) .expand-tool { border: 1px solid rgba(255, 255, 255, 0.08); background: #131313; }
+  :global(:root[data-theme="dark"]) .expand-tool:hover { border-color: #212121; background: #111111; }
+  :global(:root[data-theme="dark"]) .tool-menu { border: 1px solid rgba(255, 255, 255, 0.144); background: rgba(24, 24, 24, 0.95); box-shadow: 0 7px 18px rgba(0, 0, 0, 0.33), 0 2px 5px rgba(0, 0, 0, 0.15); }
+  :global(:root[data-theme="dark"]) .tool-menu-item { border: 1px solid transparent; background: transparent; color: rgba(255, 255, 255, 0.753); }
+  :global(:root[data-theme="dark"]) .tool-menu-item.active { border-color: rgba(255, 255, 255, 0.064); background: rgba(22, 22, 22, 0.96); }
+  :global(:root[data-theme="dark"]) .tool-menu-item:hover { color: rgba(255, 255, 255, 0.92); }
+  :global(:root[data-theme="dark"]) .tool-menu-item kbd { border: 1px solid rgba(255, 255, 255, 0.04); background: rgba(255, 255, 255, 0.058); color: rgba(255, 255, 255, 0.16); }
+  /* dark theme: end generated */
+
+  /* dark theme: manual */
+  /* Toolbar icons are drawn dark-on-light. On the dark toolbar every icon is the
+     opposite of its light-mode treatment: light while unselected, dark on the
+     white selected button. The colored image and highlight icons keep their colors. */
+  :global(:root[data-theme="dark"]) .primary-tool img,
+  :global(:root[data-theme="dark"]) .primary-tool .design-icon img { filter: none; }
+  :global(:root[data-theme="dark"]) .primary-tool:not(.active) > img.tool-icon:not(.preserve-color),
+  :global(:root[data-theme="dark"]) .primary-tool:not(.active) .design-icon:not(.design-icon-select) { filter: invert(1) hue-rotate(180deg); }
+  /* Blackout and whiteout show the color they paint: a black and a white square, opposite each other.
+     The black square gets a faint light edge so it reads on the dark toolbar. */
+  :global(:root[data-theme="dark"]) .primary-tool.active.light-selection { border-color: #b8b8b8; background: #e9e9e9; }
+  :global(:root[data-theme="dark"]) img[src$="/blackout.svg"] { filter: drop-shadow(0 0 0.6px rgba(255, 255, 255, 0.85)); }
+  :global(:root[data-theme="dark"]) .primary-tool.active > img.tool-icon,
+  :global(:root[data-theme="dark"]) .primary-tool.active .design-icon:not(.design-icon-select) { filter: none; }
+  /* The select cursor is a white glyph: white while unselected, black when selected. */
+  :global(:root[data-theme="dark"]) .primary-tool:not(.active) .design-icon-select img { filter: none; }
+  :global(:root[data-theme="dark"]) .primary-tool.active .design-icon-select img { filter: invert(1); }
+  /* Design icons are inverted as a whole, so their drawn parts keep the light colors. */
+  :global(:root[data-theme="dark"]) .design-icon .text-frame { border-color: #9b9b9b; background: #e8e8e8; box-shadow: 0 0 6.8px rgba(0, 0, 0, 0.15); }
+  :global(:root[data-theme="dark"]) .expand-tool img { filter: brightness(0) invert(1) opacity(0.78); }
+
 </style>

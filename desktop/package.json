@@ -1,7 +1,7 @@
 {
   "name": "docuflex-desktop-build",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.9.0",
   "license": "AGPL-3.0-only",
   "type": "module",
   "scripts": {
@@ -9,7 +9,9 @@
     "smoke": "node scripts/smoke-runtimes.mjs",
     "bundle": "node scripts/build.mjs",
     "build": "npm run stage && npm run smoke && npm run bundle",
-    "dev": "npm run stage && tauri dev"
+    "dev": "npm run stage && tauri dev",
+    "bundle:redesign": "DOCUFLEX_VARIANT=redesign node scripts/build.mjs",
+    "build:redesign": "npm run stage && npm run smoke && npm run bundle:redesign"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.11.4",

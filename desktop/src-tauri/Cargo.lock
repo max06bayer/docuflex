@@ -779,10 +779,11 @@ dependencies = [
 
 [[package]]
 name = "docuflex-desktop"
-version = "0.0.1"
+version = "0.9.0"
 dependencies = [
  "base64 0.22.1",
  "libc",
+ "objc2-app-kit",
  "rfd",
  "tauri",
  "tauri-build",

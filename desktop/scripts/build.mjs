@@ -20,7 +20,12 @@ const buildEnvironment = process.platform === 'linux'
     }
   : process.env;
 
-execFileSync(process.execPath, [tauriCli, 'build', '--verbose', '--bundles', bundles.join(',')], {
+// DOCUFLEX_VARIANT=redesign builds "Docuflex Redesign": its own bundle id and ports, so it installs and runs next to Docuflex.
+const variantArguments = process.env.DOCUFLEX_VARIANT === 'redesign'
+  ? ['--config', join(desktopRoot, 'src-tauri', 'tauri.redesign.conf.json'), '--features', 'side-by-side']
+  : [];
+
+execFileSync(process.execPath, [tauriCli, 'build', '--verbose', '--bundles', bundles.join(','), ...variantArguments], {
   cwd: desktopRoot,
   env: buildEnvironment,
   stdio: 'inherit'

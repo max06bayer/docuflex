@@ -2,11 +2,37 @@
   import { onDestroy, tick } from 'svelte';
   import { cubicOut } from 'svelte/easing';
   import { fade, fly, scale } from 'svelte/transition';
+  import { applyTheme, currentTheme } from '$lib/theme.js';
 
   /** @type {() => void} */
   export let onClose = () => {};
   export let legalOnly = false;
   export let legalSection = 'top';
+  /** @type {{ available: boolean; configurable?: boolean; keyHint?: string | null } | null} */
+  export let aiStatus = null;
+  /** Focus the key field on open (the AI button sends people here when no key is saved). */
+  export let focusKey = false;
+  /** @type {() => Promise<void> | void} */
+  export let onAiKeyChange = () => {};
+  let theme = currentTheme();
+  /** @param {'light' | 'dark'} next */
+  function chooseTheme(next) {
+    theme = next;
+    applyTheme(next);
+  }
+  let keyDraft = '';
+  let keyBusy = false;
+  /** @type {string | null} */
+  let keyError = null;
+  /** @type {HTMLInputElement | undefined} */
+  let keyInput;
+  let keyFocused = false;
+  /** Width of the masked field, so the stars know when they overflow and fade on the left. */
+  let keyMaskWidth = 0;
+  /** Each star is drawn 15px wide (/redesign/key-star.svg). */
+  const KEY_STAR_WIDTH = 15;
+  $: keyStars = keyDraft.trim().length;
+  $: keyOverflows = keyStars * KEY_STAR_WIDTH > keyMaskWidth - 4;
   let legalOpen = legalOnly;
   /** @type {HTMLDivElement | undefined} */
   let legalContentElement;
@@ -15,6 +41,44 @@
     legalOpen = false;
     if (legalOnly) onClose();
   }
+
+  async function saveKey() {
+    const key = keyDraft.trim();
+    if (!key || keyBusy) return;
+    keyBusy = true;
+    keyError = null;
+    try {
+      const response = await fetch('/api/ai/key', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key }) });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error ?? 'The key could not be saved.');
+      keyDraft = '';
+      await onAiKeyChange();
+    } catch (error) {
+      keyError = error instanceof Error ? error.message : 'The key could not be saved.';
+    } finally {
+      keyBusy = false;
+    }
+  }
+
+  async function removeKey() {
+    if (keyBusy) return;
+    keyBusy = true;
+    keyError = null;
+    try {
+      await fetch('/api/ai/key', { method: 'DELETE' });
+      await onAiKeyChange();
+    } finally {
+      keyBusy = false;
+    }
+  }
+
+  /** Pasting a key saves it right away. */
+  async function handleKeyPaste() {
+    await tick();
+    void saveKey();
+  }
+
+  $: if (focusKey && keyInput) keyInput.focus();
 
   /** @param {MouseEvent} event */
   function handleBackdropClick(event) {
@@ -44,23 +108,73 @@
 
 {#if !legalOnly}
   <div class="settings-panel" role="dialog" aria-label="Settings" transition:fly={{ x: 18, duration: 240, easing: cubicOut }}>
-    <header class="panel-header">
-      <img src="/settings.svg" alt="" />
+    <header class="settings-header">
+      <img src="/redesign/icon-settings2.svg" alt="" />
       <h2>Settings</h2>
-      <button class="panel-close" type="button" aria-label="Close Settings" onclick={onClose}><span></span><span></span></button>
+      <button class="settings-close" type="button" aria-label="Close Settings" onclick={onClose}></button>
     </header>
 
-    <div class="settings-content">
-      <a class="settings-row" href="https://github.com/max06bayer/docuflex" target="_blank" rel="noreferrer">
-        <span>GitHub</span>
-      </a>
-      <a class="settings-row" href="/">
-        <span>Homepage</span>
-      </a>
-      <button class="settings-row" type="button" onclick={() => (legalOpen = true)}>
-        <span>Legal &amp; Privacy</span>
-      </button>
-    </div>
+    {#if aiStatus?.configurable}
+      <section class="settings-section" aria-label="AI Chat">
+        {#if aiStatus.keyHint}
+          <div class="settings-key-line">
+            <div class="settings-row settings-key-saved">
+              <span>API Key</span>
+              <code>••••{aiStatus.keyHint}</code>
+            </div>
+            <button class="settings-action secondary" type="button" disabled={keyBusy} onclick={removeKey}>Remove</button>
+          </div>
+        {:else}
+          <form class="settings-key-line" onsubmit={(event) => { event.preventDefault(); void saveKey(); }}>
+            <div class="settings-row settings-key-input" class:invalid={keyError} class:focused={keyFocused}>
+              <!-- The key is typed into a transparent input; thin stars stand in for it and fade out on the left. -->
+              <input
+                bind:this={keyInput}
+                bind:value={keyDraft}
+                type="text"
+                placeholder={keyBusy ? 'Checking key…' : 'OpenRouter API Key'}
+                aria-label="OpenRouter API key"
+                autocomplete="off"
+                autocapitalize="off"
+                spellcheck="false"
+                disabled={keyBusy}
+                oninput={() => (keyError = null)}
+                onpaste={handleKeyPaste}
+                onfocus={() => (keyFocused = true)}
+                onblur={() => (keyFocused = false)}
+              />
+              {#if keyStars}
+                <div class="settings-key-mask" class:overflows={keyOverflows} bind:clientWidth={keyMaskWidth} aria-hidden="true">
+                  <span class="settings-key-stars" style:width={`${keyStars * KEY_STAR_WIDTH}px`}></span>
+                  {#if keyFocused}<span class="settings-key-caret"></span>{/if}
+                </div>
+              {/if}
+            </div>
+            <button class="settings-action" type="submit" disabled={keyBusy || !keyDraft.trim()}>Save</button>
+          </form>
+          {#if keyError}<p class="settings-error">{keyError}</p>{/if}
+        {/if}
+      </section>
+    {/if}
+
+    <section class="settings-section" aria-label="Appearance">
+      <div class="settings-row settings-theme" role="radiogroup" aria-label="Appearance">
+        {#each [['light', 'Light'], ['dark', 'Dark']] as [value, label]}
+          <button
+            class:active={theme === value}
+            type="button"
+            role="radio"
+            aria-checked={theme === value}
+            onclick={() => chooseTheme(/** @type {'light' | 'dark'} */ (value))}
+          >{label}</button>
+        {/each}
+      </div>
+    </section>
+    <section class="settings-section" aria-label="About">
+      <a class="settings-row settings-link" href="https://github.com/max06bayer/docuflex" target="_blank" rel="noreferrer">GitHub</a>
+      <a class="settings-row settings-link" href="/">Homepage</a>
+      <button class="settings-row settings-link" type="button" onclick={() => (legalOpen = true)}>Legal &amp; Privacy</button>
+    </section>
   </div>
 {/if}
 
@@ -135,8 +249,222 @@
 {/if}
 
 <style>
-  .settings-panel { position: fixed; z-index: 70; top: 70px; right: 14px; display: grid; grid-template-rows: 50px 1fr; width: min(260px, calc(100% - 28px)); height: 185px; border: 1.5px solid transparent; border-radius: 13px; background: #fafafa; box-shadow: 0 12px 32px rgba(0,0,0,.12); color: #000; font-family: "Inter Variable", Inter, sans-serif; }
-  .settings-panel::after { position: absolute; z-index: 100; inset: -1.5px; border: 1.5px solid #c5c5c5; border-radius: 13px; content: ''; pointer-events: none; }
+  /* Matches the editor's right-hand panels (PdfEditor .protect-panel). */
+  .settings-panel {
+    position: fixed;
+    z-index: 70;
+    top: 68px;
+    right: 13px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    box-sizing: border-box;
+    width: min(380px, calc(100% - 26px));
+    overflow: hidden;
+    border: 1.5px solid #c3c2c2;
+    border-radius: 21px;
+    background: rgba(240, 236, 236, 0.75);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+    backdrop-filter: blur(1.3px);
+    -webkit-backdrop-filter: blur(1.3px);
+    color: #000;
+    font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 21px;
+    letter-spacing: -0.21px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .settings-header {
+    display: grid;
+    grid-template-columns: 24px 1fr 28px;
+    align-items: center;
+    box-sizing: border-box;
+    height: 50px;
+    padding: 0 14px 0 15px;
+    border-bottom: 1.5px solid #c3c2c2;
+    background: rgba(214, 214, 214, 0.75);
+  }
+
+  .settings-header > img { width: 24px; height: 24px; }
+
+  .settings-header h2 {
+    margin: 0 0 0 8px;
+    font-size: 20px;
+    font-weight: 400;
+    line-height: 1.22;
+    letter-spacing: -0.2px;
+  }
+
+  .settings-close {
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 0;
+    border-radius: 9px;
+    background: url('/redesign/panel-close.svg') center / 12.67px 12.67px no-repeat;
+    cursor: pointer;
+    transition: transform 160ms ease, filter 160ms ease;
+  }
+
+  .settings-close:hover { filter: brightness(0); }
+  .settings-close:active { transform: scale(0.94); }
+
+  .settings-section {
+    display: grid;
+    gap: 10px;
+    padding: 15px 11px 15px 12px;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+  }
+
+  .settings-section:last-child { border-bottom: 0; }
+
+  .settings-row {
+    display: grid;
+    align-items: center;
+    box-sizing: border-box;
+    width: 100%;
+    height: 48px;
+    margin: 0;
+    padding: 0 13px;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 15px;
+    background: #fff;
+    color: rgba(0, 0, 0, 0.75);
+    font: inherit;
+    letter-spacing: inherit;
+    text-align: left;
+    text-decoration: none;
+    transition: background-color 150ms ease, border-color 150ms ease, transform 160ms ease;
+  }
+
+  .settings-link { cursor: pointer; }
+  .settings-theme { grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; }
+  .settings-theme button { height: 100%; padding: 0; border: 1px solid transparent; border-radius: 11px; background: transparent; color: rgba(0, 0, 0, 0.5); font: inherit; letter-spacing: inherit; cursor: pointer; transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease, transform 160ms ease; }
+  .settings-theme button:hover:not(.active) { color: rgba(0, 0, 0, 0.75); }
+  .settings-theme button.active { border-color: rgba(0, 0, 0, 0.08); background: rgba(0, 0, 0, 0.06); color: #000; }
+  .settings-theme button:active { transform: scale(0.97); }
+  .settings-link:hover, .settings-link:focus-visible { background: rgba(255, 255, 255, 0.7); outline: none; }
+  .settings-link:active { transform: scale(0.985); }
+
+  .settings-key-line {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
+    margin: 0;
+  }
+
+  .settings-key-input {
+    position: relative;
+    display: block;
+    overflow: hidden;
+  }
+
+  .settings-key-input.focused { border-color: rgba(0, 0, 0, 0.22); }
+  .settings-key-input.invalid { border-color: rgba(222, 53, 66, 0.55); }
+
+  .settings-key-input input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    box-sizing: border-box;
+    padding: 0 13px;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: transparent;
+    caret-color: transparent;
+    font: inherit;
+    letter-spacing: inherit;
+  }
+
+  .settings-key-input input::placeholder { color: rgba(0, 0, 0, 0.5); }
+  .settings-key-input input::selection { background: transparent; }
+
+  .settings-key-mask {
+    position: absolute;
+    top: 0;
+    right: 13px;
+    bottom: 0;
+    left: 13px;
+    display: flex;
+    align-items: center;
+    pointer-events: none;
+  }
+
+  /* Once the stars are wider than the field, the newest stay in view and the oldest fade out on the left. */
+  .settings-key-mask.overflows {
+    justify-content: flex-end;
+    -webkit-mask-image: linear-gradient(90deg, transparent, #000 44px);
+    mask-image: linear-gradient(90deg, transparent, #000 44px);
+  }
+
+  .settings-key-stars {
+    flex: none;
+    height: 12px;
+    background: url('/redesign/key-star.svg') right center / 15px 12px repeat-x;
+  }
+
+  .settings-key-caret {
+    flex: none;
+    width: 1.5px;
+    height: 24px;
+    margin-left: 2px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.75);
+    animation: settings-caret-blink 1.06s steps(1) infinite;
+  }
+
+  @keyframes settings-caret-blink {
+    50% { opacity: 0; }
+  }
+
+  .settings-key-saved {
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .settings-key-saved span { color: rgba(0, 0, 0, 0.5); }
+
+  .settings-key-saved code {
+    overflow: hidden;
+    color: rgba(0, 0, 0, 0.75);
+    font-family: inherit;
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Same 48px height and 21px text as the rows beside it. */
+  .settings-action {
+    height: 48px;
+    padding: 0 17px;
+    border: 1px solid #111;
+    border-radius: 15px;
+    background: #111;
+    color: #fff;
+    font: inherit;
+    letter-spacing: inherit;
+    cursor: pointer;
+    transition: opacity 150ms ease, background-color 150ms ease, transform 160ms ease;
+  }
+
+  .settings-action:active { transform: scale(0.97); }
+  .settings-action:disabled { cursor: default; opacity: 0.35; }
+
+  .settings-action.secondary {
+    border-color: rgba(0, 0, 0, 0.1);
+    background: #fff;
+    color: rgba(0, 0, 0, 0.75);
+  }
+
+  .settings-action.secondary:not(:disabled):hover { background: rgba(255, 255, 255, 0.7); }
+
+  .settings-error {
+    margin: -2px 2px 0;
+    color: #de3542;
+    font-size: 16px;
+    letter-spacing: -0.16px;
+  }
   .panel-header { display: grid; grid-template-columns: 26px 1fr 28px; align-items: center; height: 50px; padding: 0 12px; border-bottom: 1px solid #cacaca; border-radius: 12px 12px 0 0; background: #eee; }
   .panel-header > img { width: 24px; height: 24px; }
   .panel-header h2 { margin: 0 0 0 7px; font-size: 18px; font-weight: 400; line-height: 1.22; letter-spacing: -.25px; }
@@ -145,10 +473,6 @@
   .panel-close span { position: absolute; top: 13px; left: 6px; width: 16px; height: 1.5px; border-radius: 99px; background: #929292; transform: rotate(45deg); transition: background-color 160ms ease; }
   .panel-close span + span { transform: rotate(-45deg); }
   .panel-close:hover span { background: #000; }
-  .settings-content { display: grid; align-content: start; gap: 0; padding: 7px; border-radius: 0 0 12px 12px; }
-  .settings-row { display: flex; align-items: center; width: 100%; height: 40px; min-height: 40px; padding: 0 12px; border: 1px solid transparent; border-radius: 10px; background: transparent; color: #3f3f3f; font-family: Geist, Inter, sans-serif; font-size: 18px; text-align: left; text-decoration: none; cursor: pointer; transition: color 180ms ease, background-color 180ms ease, border-color 180ms ease, transform 180ms ease; }
-  .settings-row:hover, .settings-row:focus-visible { border-color: rgba(0,0,0,.07); background: rgba(234,234,234,.62); color: #111; outline: none; transform: translateX(1px); }
-  .settings-row:active { transform: translateX(1px) scale(.99); }
   .legal-backdrop { position: fixed; z-index: 2000; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(235,235,235,.6); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); }
   .legal-panel { position: relative; display: grid; grid-template-rows: 50px minmax(0,1fr) auto; width: min(850px, calc(100vw - 48px)); height: min(790px, calc(100dvh - 48px)); margin: 0; padding: 0; overflow: hidden; border: 1.5px solid #bdbdbd; border-radius: 13px; background: rgba(250,250,250,.97); box-shadow: 0 28px 85px rgba(0,0,0,.2), 0 5px 20px rgba(0,0,0,.1); color: #111; }
   .legal-header { min-height: 50px; padding: 0 12px; border-radius: 12px 12px 0 0; }
@@ -174,4 +498,50 @@
     .legal-content { padding: 18px 18px 28px; }
     .legal-intro { padding: 15px; }
   }
+
+  /* dark theme: generated by scripts/generate-dark-theme.mjs — do not edit */
+  :global(:root[data-theme="dark"]) .settings-panel { border: 1.5px solid #2c2c2c; background: rgba(22, 22, 22, 0.96); box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15); color: rgba(255, 255, 255, 0.92); }
+  :global(:root[data-theme="dark"]) .settings-header { border-bottom: 1.5px solid #2c2c2c; background: rgba(0, 0, 0, 0.45); }
+  :global(:root[data-theme="dark"]) .settings-close { border: 0; filter: brightness(0) invert(1) opacity(0.78); background: url('/redesign/panel-close.svg') center / 12.67px 12.67px no-repeat; }
+  :global(:root[data-theme="dark"]) .settings-close:hover { filter: brightness(0) invert(1); }
+  :global(:root[data-theme="dark"]) .settings-section { border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+  :global(:root[data-theme="dark"]) .settings-section:last-child { border-bottom: 0; }
+  :global(:root[data-theme="dark"]) .settings-row { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.75); text-decoration: none; }
+  :global(:root[data-theme="dark"]) .settings-theme button { border: 1px solid transparent; background: transparent; color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .settings-theme button:hover:not(.active) { color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .settings-theme button.active { border-color: rgba(255, 255, 255, 0.064); background: rgba(255, 255, 255, 0.078); color: rgba(255, 255, 255, 0.92); }
+  :global(:root[data-theme="dark"]) .settings-link:hover,
+  :global(:root[data-theme="dark"]) .settings-link:focus-visible { background: rgba(255, 255, 255, 0.07); outline: none; }
+  :global(:root[data-theme="dark"]) .settings-key-input.focused { border-color: rgba(255, 255, 255, 0.176); }
+  :global(:root[data-theme="dark"]) .settings-key-input.invalid { border-color: rgba(222, 53, 66, 0.55); }
+  :global(:root[data-theme="dark"]) .settings-key-input input { border: 0; outline: 0; background: transparent; color: transparent; caret-color: transparent; }
+  :global(:root[data-theme="dark"]) .settings-key-input input::placeholder { color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .settings-key-input input::selection { background: transparent; }
+  :global(:root[data-theme="dark"]) .settings-key-stars { filter: brightness(0) invert(1) opacity(0.78); background: url('/redesign/key-star.svg') right center / 15px 12px repeat-x; }
+  :global(:root[data-theme="dark"]) .settings-key-caret { background: rgba(255, 255, 255, 0.2); }
+  :global(:root[data-theme="dark"]) .settings-key-saved span { color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .settings-key-saved code { color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .settings-action { border: 1px solid #ececec; background: #ececec; color: #111111; }
+  :global(:root[data-theme="dark"]) .settings-action.secondary { border-color: rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .settings-action.secondary:not(:disabled):hover { background: rgba(255, 255, 255, 0.07); }
+  :global(:root[data-theme="dark"]) .settings-error { color: #de3542; }
+  :global(:root[data-theme="dark"]) .panel-header { border-bottom: 1px solid #292929; background: #111111; }
+  :global(:root[data-theme="dark"]) .panel-close { border: 0; background: transparent; }
+  :global(:root[data-theme="dark"]) .panel-close span { color: rgba(255, 255, 255, 0.5); background: rgba(255, 255, 255, 0.14); }
+  :global(:root[data-theme="dark"]) .panel-close:hover span { background: #ececec; }
+  :global(:root[data-theme="dark"]) .legal-backdrop { background: rgba(22, 22, 22, 0.96); }
+  :global(:root[data-theme="dark"]) .legal-panel { border: 1.5px solid #2e2e2e; background: rgba(24, 24, 24, 0.95); box-shadow: 0 28px 85px rgba(0, 0, 0, 0.6), 0 5px 20px rgba(0, 0, 0, 0.3); color: rgba(255, 255, 255, 0.859); }
+  :global(:root[data-theme="dark"]) .legal-intro { border: 1px solid #232323; background: #121212; }
+  :global(:root[data-theme="dark"]) .legal-intro .updated { color: rgba(255, 255, 255, 0.533); }
+  :global(:root[data-theme="dark"]) .legal-content p { color: rgba(255, 255, 255, 0.694); }
+  :global(:root[data-theme="dark"]) .legal-content strong { color: rgba(255, 255, 255, 0.844); }
+  :global(:root[data-theme="dark"]) .legal-content code { background: #101010; color: rgba(255, 255, 255, 0.867); }
+  :global(:root[data-theme="dark"]) .legal-content a { color: #0878f9; text-decoration: none; }
+  :global(:root[data-theme="dark"]) .legal-content a:hover { text-decoration: underline; }
+  :global(:root[data-theme="dark"]) .operator-notice { border: 1px solid #242424; background: #121212; }
+  :global(:root[data-theme="dark"]) .legal-footer { border-top: 1px solid #272727; background: #131313; }
+  :global(:root[data-theme="dark"]) .legal-footer button { border: 0; background: #0878f9; color: #111111; box-shadow: 0 5px 15px rgba(8, 120, 249, 0.6); }
+  :global(:root[data-theme="dark"]) .legal-footer button:hover { background: #006ff0; }
+  /* dark theme: end generated */
+
 </style>

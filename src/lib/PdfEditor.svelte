@@ -5,10 +5,12 @@
   import { fade, fly, scale } from 'svelte/transition';
   import EditorToolbar from '$lib/EditorToolbar.svelte';
   import HtmlPdfEditor from '$lib/HtmlPdfEditor.svelte';
+  import TranslateFilesPanel from '$lib/TranslateFilesPanel.svelte';
+  import { showAppError, translatePdf } from '$lib/translate.js';
   import { renderLatex } from '$lib/math-render.js';
 
   /** @typedef {{ x: number; y: number; pressure: number }} StrokePoint */
-  /** @typedef {{ id: number; type: 'marker' | 'pen'; points: StrokePoint[]; rawPoints?: StrokePoint[]; color?: string; thickness?: number; opacity?: number; falloff?: number; smoothing?: number }} AnnotationStroke */
+  /** @typedef {{ id: number; group?: number; type: 'marker' | 'pen'; points: StrokePoint[]; rawPoints?: StrokePoint[]; color?: string; thickness?: number; opacity?: number; falloff?: number; smoothing?: number }} AnnotationStroke */
   /** @typedef {{ start: number; end: number; color?: string; fontFamily?: string; fontSize?: number; fontWeight?: number; letterSpacing?: number; textAlign?: 'left' | 'center' | 'right'; italic?: boolean; underline?: boolean; strikethrough?: boolean }} TextStyleRange */
   /** @typedef {{ id: number; type: 'triangle' | 'rectangle' | 'circle' | 'check' | 'cross' | 'arrow' | 'line' | 'measure' | 'crop' | 'textfield' | 'signature' | 'image' | 'checkbox' | 'input'; x: number; y: number; width: number; height: number; rotation: number; text?: string; textColor?: string; fontFamily?: string; fontSize?: number; fontWeight?: number; letterSpacing?: number; lineHeight?: number; textAlign?: 'left' | 'center' | 'right'; verticalAlign?: 'top' | 'middle' | 'bottom'; italic?: boolean; underline?: boolean; strikethrough?: boolean; textStyleRanges?: TextStyleRange[]; imageData?: string; latex?: string; latexFontSize?: number; latexColor?: string; latexDisplay?: boolean; fieldName?: string; fieldValue?: string | boolean; existingField?: boolean; originalFieldValue?: string | boolean; originalFrame?: { x: number; y: number; width: number; height: number }; readOnly?: boolean; opacity?: number; cornerRadius?: number; fillPresent?: boolean; fillEnabled?: boolean; fillColor?: string; fillAlpha?: number; strokePresent?: boolean; strokeEnabled?: boolean; strokeColor?: string; strokeAlpha?: number; strokeWidth?: number; shadowPresent?: boolean; shadowEnabled?: boolean; shadowOpacity?: number; shadowBlur?: number; shadowX?: number; shadowY?: number; backgroundBlurPresent?: boolean; backgroundBlurEnabled?: boolean; backgroundBlur?: number }} AnnotationShape */
   /** @typedef {{ id: number; type: 'highlight' | 'underline' | 'crossout' | 'blackout' | 'whiteout'; rects: { x: number; y: number; width: number; height: number; color?: [number, number, number]; thickness?: number }[] }} TextHighlight */
@@ -42,6 +44,13 @@
   export let onRequestClose = () => {};
   /** @type {string} */
   export let initialTool = 'select';
+  /**
+   * Every open tab keeps its editor mounted so switching tabs is instant; only
+   * the active one is shown and reacts to page-wide input.
+   */
+  export let active = true;
+  /** @type {HTMLElement | undefined} */
+  let sidebarElement;
   let workingFile = file;
 
   /** @type {HTMLDivElement | undefined} */
@@ -90,6 +99,10 @@
   let penThickness = 2.05;
   let penOpacity = 0.94;
   let penSmoothing = 55;
+  /** Eraser diameter in page points. */
+  let eraserSize = 34;
+  /** Quick erase removes every stroke drawn in the same pointer-down as the one it touches. */
+  let eraserQuickErase = false;
   /** @type {any} */
   let htmlEditor;
   let htmlEditorStarted = false;
@@ -120,6 +133,7 @@
   /** @type {number | undefined} */
   let searchUpdateFrame;
   let watermarkPanelOpen = false;
+  let translatePanelOpen = false;
   let watermarkText = '';
   let appliedWatermarkText = '';
   /** @type {HTMLInputElement | undefined} */
@@ -152,10 +166,10 @@
   /** @type {{ pageIndex: number; point: StrokePoint } | null} */
   let lastEraserPoint = null;
   let nextAnnotationId = 1;
-  let eraserCursorVisible = false;
-  let eraserCursorX = 0;
-  let eraserCursorY = 0;
-  let eraserCursorSize = 34;
+  let brushCursorVisible = false;
+  let brushCursorX = 0;
+  let brushCursorY = 0;
+  let brushCursorSize = 34;
   /** @type {{ pageIndex: number; id: number } | null} */
   let selectedShape = null;
   /** @type {Set<number>} */
@@ -164,6 +178,12 @@
   let shapeMarquee = null;
   /** @type {{ pageIndex: number; x: number; y: number; empty: boolean } | null} */
   let shapeContextMenu = null;
+  /** The app's own right-click menu for PDF text (the native macOS one is suppressed). */
+  /** @type {{ x: number; y: number } | null} */
+  let textContextMenu = null;
+  /** The text selection drawn by the app while the pointer is still dragging; the native highlight is hidden. */
+  /** @type {Record<number, { x: number; y: number; width: number; height: number }[]> | null} */
+  let liveTextSelectionPages = null;
   /** @type {AnnotationShape[] | null} */
   let shapeClipboard = null;
   /** @type {{ pageIndex: number; x: number; y: number; width: number; height: number; rotation: number } | null} */
@@ -317,7 +337,8 @@
   const MAX_ZOOM = 4;
   const CLICK_ZOOM_FACTOR = 1.25;
   const MAX_CANVAS_PIXELS = 24_000_000;
-  const ERASER_RADIUS = 17;
+  /** Tools that show a circle the size of their tip instead of the system cursor. */
+  const BRUSH_TOOLS = new Set(['marker', 'pen', 'eraser']);
   const SHAPE_TOOLS = new Set(['triangle', 'rectangle', 'circle', 'check', 'cross', 'arrow', 'line', 'measure', 'crop', 'textfield', 'checkbox', 'input']);
   const LINE_SHAPE_TOOLS = new Set(['arrow', 'line', 'measure']);
   const HTML_VIEW_TOOLS = new Set(['edit', 'pan', 'zoom']);
@@ -336,7 +357,12 @@
     scheduleRasterPreview();
   }
 
-  $: if (activeTool !== 'eraser') eraserCursorVisible = false;
+  $: if (!BRUSH_TOOLS.has(activeTool)) brushCursorVisible = false;
+  $: if (!active) {
+    pageContextMenu = null;
+    shapeContextMenu = null;
+    textContextMenu = null;
+  }
   $: if (activeTool !== observedTool) {
     const previousTool = observedTool;
     observedTool = activeTool;
@@ -583,6 +609,8 @@
     else if (previousTool === 'search') resetSearchPanel();
     if (nextTool === 'watermark') showWatermarkPanel();
     else if (previousTool === 'watermark') watermarkPanelOpen = false;
+    if (nextTool === 'translate') translatePanelOpen = true;
+    else if (previousTool === 'translate') translatePanelOpen = false;
     if (nextTool === 'protect') protectPanelOpen = true;
     else if (previousTool === 'protect') protectPanelOpen = false;
     if (nextTool === 'sign') {
@@ -1590,6 +1618,39 @@
       editorTransition = '';
       if (activeTool === 'ocr') activeTool = 'select';
     }
+  }
+
+  /** Replaces the document with a translated copy, the way OCR replaces it with a searchable one. @param {string} source @param {string} target */
+  async function translateDocument(source, target) {
+    translatePanelOpen = false;
+    editorTransition = 'Translating Document';
+    try {
+      const sourceBytes = workingPdfBytes?.slice(0) ?? await readWorkingPdf();
+      const translated = await translatePdf(new Blob([sourceBytes], { type: 'application/pdf' }), source, target);
+      workingFile = new File([translated.blob], workingFile.name, {
+        type: 'application/pdf',
+        lastModified: Date.now()
+      });
+      htmlEditorStarted = false;
+      htmlTextEditBaseFile = null;
+      htmlEditorReady = false;
+      htmlViewportMode = false;
+      await loadPdf(false);
+      if (translated.missed) {
+        showAppError('Partly translated', 'Some text could not be replaced and stays in the original language.');
+      }
+    } catch (error) {
+      console.error(error);
+      showAppError('Could not translate this PDF', error);
+    } finally {
+      editorTransition = '';
+      if (activeTool === 'translate') activeTool = 'select';
+    }
+  }
+
+  function closeTranslatePanel() {
+    translatePanelOpen = false;
+    if (activeTool === 'translate') activeTool = 'select';
   }
 
   function handleHtmlEditorReady() {
@@ -2728,6 +2789,9 @@
       if (shapeContextMenu && (!(target instanceof Element) || !target.closest('.shape-context-menu'))) {
         shapeContextMenu = null;
       }
+      if (textContextMenu && (!(target instanceof Element) || !target.closest('.text-context-menu'))) {
+        textContextMenu = null;
+      }
     }
 
     /** @param {KeyboardEvent} event */
@@ -2750,59 +2814,45 @@
       commitActiveTextField();
     }
 
-    document.addEventListener('mousedown', rememberTextSelectionOrigin, true);
-    document.addEventListener('selectstart', blockExternalPdfSelection, true);
-    document.addEventListener('mousemove', blockExternalPdfSelectionDrag, true);
-    document.addEventListener('mousedown', beginTextSelectionCursor, true);
-    document.addEventListener('mousedown', beginProductionCharacterDrag, true);
-    document.addEventListener('mousedown', beginWordDrag, true);
-    document.addEventListener('mousedown', rememberPointerStart);
-    document.addEventListener('mousemove', extendProductionCharacterDrag);
-    document.addEventListener('mousemove', extendWordDrag);
-    document.addEventListener('mouseup', endTextSelectionCursor, true);
-    document.addEventListener('mouseup', finishProductionCharacterDrag, true);
-    document.addEventListener('mouseup', endWordDrag);
-    document.addEventListener('mouseup', commitTextHighlight);
-    document.addEventListener('mouseup', capturePdfTextSelection);
-    document.addEventListener('mouseup', clearTextSelectionOrigin);
-    document.addEventListener('dragstart', suppressProductionBlankDrag);
-    document.addEventListener('click', clearPageSelection);
-    document.addEventListener('pointerdown', closePageContextMenu);
-    document.addEventListener('pointerdown', commitTextFieldOnOutsidePointer, true);
-    window.addEventListener('keydown', handlePageMenuShortcut, true);
-    window.addEventListener('keydown', updateZoomCursor);
-    window.addEventListener('keydown', handleShapeKeyboard, true);
-    window.addEventListener('keydown', handleHistoryShortcut);
-    window.addEventListener('keyup', updateZoomCursor);
-    window.addEventListener('blur', resetZoomCursor);
-    window.addEventListener('blur', endTextSelectionCursor);
+    // Background tabs stay mounted, so page-wide listeners only act for the visible editor.
+    /** @type {[EventTarget, string, (event: any) => void, boolean][]} */
+    const pageListeners = [
+      [document, 'mousedown', rememberTextSelectionOrigin, true],
+      [document, 'selectstart', blockExternalPdfSelection, true],
+      [document, 'mousemove', blockExternalPdfSelectionDrag, true],
+      [document, 'mousedown', beginTextSelectionCursor, true],
+      [document, 'mousedown', beginProductionCharacterDrag, true],
+      [document, 'mousedown', beginWordDrag, true],
+      [document, 'mousedown', rememberPointerStart, false],
+      [document, 'mousemove', extendProductionCharacterDrag, false],
+      [document, 'mousemove', extendWordDrag, false],
+      [document, 'mouseup', endTextSelectionCursor, true],
+      [document, 'mouseup', finishProductionCharacterDrag, true],
+      [document, 'mouseup', endWordDrag, false],
+      [document, 'mouseup', commitTextHighlight, false],
+      [document, 'mouseup', capturePdfTextSelection, false],
+      [document, 'mouseup', clearTextSelectionOrigin, false],
+      [document, 'selectionchange', updateLiveTextSelection, false],
+      [document, 'dragstart', suppressProductionBlankDrag, false],
+      [document, 'click', clearPageSelection, false],
+      [document, 'pointerdown', closePageContextMenu, false],
+      [document, 'pointerdown', commitTextFieldOnOutsidePointer, true],
+      [window, 'keydown', handlePageMenuShortcut, true],
+      [window, 'keydown', updateZoomCursor, false],
+      [window, 'keydown', handleShapeKeyboard, true],
+      [window, 'keydown', handleHistoryShortcut, false],
+      [window, 'keyup', updateZoomCursor, false],
+      [window, 'blur', resetZoomCursor, false],
+      [window, 'blur', endTextSelectionCursor, false]
+    ];
+    const removePageListeners = pageListeners.map(([target, type, handler, capture]) => {
+      /** @param {Event} event */
+      const listener = (event) => { if (active) handler(event); };
+      target.addEventListener(type, listener, capture);
+      return () => target.removeEventListener(type, listener, capture);
+    });
     return () => {
-      document.removeEventListener('mousedown', rememberTextSelectionOrigin, true);
-      document.removeEventListener('selectstart', blockExternalPdfSelection, true);
-      document.removeEventListener('mousemove', blockExternalPdfSelectionDrag, true);
-      document.removeEventListener('mousedown', beginTextSelectionCursor, true);
-      document.removeEventListener('mousedown', beginProductionCharacterDrag, true);
-      document.removeEventListener('mousedown', beginWordDrag, true);
-      document.removeEventListener('mousedown', rememberPointerStart);
-      document.removeEventListener('mousemove', extendProductionCharacterDrag);
-      document.removeEventListener('mousemove', extendWordDrag);
-      document.removeEventListener('mouseup', endTextSelectionCursor, true);
-      document.removeEventListener('mouseup', finishProductionCharacterDrag, true);
-      document.removeEventListener('mouseup', endWordDrag);
-      document.removeEventListener('mouseup', commitTextHighlight);
-      document.removeEventListener('mouseup', capturePdfTextSelection);
-      document.removeEventListener('mouseup', clearTextSelectionOrigin);
-      document.removeEventListener('dragstart', suppressProductionBlankDrag);
-      document.removeEventListener('click', clearPageSelection);
-      document.removeEventListener('pointerdown', closePageContextMenu);
-      document.removeEventListener('pointerdown', commitTextFieldOnOutsidePointer, true);
-      window.removeEventListener('keydown', handlePageMenuShortcut, true);
-      window.removeEventListener('keydown', updateZoomCursor);
-      window.removeEventListener('keydown', handleShapeKeyboard, true);
-      window.removeEventListener('keydown', handleHistoryShortcut);
-      window.removeEventListener('keyup', updateZoomCursor);
-      window.removeEventListener('blur', resetZoomCursor);
-      window.removeEventListener('blur', endTextSelectionCursor);
+      removePageListeners.forEach((remove) => remove());
       endTextSelectionCursor();
     };
   });
@@ -2812,14 +2862,232 @@
     return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value));
   }
 
+  /**
+   * Sideways pan room past the page edges. None at the opening zoom; zooming in
+   * adds exactly enough for the point under the pointer to stay put (as in
+   * Chrome), up to a maximum, the same on both sides.
+   */
+  const MAX_HORIZONTAL_PAN_GUTTER = 600;
+  let viewerWidth = 0;
+  $: horizontalPanGutter = panGutterFor(zoomLevel, viewerWidth, pageSizes);
+
+  /** @param {number} zoom @param {number} viewWidth @param {Record<number, { width: number; height: number }>} sizes */
+  function panGutterFor(zoom, viewWidth, sizes) {
+    const pageWidth = Math.max(0, ...Object.values(sizes).map((size) => size.width));
+    if (!pageWidth || !viewWidth || zoom <= 1) return 0;
+    // With this gutter the scroll range is viewWidth * (zoom - 1): enough to keep any visible point fixed while zooming.
+    return Math.min(MAX_HORIZONTAL_PAN_GUTTER, Math.max(0, (zoom * (viewWidth - pageWidth)) / 2));
+  }
+
+  /** The view opens horizontally centred on the pages; later reloads keep the user's position. */
+  let viewCenteredOnOpen = false;
+
+  /** Scrolls so the pages sit in the middle of the visible editor area, with equal pan room on both sides. */
+  function centerViewerHorizontally() {
+    if (!viewer) return;
+    viewer.scrollLeft = Math.max(0, (viewer.scrollWidth - viewer.clientWidth) / 2);
+  }
+
   /** @type {{ zoom: number; clientX: number; clientY: number } | null} */
   let pendingZoom = null;
   let pendingZoomFrame = 0;
 
   /** The zoom the view is heading to, so fast wheel events build on each other. */
   function targetZoom() {
-    return pendingZoom?.zoom ?? zoomLevel;
+    return zoomGesture?.zoom ?? pendingZoom?.zoom ?? zoomLevel;
   }
+
+  /** @type {HTMLDivElement | undefined} */
+  let zoomStage;
+  /**
+   * A pinch or Cmd-scroll in progress. Re-laying out every page and text layer
+   * on each wheel event made zooming stutter, so the gesture is previewed as a
+   * GPU scale around the pointer and laid out once it settles.
+   * @type {{ baseZoom: number; zoom: number; clientX: number; clientY: number; active: boolean; offsetX: number; offsetY: number; widestPage: HTMLElement; firstPage: HTMLElement; metrics: { viewerScale: number; stageScale: number; stageLeft: number; stageTop: number; viewLeft: number; viewTop: number; viewWidth: number; viewHeight: number; paddingTop: number; paddingBottom: number; pageLeft: number; pageWidth: number; documentTop: number; documentHeight: number } } | null}
+   */
+  let zoomGesture = null;
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let zoomGestureTimer;
+  // Long enough that a slow pinch is not re-laid out halfway through.
+  const ZOOM_SETTLE_MS = 300;
+
+  /**
+   * Where the pages may sit at a given zoom, in screen pixels: the same centring
+   * and pan limits the real layout applies. The preview is clamped to this on
+   * every step (as Chrome does), so zooming out drifts the pages back into place
+   * instead of snapping when the gesture ends.
+   * @param {NonNullable<typeof zoomGesture>} gesture @param {number} zoom
+   */
+  function zoomGesturePlacement(gesture, zoom) {
+    const m = gesture.metrics;
+    const k = zoom / gesture.baseZoom;
+    const pageWidth = m.pageWidth * k;
+    // Horizontal: pages centred in the document, which fills the view between the pan gutters.
+    const gutter = panGutterFor(zoom, viewerWidth, pageSizes) * m.viewerScale;
+    const documentWidth = Math.max(m.viewWidth - 2 * gutter, pageWidth);
+    const contentWidth = documentWidth + 2 * gutter;
+    const pageLeftInContent = gutter + (documentWidth - pageWidth) / 2;
+    const scrollRangeX = Math.max(0, contentWidth - m.viewWidth);
+    const freeLeft = gesture.clientX - (gesture.clientX - m.pageLeft) * k;
+    const left = Math.min(m.viewLeft + pageLeftInContent, Math.max(m.viewLeft + pageLeftInContent - scrollRangeX, freeLeft));
+    // Vertical: the document starts below the top padding and scrolls within its height.
+    const documentHeight = m.documentHeight * k;
+    const scrollRangeY = Math.max(0, m.paddingTop + documentHeight + m.paddingBottom - m.viewHeight);
+    const freeTop = gesture.clientY - (gesture.clientY - m.documentTop) * k;
+    const top = Math.min(m.viewTop + m.paddingTop, Math.max(m.viewTop + m.paddingTop - scrollRangeY, freeTop));
+    return { left, top, freeLeft, freeTop };
+  }
+
+  /** @param {number} requestedZoom @param {number} clientX @param {number} clientY */
+  function previewZoomGesture(requestedZoom, clientX, clientY) {
+    if (!viewer || !zoomStage) return;
+    const zoom = clampZoom(requestedZoom);
+    if (!zoomGesture) {
+      const pages = [...viewer.querySelectorAll('.pdf-page')];
+      if (!pages.length) return;
+      if (pendingZoomFrame) cancelAnimationFrame(pendingZoomFrame);
+      pendingZoomFrame = 0;
+      pendingZoom = null;
+      // Measure as little as possible here: this runs before the first preview frame.
+      const widestIndex = Object.entries(pageSizes).reduce((best, [index, size]) => (size.width > (pageSizes[best]?.width ?? 0) ? Number(index) : best), 0);
+      const widestPage = /** @type {HTMLElement} */ (pages[widestIndex] ?? pages[0]);
+      const widestRect = widestPage.getBoundingClientRect();
+      const firstRect = pages[0].getBoundingClientRect();
+      const viewerRect = viewer.getBoundingClientRect();
+      const viewerScale = viewer.offsetWidth ? viewerRect.width / viewer.offsetWidth : 1;
+      const viewerStyle = getComputedStyle(viewer);
+      const paddingTop = Number.parseFloat(viewerStyle.paddingTop) * viewerScale;
+      const paddingBottom = Number.parseFloat(viewerStyle.paddingBottom) * viewerScale;
+      const stageRect = zoomStage.getBoundingClientRect();
+      zoomGlide?.cancel();
+      zoomGlide = null;
+      zoomStage.style.transformOrigin = '0 0';
+      zoomGesture = {
+        baseZoom: zoomLevel,
+        zoom,
+        clientX,
+        clientY,
+        active: true,
+        offsetX: 0,
+        offsetY: 0,
+        widestPage,
+        firstPage: /** @type {HTMLElement} */ (pages[0]),
+        metrics: {
+          viewerScale,
+          stageScale: zoomStage.offsetWidth ? stageRect.width / zoomStage.offsetWidth : 1,
+          stageLeft: stageRect.left,
+          stageTop: stageRect.top,
+          viewLeft: viewerRect.left,
+          viewTop: viewerRect.top,
+          viewWidth: viewer.clientWidth * viewerScale,
+          viewHeight: viewer.clientHeight * viewerScale,
+          paddingTop,
+          paddingBottom,
+          pageLeft: widestRect.left,
+          pageWidth: widestRect.width,
+          documentTop: firstRect.top,
+          documentHeight: viewer.scrollHeight * viewerScale - paddingTop - paddingBottom
+        }
+      };
+    } else {
+      zoomGesture.zoom = zoom;
+    }
+    zoomGesture.active = true;
+    if (!zoomFrame) {
+      lastZoomFrameTime = 0;
+      zoomFrame = requestAnimationFrame(stepZoomPreview);
+    }
+    clearTimeout(zoomGestureTimer);
+    zoomGestureTimer = setTimeout(() => {
+      if (zoomGesture) zoomGesture.active = false;
+      if (!zoomFrame) zoomFrame = requestAnimationFrame(stepZoomPreview);
+    }, ZOOM_SETTLE_MS);
+  }
+
+  let zoomFrame = 0;
+  let lastZoomFrameTime = 0;
+  /** How quickly the pages ease back inside their limits; no hard clamping, so no sharp turns. */
+  const ZOOM_EASE_MS = 110;
+
+  /**
+   * One preview frame: the zoom follows the pointer exactly, and any part of
+   * that position the layout would not allow is eased away over a few frames.
+   * Once the gesture has ended and the easing has settled, the real layout takes over.
+   * @param {number} now
+   */
+  function stepZoomPreview(now) {
+    zoomFrame = 0;
+    const gesture = zoomGesture;
+    if (!gesture || !zoomStage) return;
+    const elapsed = lastZoomFrameTime ? Math.min(64, now - lastZoomFrameTime) : 16;
+    lastZoomFrameTime = now;
+    const placement = zoomGesturePlacement(gesture, gesture.zoom);
+    const blend = 1 - Math.exp(-elapsed / ZOOM_EASE_MS);
+    gesture.offsetX += (placement.left - placement.freeLeft - gesture.offsetX) * blend;
+    gesture.offsetY += (placement.top - placement.freeTop - gesture.offsetY) * blend;
+    const left = placement.freeLeft + gesture.offsetX;
+    const top = placement.freeTop + gesture.offsetY;
+    const m = gesture.metrics;
+    const k = gesture.zoom / gesture.baseZoom;
+    // Map the widest page's left edge and the document top to the eased positions.
+    const translateX = (left - m.stageLeft - k * (m.pageLeft - m.stageLeft)) / m.stageScale;
+    const translateY = (top - m.stageTop - k * (m.documentTop - m.stageTop)) / m.stageScale;
+    zoomStage.style.transform = `translate(${translateX}px, ${translateY}px) scale(${k})`;
+    const settled = Math.abs(placement.left - left) < 0.5 && Math.abs(placement.top - top) < 0.5;
+    if (!gesture.active && settled) {
+      void commitZoomGesture();
+      return;
+    }
+    if (gesture.active || !settled) zoomFrame = requestAnimationFrame(stepZoomPreview);
+  }
+
+  async function commitZoomGesture() {
+    clearTimeout(zoomGestureTimer);
+    if (zoomFrame) cancelAnimationFrame(zoomFrame);
+    zoomFrame = 0;
+    const gesture = zoomGesture;
+    zoomGesture = null;
+    if (!gesture) return;
+    const target = zoomGesturePlacement(gesture, gesture.zoom);
+    const changed = Math.abs(gesture.zoom - zoomLevel) >= 0.001;
+    if (changed) {
+      zoomLevel = gesture.zoom;
+      await tick();
+    }
+    // Same task as the layout change, so no frame shows the scale twice.
+    if (zoomStage) {
+      zoomStage.style.transform = '';
+      zoomStage.style.transformOrigin = '';
+    }
+    if (!changed || !viewer) return;
+    // The preview has already eased into the allowed position, so the layout lands exactly there.
+    const scale = gesture.metrics.viewerScale;
+    viewer.scrollLeft += (gesture.widestPage.getBoundingClientRect().left - target.left) / scale;
+    viewer.scrollTop += (gesture.firstPage.getBoundingClientRect().top - target.top) / scale;
+    if (zoomStage) {
+      const offsetX = (target.left - gesture.widestPage.getBoundingClientRect().left) / gesture.metrics.stageScale;
+      const offsetY = (target.top - gesture.firstPage.getBoundingClientRect().top) / gesture.metrics.stageScale;
+      // Sub-pixel rounding is left alone; anything visible eases instead of jumping.
+      if (Math.abs(offsetX) > 3 || Math.abs(offsetY) > 3) glideZoomStage(offsetX, offsetY);
+    }
+    scheduleSharpRender();
+  }
+
+  /** @type {Animation | null} */
+  let zoomGlide = null;
+
+  /** Starts the stage at the previewed position and eases it to where the layout put it. @param {number} offsetX @param {number} offsetY */
+  function glideZoomStage(offsetX, offsetY) {
+    if (!zoomStage) return;
+    zoomGlide?.cancel();
+    // A cancellable animation: a new gesture must take over at once, not wait for the glide.
+    zoomGlide = zoomStage.animate(
+      [{ transform: `translate(${offsetX}px, ${offsetY}px)` }, { transform: 'none' }],
+      { duration: 650, easing: 'cubic-bezier(0.65, 0, 0.35, 1)' }
+    );
+    zoomGlide.onfinish = () => { zoomGlide = null; };
+  }
+
 
   /**
    * Changes the document scale while keeping the point beneath the pointer in
@@ -2892,7 +3160,7 @@
     // accelerate only the native pinch gesture.
     const sensitivity = event.metaKey ? 0.002 : 0.01;
     const factor = Math.exp(-event.deltaY * deltaScale * sensitivity);
-    zoomAt(targetZoom() * factor, event.clientX, event.clientY);
+    previewZoomGesture(targetZoom() * factor, event.clientX, event.clientY);
   }
 
   /** @param {{ x: number; y: number; width: number; height: number; color?: [number, number, number] }[]} rects */
@@ -3049,12 +3317,124 @@
     return { active, markIds };
   }
 
+  /**
+   * The selected text's rectangles per page, in page units, or null when the
+   * range is not inside the PDF text.
+   * @param {Range} range @param {HTMLElement} currentViewer
+   */
+  function textSelectionPages(range, currentViewer) {
+    const ancestor = range.commonAncestorContainer instanceof Element
+      ? range.commonAncestorContainer
+      : range.commonAncestorContainer.parentElement;
+    if (!ancestor?.closest('.textLayer') || !currentViewer.contains(ancestor)) return null;
+    const clientRects = [...range.getClientRects()].filter((rect) => rect.width > 0.5 && rect.height > 0.5);
+    /** @type {Record<number, { x: number; y: number; width: number; height: number }[]>} */
+    const pagesByIndex = {};
+    [...currentViewer.querySelectorAll('.pdf-page')].forEach((shell, pageIndex) => {
+      if (!(shell instanceof HTMLElement)) return;
+      const pageRect = shell.getBoundingClientRect();
+      const pageWidth = Number.parseFloat(shell.style.width) || shell.offsetWidth;
+      const pageHeight = Number.parseFloat(shell.style.height) || shell.offsetHeight;
+      const rects = clientRects.filter((rect) => {
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+        return centerX >= pageRect.left && centerX <= pageRect.right && centerY >= pageRect.top && centerY <= pageRect.bottom;
+      }).map((rect) => ({
+        x: ((rect.left - pageRect.left) / pageRect.width) * pageWidth,
+        y: ((rect.top - pageRect.top) / pageRect.height) * pageHeight,
+        width: (rect.width / pageRect.width) * pageWidth,
+        height: (rect.height / pageRect.height) * pageHeight
+      }));
+      if (rects.length) pagesByIndex[pageIndex] = mergeTextHighlightRects(rects);
+    });
+    return pagesByIndex;
+  }
+
+  /** Draws the app's selection while dragging, since the native highlight is hidden. */
+  function updateLiveTextSelection() {
+    if (activeTool !== 'select' || !viewer) {
+      liveTextSelectionPages = null;
+      return;
+    }
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || !selection.rangeCount) {
+      liveTextSelectionPages = null;
+      return;
+    }
+    const pages = textSelectionPages(selection.getRangeAt(0), viewer);
+    liveTextSelectionPages = pages && Object.keys(pages).length ? pages : null;
+  }
+
+  /** @param {string} text */
+  async function copyTextToClipboard(text) {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const field = document.createElement('textarea');
+      field.value = text;
+      field.style.position = 'fixed';
+      field.style.opacity = '0';
+      document.body.append(field);
+      field.select();
+      document.execCommand('copy');
+      field.remove();
+    }
+  }
+
+  function copyPdfSelectionText() {
+    textContextMenu = null;
+    const text = pdfTextSelection?.text ?? window.getSelection()?.toString() ?? '';
+    void copyTextToClipboard(text);
+  }
+
+  /** @param {number} clientX @param {number} clientY */
+  function pointInTextSelection(clientX, clientY) {
+    if (!pdfTextSelection || !viewer) return false;
+    const shells = viewer.querySelectorAll('.pdf-page');
+    return Object.entries(pdfTextSelection.pages).some(([page, rects]) => {
+      const shell = shells[Number(page)];
+      if (!(shell instanceof HTMLElement)) return false;
+      // Same page units as textSelectionPages.
+      const pageWidth = Number.parseFloat(shell.style.width) || shell.offsetWidth;
+      const pageHeight = Number.parseFloat(shell.style.height) || shell.offsetHeight;
+      const pageRect = shell.getBoundingClientRect();
+      const x = ((clientX - pageRect.left) / pageRect.width) * pageWidth;
+      const y = ((clientY - pageRect.top) / pageRect.height) * pageHeight;
+      return rects.some((rect) => x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height);
+    });
+  }
+
+  /** Right-clicking a word with nothing selected selects that word, as on macOS. @param {number} clientX @param {number} clientY */
+  function selectPdfWordAt(clientX, clientY) {
+    if (!viewer) return;
+    const caretRange = document.caretRangeFromPoint?.(clientX, clientY);
+    const node = caretRange?.startContainer;
+    if (!caretRange || !(node instanceof Text) || !node.parentElement?.closest('.textLayer')) return;
+    const text = node.data;
+    const isWordCharacter = (/** @type {string} */ character) => /[\p{L}\p{N}_'’-]/u.test(character);
+    let start = Math.min(caretRange.startOffset, text.length);
+    let end = start;
+    while (start > 0 && isWordCharacter(text[start - 1])) start -= 1;
+    while (end < text.length && isWordCharacter(text[end])) end += 1;
+    if (start === end) return;
+    const range = document.createRange();
+    range.setStart(node, start);
+    range.setEnd(node, end);
+    const pages = textSelectionPages(range, viewer);
+    if (!pages || !Object.keys(pages).length) return;
+    setShapeSelection(0, []);
+    pdfTextSelection = { pages, text: range.toString(), ...existingTextMarkState(pages) };
+  }
+
   /** @param {MouseEvent} event */
   function capturePdfTextSelection(event) {
+    // Only the primary button selects; a right-click keeps the current selection for the menu.
+    if (event.button !== 0) return;
     if (activeTool !== 'select' || !viewer) return;
     queueMicrotask(() => {
       const target = event.target;
-      if (target instanceof Element && target.closest('.text-selection-panel, .figma-color-picker')) return;
+      if (target instanceof Element && target.closest('.text-selection-panel, .figma-color-picker, .text-context-menu')) return;
       const currentViewer = viewer;
       if (!currentViewer) return;
       const selection = window.getSelection();
@@ -3064,30 +3444,9 @@
         return;
       }
       const range = selection.getRangeAt(0);
-      const ancestor = range.commonAncestorContainer instanceof Element
-        ? range.commonAncestorContainer
-        : range.commonAncestorContainer.parentElement;
-      if (!ancestor?.closest('.textLayer')) return;
-      const clientRects = [...range.getClientRects()].filter((rect) => rect.width > 0.5 && rect.height > 0.5);
-      /** @type {Record<number, { x: number; y: number; width: number; height: number }[]>} */
-      const pagesByIndex = {};
-      [...currentViewer.querySelectorAll('.pdf-page')].forEach((shell, pageIndex) => {
-        if (!(shell instanceof HTMLElement)) return;
-        const pageRect = shell.getBoundingClientRect();
-        const pageWidth = Number.parseFloat(shell.style.width) || shell.offsetWidth;
-        const pageHeight = Number.parseFloat(shell.style.height) || shell.offsetHeight;
-        const rects = clientRects.filter((rect) => {
-          const centerX = rect.left + rect.width / 2;
-          const centerY = rect.top + rect.height / 2;
-          return centerX >= pageRect.left && centerX <= pageRect.right && centerY >= pageRect.top && centerY <= pageRect.bottom;
-        }).map((rect) => ({
-          x: ((rect.left - pageRect.left) / pageRect.width) * pageWidth,
-          y: ((rect.top - pageRect.top) / pageRect.height) * pageHeight,
-          width: (rect.width / pageRect.width) * pageWidth,
-          height: (rect.height / pageRect.height) * pageHeight
-        }));
-        if (rects.length) pagesByIndex[pageIndex] = mergeTextHighlightRects(rects);
-      });
+      const pagesByIndex = textSelectionPages(range, currentViewer);
+      if (!pagesByIndex) return;
+      liveTextSelectionPages = null;
       if (Object.keys(pagesByIndex).length && commentMode) {
         // In comment view a selection starts a comment on that text instead
         // of opening the highlight tools.
@@ -3646,8 +4005,52 @@
         text,
         textStyleRanges: remapTextStyleRanges(shape.text ?? '', text, shape.textStyleRanges ?? [])
       });
+      if (WHOLE_FIELD_LATEX.test(text)) void convertTextFieldToMath(pageIndex, id);
     }
     editingTextShape = null;
+  }
+
+  /** A text field holding only $$…$$, \[…\], \(…\) or $…$ becomes a typeset formula. */
+  const WHOLE_FIELD_LATEX = /^\s*(?:\$\$([\s\S]+)\$\$|\\\[([\s\S]+)\\\]|\\\(([\s\S]+)\\\)|\$([^$]+)\$)\s*$/;
+
+  /** @param {number} pageIndex @param {number} id */
+  async function convertTextFieldToMath(pageIndex, id) {
+    const shape = findShape(pageIndex, id);
+    const match = shape?.text?.match(WHOLE_FIELD_LATEX);
+    if (!shape || !match) return;
+    const display = match[1] !== undefined || match[2] !== undefined;
+    const latex = String(match[1] ?? match[2] ?? match[3] ?? match[4]).trim();
+    try {
+      const math = await mcpMathShape(shape, latex, {
+        fontSize: toPt(shape.fontSize ?? 16),
+        color: shape.textColor ?? '#171717',
+        display
+      });
+      // Skip if the field changed while the formula rendered.
+      if (findShape(pageIndex, id)?.text !== shape.text) return;
+      const { text: _text, textStyleRanges: _ranges, ...style } = shape;
+      replaceShape(pageIndex, { ...style, ...math });
+    } catch (error) {
+      showAppError('Could not typeset this formula', error);
+    }
+  }
+
+  /** Turns a formula back into an editable text field holding its LaTeX. @param {number} pageIndex @param {AnnotationShape} shape */
+  function editFormulaSource(pageIndex, shape) {
+    const { imageData: _image, latex, latexFontSize, latexColor, latexDisplay, ...rest } = shape;
+    const fontSize = toPx(latexFontSize ?? 14);
+    const source = latexDisplay === false ? `$${latex}$` : `$$${latex}$$`;
+    replaceShape(pageIndex, {
+      ...rest,
+      type: 'textfield',
+      text: source,
+      textStyleRanges: [],
+      fontSize,
+      textColor: latexColor ?? rest.textColor ?? '#171717',
+      width: Math.max(shape.width, fontSize * 0.62 * source.length + 24),
+      height: Math.max(shape.height, fontSize * 1.6)
+    });
+    openTextEditor(pageIndex, shape.id);
   }
 
   /** @param {Event} event @param {number} pageIndex @param {number} id */
@@ -4379,7 +4782,7 @@
   }
 
   function handleViewerPointerLeave() {
-    hideEraserCursor();
+    hideBrushCursor();
     hoveredShape = null;
   }
 
@@ -4491,7 +4894,22 @@
     const hit = shapeTarget(event);
     const shape = hit ? findShape(hit.pageIndex, hit.id) : null;
     const target = event.target;
-    if (!shape && target instanceof Element && target.closest('.textLayer span')) return;
+    if (!shape && ((target instanceof Element && target.closest('.textLayer span')) || pointInTextSelection(event.clientX, event.clientY))) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!pointInTextSelection(event.clientX, event.clientY)) selectPdfWordAt(event.clientX, event.clientY);
+      // WebKit selects the word under a right-click natively; the app keeps its own selection.
+      window.getSelection()?.removeAllRanges();
+      pageContextMenu = null;
+      shapeContextMenu = null;
+      const menuWidth = 206;
+      const menuHeight = 52;
+      textContextMenu = {
+        x: Math.max(10, Math.min(event.clientX, window.innerWidth - menuWidth - 10)),
+        y: Math.max(10, Math.min(event.clientY, window.innerHeight - menuHeight - 10))
+      };
+      return;
+    }
     const pageHit = shape ? null : pageAtPoint(event.clientX, event.clientY);
     if ((!shape && !pageHit) || shape?.type === 'crop') return;
     event.preventDefault();
@@ -4773,6 +5191,22 @@
       event.preventDefault();
       event.stopImmediatePropagation();
       copySelectedShapes();
+      return;
+    }
+    if (clipboardShortcut && clipboardKey === 'c' && pdfTextSelection?.text) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      copyPdfSelectionText();
+      return;
+    }
+    if (textContextMenu && !event.metaKey && !event.ctrlKey && !event.altKey && clipboardKey === 'c') {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      copyPdfSelectionText();
+      return;
+    }
+    if (event.key === 'Escape' && textContextMenu) {
+      textContextMenu = null;
       return;
     }
     if (clipboardShortcut && clipboardKey === 'v' && shapeClipboard?.length) {
@@ -5188,36 +5622,61 @@
     };
   }
 
+  /** @param {AnnotationStroke} stroke @param {StrokePoint} point @param {number} radius */
+  function strokeTouches(stroke, point, radius) {
+    const reach = radius + (stroke.thickness ?? (stroke.type === 'marker' ? 16 : 2.05)) / 2;
+    const points = stroke.points;
+    if (points.length === 1) return Math.hypot(points[0].x - point.x, points[0].y - point.y) <= reach;
+    for (let index = 1; index < points.length; index += 1) {
+      const start = points[index - 1];
+      const end = points[index];
+      const dx = end.x - start.x;
+      const dy = end.y - start.y;
+      const lengthSquared = dx * dx + dy * dy;
+      const t = lengthSquared ? clamp(((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared, 0, 1) : 0;
+      if (Math.hypot(start.x + dx * t - point.x, start.y + dy * t - point.y) <= reach) return true;
+    }
+    return false;
+  }
+
   /** @param {number} pageIndex @param {StrokePoint} point */
   function eraseAt(pageIndex, point) {
     const strokes = annotations[pageIndex] ?? [];
+    const radius = eraserSize / 2;
+    if (eraserQuickErase) {
+      // Pieces left over from partial erasing keep their group, so the whole original stroke goes.
+      const groups = new Set(strokes.filter((stroke) => strokeTouches(stroke, point, radius)).map((stroke) => stroke.group ?? stroke.id));
+      if (groups.size) annotations = { ...annotations, [pageIndex]: strokes.filter((stroke) => !groups.has(stroke.group ?? stroke.id)) };
+      return;
+    }
     /** @type {AnnotationStroke[]} */
     const fragments = [];
     for (const stroke of strokes) {
+      const group = stroke.group ?? stroke.id;
       /** @type {StrokePoint[]} */
       let run = [];
       for (const strokePoint of stroke.points) {
-        if (Math.hypot(strokePoint.x - point.x, strokePoint.y - point.y) <= ERASER_RADIUS) {
-          if (run.length) fragments.push({ ...stroke, id: nextAnnotationId++, points: run });
+        if (Math.hypot(strokePoint.x - point.x, strokePoint.y - point.y) <= radius) {
+          if (run.length) fragments.push({ ...stroke, id: nextAnnotationId++, group, points: run });
           run = [];
         } else {
           run.push(strokePoint);
         }
       }
-      if (run.length) fragments.push({ ...stroke, id: nextAnnotationId++, points: run });
+      if (run.length) fragments.push({ ...stroke, id: nextAnnotationId++, group, points: run });
     }
     annotations = { ...annotations, [pageIndex]: fragments };
   }
 
   /** @param {PointerEvent} event */
-  function updateEraserCursor(event) {
-    if (activeTool !== 'eraser') {
-      eraserCursorVisible = false;
+  function updateBrushCursor(event) {
+    if (!BRUSH_TOOLS.has(activeTool)) {
+      brushCursorVisible = false;
       return;
     }
     const pageHit = pageAtPoint(event.clientX, event.clientY);
     if (!pageHit || !workspace) {
-      eraserCursorVisible = false;
+      brushCursorVisible = false;
       return;
     }
     const workspaceRect = workspace.getBoundingClientRect();
@@ -5226,11 +5685,15 @@
     const pageRect = pageHit.shell.getBoundingClientRect();
     const pageWidth = Number.parseFloat(pageHit.shell.style.width) || pageHit.shell.offsetWidth;
     const pageScale = pageRect.width / pageWidth;
-    eraserCursorX = (event.clientX - workspaceRect.left) / workspaceScaleX;
-    eraserCursorY = (event.clientY - workspaceRect.top) / workspaceScaleY;
-    eraserCursorSize = (ERASER_RADIUS * 2 * pageScale) / workspaceScaleX;
-    eraserCursorVisible = true;
+    brushCursorX = (event.clientX - workspaceRect.left) / workspaceScaleX;
+    brushCursorY = (event.clientY - workspaceRect.top) / workspaceScaleY;
+    const diameter = activeTool === 'eraser' ? eraserSize : activeTool === 'marker' ? markerThickness : penThickness;
+    brushCursorSize = Math.max(5, (diameter * pageScale) / workspaceScaleX);
+    brushCursorVisible = true;
   }
+
+  /** @type {{ id: number; at: number } | null} */
+  let lastShapePointerDown = null;
 
   /** @param {PointerEvent} event */
   function handleViewerPointerDown(event) {
@@ -5246,6 +5709,18 @@
       const pages = [...viewer.querySelectorAll('.pdf-page')];
       const shell = pages[shapeHit.pageIndex];
       if (!shape || !(shell instanceof HTMLElement)) return;
+      // pointerdown.detail counts clicks in WebKit only, so also time the clicks.
+      const now = performance.now();
+      const repeatedClick = event.detail >= 2 || (lastShapePointerDown?.id === shape.id && now - lastShapePointerDown.at < 450);
+      lastShapePointerDown = { id: shape.id, at: now };
+      if (repeatedClick && shape.latex && !event.shiftKey && shapeHit.element.dataset.shapeHandle === undefined && shapeHit.element.dataset.shapeRotate === undefined) {
+        lastShapePointerDown = null;
+        event.preventDefault();
+        event.stopPropagation();
+        const pageIndex = shapeHit.pageIndex;
+        setTimeout(() => editFormulaSource(pageIndex, shape), 0);
+        return;
+      }
       if (
         event.detail >= 2 &&
         shape.type === 'textfield' &&
@@ -5394,8 +5869,10 @@
       event.preventDefault();
       window.getSelection()?.removeAllRanges();
       const firstPoint = pointOnPage(event, pageHit.shell);
+      const strokeId = nextAnnotationId++;
       const stroke = {
-        id: nextAnnotationId++,
+        id: strokeId,
+        group: strokeId,
         type: /** @type {'marker' | 'pen'} */ (activeTool),
         points: [firstPoint],
         rawPoints: [firstPoint],
@@ -5447,7 +5924,7 @@
 
   /** @param {PointerEvent} event */
   function handleViewerPointerMove(event) {
-    updateEraserCursor(event);
+    updateBrushCursor(event);
     updateHoveredShape(event);
     updateShapeMarquee(event);
     if (viewer && pendingFormDrag && event.pointerId === pendingFormDrag.pointerId) {
@@ -5517,7 +5994,7 @@
           const samples = appendInterpolatedPoint(
             [lastEraserPoint.point],
             point,
-            ERASER_RADIUS / 2
+            eraserSize / 4
           );
           for (const sample of samples.slice(1)) eraseAt(pageHit.pageIndex, sample);
         } else {
@@ -5608,7 +6085,7 @@
     if (erasingPointerId === event.pointerId) {
       erasingPointerId = null;
       lastEraserPoint = null;
-      eraserCursorVisible = false;
+      brushCursorVisible = false;
     }
     if (panStart && event.pointerId === panStart.pointerId) {
       panStart = null;
@@ -5617,8 +6094,8 @@
     if (viewer.hasPointerCapture(event.pointerId)) viewer.releasePointerCapture(event.pointerId);
   }
 
-  function hideEraserCursor() {
-    if (erasingPointerId === null) eraserCursorVisible = false;
+  function hideBrushCursor() {
+    if (erasingPointerId === null) brushCursorVisible = false;
   }
 
   function handleViewerScroll() {
@@ -5808,6 +6285,10 @@
       ]);
       status = '';
       pdfReady = true;
+      if (!viewCenteredOnOpen) {
+        viewCenteredOnOpen = true;
+        centerViewerHorizontally();
+      }
       if (searchPanelOpen && searchQuery) scheduleSearchUpdate();
       if (zoomLevel !== 1) scheduleSharpRender(0);
     } catch (error) {
@@ -5981,7 +6462,7 @@
 
   /** @param {import('pdfjs-dist').PDFDocumentProxy} document @param {number} generation */
   async function renderThumbnails(document, generation) {
-    const shells = globalThis.document?.querySelectorAll('.thumbnail-page') ?? [];
+    const shells = sidebarElement?.querySelectorAll('.thumbnail-page') ?? [];
     for (let index = 0; index < shells.length; index += 1) {
       if (generation !== loadGeneration) return;
       const shell = shells[index];
@@ -5989,7 +6470,7 @@
       if (!(shell instanceof HTMLElement) || !(canvas instanceof HTMLCanvasElement)) continue;
       const page = await document.getPage(index + 1);
       const baseViewport = page.getViewport({ scale: 1 });
-      const viewport = page.getViewport({ scale: 244 / baseViewport.width });
+      const viewport = page.getViewport({ scale: 266 / baseViewport.width });
       const outputScale = window.devicePixelRatio || 1;
       const context = canvas.getContext('2d');
       if (!context) continue;
@@ -6043,7 +6524,7 @@
   }
 
   function capturePageScrollState() {
-    const sidebar = document.querySelector('.editor-sidebar');
+    const sidebar = sidebarElement;
     return {
       sidebarTop: sidebar instanceof HTMLElement ? sidebar.scrollTop : 0,
       viewerTop: viewer?.scrollTop ?? 0,
@@ -6054,7 +6535,7 @@
   /** @param {{ sidebarTop: number; viewerTop: number; viewerLeft: number }} state */
   async function restorePageScrollState(state) {
     await tick();
-    const sidebar = document.querySelector('.editor-sidebar');
+    const sidebar = sidebarElement;
     if (sidebar instanceof HTMLElement) sidebar.scrollTop = state.sidebarTop;
     if (viewer) {
       viewer.scrollTop = state.viewerTop;
@@ -6149,7 +6630,7 @@
 
       /** @param {number} page */
       function stablePageCenter(page) {
-        const entry = document.querySelector(`.thumbnail-entry[data-page-index="${page}"]`);
+        const entry = sidebarElement?.querySelector(`.thumbnail-entry[data-page-index="${page}"]`);
         if (!(entry instanceof HTMLElement)) return null;
         const rect = entry.getBoundingClientRect();
         const transform = getComputedStyle(entry).transform;
@@ -6179,7 +6660,7 @@
 
     function runPageAutoScroll() {
       if (!pagePointerDrag?.active) return;
-      const sidebar = document.querySelector('.editor-sidebar');
+      const sidebar = sidebarElement;
       if (sidebar instanceof HTMLElement && pageAutoScrollSpeed !== 0) {
         sidebar.scrollTop += pageAutoScrollSpeed;
         updatePageInsertionAt(pagePointerDrag.clientY);
@@ -6207,7 +6688,7 @@
       moveEvent.preventDefault();
       pagePointerDrag = { ...pagePointerDrag, clientX: moveEvent.clientX, clientY: moveEvent.clientY, active: true };
 
-      const sidebar = document.querySelector('.editor-sidebar');
+      const sidebar = sidebarElement;
       if (sidebar instanceof HTMLElement) {
         const sidebarRect = sidebar.getBoundingClientRect();
         const scrollZone = Math.min(190, sidebarRect.height * 0.24);
@@ -6296,7 +6777,7 @@
 
   /** @param {number[]} order @param {Set<number>} nextSelection */
   async function reorderPages(order, nextSelection) {
-    const sidebar = document.querySelector('.editor-sidebar');
+    const sidebar = sidebarElement;
     const sidebarScrollTop = sidebar instanceof HTMLElement ? sidebar.scrollTop : 0;
     const viewerScrollTop = viewer?.scrollTop ?? 0;
     const viewerScrollLeft = viewer?.scrollLeft ?? 0;
@@ -6316,7 +6797,7 @@
       htmlViewportMode = false;
       await loadPdf(false, true, order.length);
       /** @type {{ canvas: HTMLCanvasElement; cssWidth: string; cssHeight: string; shellHeight: string }[]} */
-      const thumbnailFrames = [...document.querySelectorAll('.thumbnail-page')].flatMap((shell) => {
+      const thumbnailFrames = [...(sidebarElement?.querySelectorAll('.thumbnail-page') ?? [])].flatMap((shell) => {
         const canvas = shell.querySelector('canvas');
         if (!(shell instanceof HTMLElement) || !(canvas instanceof HTMLCanvasElement)) return [];
         const copy = document.createElement('canvas');
@@ -6332,7 +6813,7 @@
       });
       pageDragPreviewOrder = [];
       await tick();
-      const normalizedShells = [...document.querySelectorAll('.thumbnail-page')];
+      const normalizedShells = [...(sidebarElement?.querySelectorAll('.thumbnail-page') ?? [])];
       thumbnailFrames.forEach((frame, index) => {
         const shell = normalizedShells[index];
         const canvas = shell?.querySelector('canvas');
@@ -6344,7 +6825,7 @@
         canvas.style.height = frame.cssHeight;
         canvas.getContext('2d')?.drawImage(frame.canvas, 0, 0);
       });
-      const restoredSidebar = document.querySelector('.editor-sidebar');
+      const restoredSidebar = sidebarElement;
       if (restoredSidebar instanceof HTMLElement) restoredSidebar.scrollTop = sidebarScrollTop;
       if (viewer) {
         viewer.scrollTop = viewerScrollTop;
@@ -7035,7 +7516,7 @@
   /** @param {string} message */
   function reportEditorError(message) {
     if (mcpErrors) mcpErrors.push(message);
-    else window.alert(message);
+    else showAppError('Something went wrong', message);
   }
 
   /** @param {number} value */
@@ -8363,6 +8844,7 @@
     undoHistory = state.undoHistory;
     redoHistory = state.redoHistory;
     zoomLevel = state.zoomLevel;
+    viewCenteredOnOpen = true;
     // Edits are already in the state, so keep them instead of re-reading form widgets.
     void loadPdf(false).then(async () => {
       await tick();
@@ -8379,6 +8861,8 @@
     if (historyCommitTimer) clearTimeout(historyCommitTimer);
     if (searchUpdateFrame !== undefined) cancelAnimationFrame(searchUpdateFrame);
     if (pendingZoomFrame) cancelAnimationFrame(pendingZoomFrame);
+    if (zoomFrame) cancelAnimationFrame(zoomFrame);
+    clearTimeout(zoomGestureTimer);
     stopSignatureCamera();
     cancelSharpRenders();
     textLayerBuilders.forEach((builder) => builder.cancel());
@@ -8389,7 +8873,10 @@
 </script>
 
 <aside
+  bind:this={sidebarElement}
   class="editor-sidebar"
+  class:editor-inactive={!active}
+  inert={!active}
   aria-label="PDF pages"
   ondragover={handleExternalPdfSidebarDrag}
   ondragleave={(event) => {
@@ -8397,7 +8884,7 @@
     if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) externalPdfDropIndex = null;
   }}
 >
-  <div class="thumbnail-list">
+  <div class="thumbnail-list" class:has-page-selection={selectedPages.size > 0}>
     {#each (pageDragPreviewOrder.length ? pageDragPreviewOrder : Array.from({ length: pageCount }, (_, index) => index)) as index (index)}
       <div
         role="listitem"
@@ -8472,27 +8959,27 @@
     out:scale={{ duration: 145, easing: cubicOut, start: 0.96, opacity: 0 }}
   >
     <button class="page-menu-item rotate-right" role="menuitem" disabled={pageOperationBusy} onclick={() => rotateSelectedPages(90)}>
-      <img src="/pages/rotate-ccw.svg" alt="" />
+      <img src="/redesign/icon-rotate-ccw1.svg" alt="" />
       <span>Rotate Right</span>
       <kbd>R</kbd>
     </button>
     <button class="page-menu-item" role="menuitem" disabled={pageOperationBusy} onclick={() => rotateSelectedPages(-90)}>
-      <img src="/pages/rotate-ccw.svg" alt="" />
+      <img src="/redesign/icon-rotate-ccw2.svg" alt="" />
       <span>Rotate Left</span>
       <kbd>L</kbd>
     </button>
     <button class="page-menu-item export-page" role="menuitem" disabled={pageOperationBusy} onclick={exportSelectedPages}>
-      <img src="/pages/reply.svg" alt="" />
+      <img src="/redesign/icon-reply1.svg" alt="" />
       <span>Export</span>
       <kbd>E</kbd>
     </button>
     <button class="page-menu-item" role="menuitem" disabled={pageOperationBusy} onclick={copySelectedPages}>
-      <img src="/pages/copy.svg" alt="" />
+      <img src="/redesign/icon-copy2.svg" alt="" />
       <span>Copy</span>
       <kbd>C</kbd>
     </button>
     <button class="page-menu-item" role="menuitem" disabled={!pageClipboard || pageOperationBusy} onclick={pastePages}>
-      <img src="/pages/clipboard-plus.svg" alt="" />
+      <img src="/redesign/icon-clipboard-plus.svg" alt="" />
       <span>Paste</span>
       <kbd>V</kbd>
     </button>
@@ -8502,7 +8989,7 @@
       disabled={selectedPages.size >= pageCount || pageOperationBusy}
       onclick={deleteSelectedPages}
     >
-      <img src="/pages/trash.svg" alt="" />
+      <img src="/redesign/icon-trash1.svg" alt="" />
       <span>Delete</span>
       <kbd>D</kbd>
     </button>
@@ -8521,24 +9008,43 @@
     out:scale={{ duration: 145, easing: cubicOut, start: 0.96, opacity: 0 }}
   >
     <button class="page-menu-item" role="menuitem" disabled={shapeContextMenu.empty} onclick={copySelectedShapes}>
-      <img src="/pages/copy.svg" alt="" />
+      <img src="/redesign/icon-copy2.svg" alt="" />
       <span>Copy</span>
       <kbd>C</kbd>
     </button>
     <button class="page-menu-item" role="menuitem" disabled={!shapeClipboard?.length} onclick={pasteSelectedShapes}>
-      <img src="/pages/clipboard-plus.svg" alt="" />
+      <img src="/redesign/icon-clipboard-plus.svg" alt="" />
       <span>Paste</span>
       <kbd>V</kbd>
     </button>
     <button class="page-menu-item delete-page" role="menuitem" disabled={shapeContextMenu.empty} onclick={deleteSelectedShapes}>
-      <img src="/pages/trash.svg" alt="" />
+      <img src="/redesign/icon-trash1.svg" alt="" />
       <span>Delete</span>
       <kbd>D</kbd>
     </button>
   </div>
 {/if}
 
-<section class="pdf-workspace" aria-label={`PDF editor for ${workingFile.name}`} bind:this={workspace}>
+{#if textContextMenu}
+  <div
+    class="page-context-menu text-context-menu"
+    role="menu"
+    tabindex="-1"
+    aria-label="Text actions"
+    style:left={`${textContextMenu.x}px`}
+    style:top={`${textContextMenu.y}px`}
+    in:scale={{ duration: 190, easing: cubicOut, start: 0.92, opacity: 0 }}
+    out:scale={{ duration: 145, easing: cubicOut, start: 0.96, opacity: 0 }}
+  >
+    <button class="page-menu-item" role="menuitem" disabled={!pdfTextSelection?.text} onclick={copyPdfSelectionText}>
+      <img src="/redesign/icon-copy2.svg" alt="" />
+      <span>Copy</span>
+      <kbd>C</kbd>
+    </button>
+  </div>
+{/if}
+
+<section class="pdf-workspace" class:editor-inactive={!active} inert={!active} aria-label={`PDF editor for ${workingFile.name}`} bind:this={workspace}>
   {#if htmlEditorStarted}
     <div class:active={htmlViewportVisible} class="html-editor-layer">
       <HtmlPdfEditor
@@ -8562,10 +9068,14 @@
     class:shape-mode={SHAPE_TOOLS.has(activeTool)}
     class:highlight-mode={TEXT_MARK_TOOLS.has(activeTool)}
     class:eraser-mode={activeTool === 'eraser'}
+    class:select-mode={activeTool === 'select'}
+    class:brush-active={brushCursorVisible}
     class="pdf-viewer"
     role="region"
     aria-label="Document pages"
     bind:this={viewer}
+    bind:clientWidth={viewerWidth}
+    style:--horizontal-pan-gutter={`${horizontalPanGutter}px`}
     onwheel={handleWheel}
     onscroll={handleViewerScroll}
     onauxclick={preventMiddleClick}
@@ -8576,6 +9086,7 @@
     onpointerleave={handleViewerPointerLeave}
     oncontextmenu={openShapeContextMenu}
   >
+    <div class="pdf-zoom-stage" bind:this={zoomStage}>
     <div class="pdf-document" style:--zoom-level={zoomLevel}>
       {#each Array(pageCount) as _, index}
         {@const currentSelectedShapes = selectedShape?.pageIndex === index ? (shapes[index] ?? []).filter((shape) => selectedShapeIds.has(shape.id)) : []}
@@ -9317,14 +9828,14 @@
               {/each}
             {/each}
           </svg>
-          {#if pdfTextSelection?.pages[index]?.length}
+          {#if (pdfTextSelection?.pages[index] ?? liveTextSelectionPages?.[index])?.length}
             <svg
               class="annotation-layer native-selection-layer"
               viewBox={`0 0 ${pageSizes[index]?.width ?? 1} ${pageSizes[index]?.height ?? 1}`}
               preserveAspectRatio="none"
               aria-hidden="true"
             >
-              {#each pdfTextSelection.pages[index] as rect}
+              {#each pdfTextSelection?.pages[index] ?? liveTextSelectionPages?.[index] ?? [] as rect}
                 <rect x={rect.x} y={rect.y} width={rect.width} height={rect.height} />
               {/each}
             </svg>
@@ -9403,18 +9914,21 @@
         </div>
       {/each}
     </div>
+    </div>
   </div>
-  {#if eraserCursorVisible}
+  {#if brushCursorVisible}
     <div
-      class="eraser-cursor"
-      style:left={`${eraserCursorX}px`}
-      style:top={`${eraserCursorY}px`}
-      style:width={`${eraserCursorSize}px`}
-      style:height={`${eraserCursorSize}px`}
+      class="brush-cursor"
+      style:left={`${brushCursorX}px`}
+      style:top={`${brushCursorY}px`}
+      style:width={`${brushCursorSize}px`}
+      style:height={`${brushCursorSize}px`}
       aria-hidden="true"
     ></div>
   {/if}
-  <EditorToolbar bind:activeTool />
+  <!-- Progressive blur over the bottom of the view, so the floating toolbar reads clearly. -->
+  <div class="bottom-fade" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div>
+  <EditorToolbar bind:activeTool {active} />
   <input
     class="signature-upload-input"
     type="file"
@@ -9520,6 +10034,21 @@
       </div>
     {/if}
   {/if}
+  {#if activeTool === 'eraser'}
+    <div class="protect-panel selection-properties-panel drawing-properties-panel" role="dialog" aria-label="Eraser properties" transition:fly={{ x: 18, duration: 240, easing: cubicOut }}>
+      <header class="protect-panel-header">
+        <img src="/toolbar/small/eraser.svg" alt="" />
+        <h2>Eraser</h2>
+        <button class="protect-panel-close" type="button" aria-label="Close eraser properties" onclick={() => activeTool = 'select'}><span></span><span></span></button>
+      </header>
+      <div class="selection-properties-scroll">
+        <section class="selection-property-section drawing-property-section" aria-label="Eraser">
+          <label class="inspector-field inspector-field-wide"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => eraserSize = value, { min: 4, max: 200 })}>Size</span><input class="scrubbable-number" type="number" min="4" max="200" step="1" value={eraserSize} onpointerdown={(event) => startNumberScrub(event, (value) => eraserSize = value, { min: 4, max: 200 })} oninput={(event) => eraserSize = clamp(Number(event.currentTarget.value), 4, 200)} /></label>
+          <button class:active={eraserQuickErase} class="drawing-toggle" type="button" title="Erase every stroke drawn together with the one you touch" onclick={() => eraserQuickErase = !eraserQuickErase}><span>Quick Erase</span><em>{eraserQuickErase ? 'On' : 'Off'}</em></button>
+        </section>
+      </div>
+    </div>
+  {/if}
   {#if ['highlight', 'underline', 'crossout'].includes(activeTool)}
     {@const textMarkPanelType = /** @type {'highlight' | 'underline' | 'crossout'} */ (activeTool)}
     {@const textMarkPanelLabel = textMarkPanelType === 'crossout' ? 'Crossout' : textMarkPanelType[0].toUpperCase() + textMarkPanelType.slice(1)}
@@ -9555,7 +10084,7 @@
   {#if activeTool === 'select' && pdfTextSelection}
     <div class="protect-panel selection-properties-panel text-selection-panel" role="dialog" aria-label="Selected text properties" transition:fly={{ x: 18, duration: 240, easing: cubicOut }}>
       <header class="protect-panel-header">
-        <img src="/toolbar/small/select.svg" alt="" />
+        <img src="/redesign/vector609.svg" alt="" />
         <h2>Select</h2>
         <button class="protect-panel-close" type="button" aria-label="Close text properties" onclick={() => { pdfTextSelection = null; window.getSelection()?.removeAllRanges(); }}><span></span><span></span></button>
       </header>
@@ -9608,7 +10137,7 @@
       transition:fly={{ x: 18, duration: 240, easing: cubicOut }}
     >
       <header class="protect-panel-header">
-        <img src="/toolbar/small/select.svg" alt="" />
+        <img src="/redesign/vector609.svg" alt="" />
         <h2>{inspectedObjects.length > 1 ? `${inspectedObjects.length} Selected` : 'Select'}</h2>
         <button class="protect-panel-close" type="button" aria-label="Close properties" onclick={closeSelectionPanel}>
           <span></span><span></span>
@@ -9623,9 +10152,9 @@
             <label class="inspector-field"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectionGeometry('height', value), { min: 1 })}>H</span><input class="scrubbable-number" bind:this={inspectorHeightInput} type="number" min="1" step="1" value={Math.round(inspectedFrame.height)} onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectionGeometry('height', value), { min: 1 })} oninput={(event) => updateSelectionGeometry('height', Number(event.currentTarget.value))} /></label>
           </section>
           <section class="selection-property-section appearance-section" aria-label="Appearance">
-            <label class="inspector-field opacity-field"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectedShapes({ opacity: value / 100 }), { min: 0, max: 100 })}>Opacity</span><input class="scrubbable-number" type="number" min="0" max="100" step="1" value={Math.round((inspectedObject.opacity ?? 1) * 100)} onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectedShapes({ opacity: value / 100 }), { min: 0, max: 100 })} oninput={(event) => updateSelectedShapes({ opacity: clamp(Number(event.currentTarget.value) / 100, 0, 1) })} /><em>%</em></label>
+            <label class="inspector-field opacity-field"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectedShapes({ opacity: value }), { step: 0.01, min: 0, max: 1 })}>Opacity</span><input class="scrubbable-number" type="number" min="0" max="1" step="0.01" value={Math.round((inspectedObject.opacity ?? 1) * 100) / 100} onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectedShapes({ opacity: value }), { step: 0.01, min: 0, max: 1 })} oninput={(event) => updateSelectedShapes({ opacity: clamp(Number(event.currentTarget.value), 0, 1) })} /></label>
             <label class="inspector-field corner-field"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectedShapes({ cornerRadius: value * 10 }), { min: 0 })}>Corner</span><input class="scrubbable-number" type="number" min="0" step="1" value={Math.round((inspectedObject.cornerRadius ?? 0) / 10)} onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectedShapes({ cornerRadius: value * 10 }), { min: 0 })} oninput={(event) => updateSelectedShapes({ cornerRadius: Math.max(0, Number(event.currentTarget.value) * 10) })} /></label>
-            <label class="inspector-field inspector-field-wide"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectionGeometry('rotation', value))}>Rotation</span><input class="scrubbable-number" bind:this={inspectorRotationInput} type="number" step="1" value={Math.round(inspectedObjects.length === 1 ? inspectedObject.rotation : (multiSelectionFrame?.rotation ?? 0))} onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectionGeometry('rotation', value))} oninput={(event) => updateSelectionGeometry('rotation', Number(event.currentTarget.value))} /><em>°</em></label>
+            <label class="inspector-field inspector-field-wide"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectionGeometry('rotation', value))}>Rotation</span><span class="rotation-field-value">{#if Math.round(inspectedObjects.length === 1 ? inspectedObject.rotation : (multiSelectionFrame?.rotation ?? 0)) > 0}<b class="rotation-sign">+</b>{/if}<input class="scrubbable-number" bind:this={inspectorRotationInput} type="number" step="1" value={Math.round(inspectedObjects.length === 1 ? inspectedObject.rotation : (multiSelectionFrame?.rotation ?? 0))} onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectionGeometry('rotation', value))} oninput={(event) => updateSelectionGeometry('rotation', Number(event.currentTarget.value))} /></span></label>
           </section>
         {/if}
         {#if inspectedObjects.length === 1 && inspectedObject.type === 'textfield'}
@@ -9695,7 +10224,7 @@
         <section class="selection-property-section object-properties" aria-label="Object properties">
           {#if shapeHasFill(inspectedObject)}
             <div class:property-disabled={!shapePropertyEnabled(inspectedObject, 'fill')} class="object-property-row color-property-row">
-              <button class="property-visibility" type="button" aria-label="Toggle fill" aria-pressed={shapePropertyEnabled(inspectedObject, 'fill')} onclick={() => toggleShapeProperty('fill')}><img src={shapePropertyEnabled(inspectedObject, 'fill') ? '/eye.svg' : '/eye-off.svg'} alt="" /></button>
+              <button class="property-visibility" type="button" aria-label="Toggle fill" aria-pressed={shapePropertyEnabled(inspectedObject, 'fill')} onclick={() => toggleShapeProperty('fill')}><img src={shapePropertyEnabled(inspectedObject, 'fill') ? '/redesign/eye.svg' : '/redesign/eye-off.svg'} alt="" /></button>
               <span class="property-name">Fill</span>
               <input class="property-hex" aria-label="Fill color hex" value={(inspectedObject.fillColor ?? '#FF4D55').replace('#', '').toUpperCase()} oninput={(event) => updateSelectedColor('fillColor', event.currentTarget.value)} />
               <button class="property-color" type="button" aria-label="Open fill color picker" class:active={colorPicker?.property === 'fillColor'} style:--property-color={shapeFill(inspectedObject)} onclick={() => openColorPicker('fillColor')}></button>
@@ -9703,7 +10232,7 @@
           {/if}
           {#if shapeSupportsStroke(inspectedObject)}
             <div class:property-disabled={!shapePropertyEnabled(inspectedObject, 'stroke')} class="object-property-row stroke-property-row">
-              <button class="property-visibility" type="button" aria-label="Toggle stroke" aria-pressed={shapePropertyEnabled(inspectedObject, 'stroke')} onclick={() => toggleShapeProperty('stroke')}><img src={shapePropertyEnabled(inspectedObject, 'stroke') ? '/eye.svg' : '/eye-off.svg'} alt="" /></button>
+              <button class="property-visibility" type="button" aria-label="Toggle stroke" aria-pressed={shapePropertyEnabled(inspectedObject, 'stroke')} onclick={() => toggleShapeProperty('stroke')}><img src={shapePropertyEnabled(inspectedObject, 'stroke') ? '/redesign/eye.svg' : '/redesign/eye-off.svg'} alt="" /></button>
               <span class="property-name scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectedShapes({ strokeWidth: value }), { step: 0.05, min: 0 })}>Stroke</span>
               <input class="property-number scrubbable-number" type="number" min="0" step="0.25" aria-label="Stroke width" value={inspectedObject.strokeWidth ?? (shapeHasFill(inspectedObject) ? 1.35 : 1.4)} onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectedShapes({ strokeWidth: value }), { step: 0.05, min: 0 })} oninput={(event) => updateSelectedShapes({ strokeWidth: Math.max(0, Number(event.currentTarget.value)) })} />
               <input class="property-hex" aria-label="Stroke color hex" value={(inspectedObject.strokeColor ?? (shapeHasFill(inspectedObject) ? '#DE3542' : '#FF4D55')).replace('#', '').toUpperCase()} oninput={(event) => updateSelectedColor('strokeColor', event.currentTarget.value)} />
@@ -9789,6 +10318,9 @@
         </div>
       </div>
     </div>
+  {/if}
+  {#if translatePanelOpen && active}
+    <TranslateFilesPanel placement="editor" onClose={closeTranslatePanel} onTranslate={translateDocument} />
   {/if}
   {#if watermarkPanelOpen}
     <div
@@ -9934,11 +10466,11 @@
   {#if commentMode && commentDraft}
     {@const thread = commentDraft.threadId !== null ? findComment(commentDraft.threadId, [comments, pdfComments]) : null}
     {@const isEditing = commentDraft.editingId !== null}
-    {@const isNew = !thread && !isEditing}
+    {@const isReply = Boolean(thread) && !isEditing}
+    {@const canEdit = Boolean(thread) && !thread?.comment.existing}
     {@const panelTitle = isEditing ? 'Edit Comment' : thread ? 'Comment' : 'New Comment'}
     <div
       class="protect-panel comment-panel"
-      class:editing={isEditing}
       role="dialog"
       aria-label={panelTitle}
       transition:fly={{ x: 18, duration: 240, easing: cubicOut }}
@@ -9951,60 +10483,52 @@
           <span></span>
         </button>
       </header>
-      <form class="comment-panel-content" onsubmit={(event) => { event.preventDefault(); saveCommentDraft(); }}>
-        <div class="comment-panel-body">
-          {#if thread && !isEditing}
-            <div class="comment-thread">
-              <article class="comment-thread-entry">
-                <header>
-                  <strong>{thread.comment.author || 'Unknown'}</strong>
-                  {#if thread.comment.createdAt}<time>{formatCommentDate(thread.comment.createdAt)}</time>{/if}
+      <form class="cmt" onsubmit={(event) => { event.preventDefault(); saveCommentDraft(); }}>
+        {#if isReply && thread}
+          <section class="cmt-section cmt-thread">
+            {#each [thread.comment, ...commentThreadReplies(thread.comment, thread.pageIndex, commentReplies)] as entry, entryIndex}
+              <article class="cmt-entry">
+                <header class="cmt-meta">
+                  <span class="cmt-author">{entry.author || 'Unknown'}</span>
+                  {#if entry.createdAt}<time>{formatCommentDate(entry.createdAt)}</time>{/if}
                 </header>
-                <p>{thread.comment.text}</p>
-                {#if thread.comment.quote}<p class="comment-quote">“{thread.comment.quote}”</p>{/if}
-                {#if !thread.comment.existing}
-                  <div class="comment-thread-tools">
-                    <button type="button" onclick={startEditingComment}>Edit</button>
-                    <button type="button" class="danger" onclick={deleteDraftComment}>Delete</button>
-                  </div>
-                {/if}
+                <p class="cmt-text">{entry.text}</p>
+                {#if entryIndex === 0 && thread.comment.quote}<p class="cmt-quote">{thread.comment.quote}</p>{/if}
               </article>
-              {#each commentThreadReplies(thread.comment, thread.pageIndex, commentReplies) as reply}
-                <article class="comment-thread-entry reply">
-                  <header>
-                    <strong>{reply.author || 'Unknown'}</strong>
-                    {#if reply.createdAt}<time>{formatCommentDate(reply.createdAt)}</time>{/if}
-                  </header>
-                  <p>{reply.text}</p>
-                </article>
-              {/each}
-            </div>
-          {:else if commentDraft.quote}
-            <p class="comment-quote">“{commentDraft.quote}”</p>
-          {:else if isNew}
-            <p class="comment-hint">Page {commentDraft.pageIndex + 1}. Select text to comment on it instead.</p>
-          {/if}
-          <textarea
-            bind:this={commentInput}
-            bind:value={commentDraft.text}
-            placeholder={thread && !isEditing ? 'Write a reply…' : 'Write a comment…'}
-            aria-label={thread && !isEditing ? 'Reply' : 'Comment'}
-            rows={thread && !isEditing ? 2 : 4}
-            onkeydown={handleCommentKeydown}
-          ></textarea>
-          <label class="comment-author-row">
-            <span>Name</span>
-            <input bind:value={commentAuthor} placeholder="Docuflex" aria-label="Comment author" autocomplete="name" onkeydown={handleCommentKeydown} />
-          </label>
-        </div>
-        <footer class="comment-actions">
+            {/each}
+          </section>
+        {:else if commentDraft.quote}
+          <section class="cmt-section">
+            <p class="cmt-quote">{commentDraft.quote}</p>
+          </section>
+        {/if}
+        <section class="cmt-section cmt-compose">
+          <div class="cmt-field cmt-field-text" class:reply={isReply}>
+            <textarea
+              bind:this={commentInput}
+              bind:value={commentDraft.text}
+              placeholder={isReply ? 'Reply' : 'Comment'}
+              aria-label={isReply ? 'Reply' : 'Comment'}
+              onkeydown={handleCommentKeydown}
+            ></textarea>
+          </div>
+          <div class="cmt-field">
+            <input bind:value={commentAuthor} placeholder="Name" aria-label="Your name" autocomplete="name" onkeydown={handleCommentKeydown} />
+          </div>
+        </section>
+        <footer class="cmt-actions">
           {#if isEditing}
-            <button class="signature-action secondary" type="button" onclick={() => { if (commentDraft) commentDraft = { ...commentDraft, editingId: null, text: '' }; }}>Cancel</button>
+            <button class="cmt-button" type="button" onclick={() => { if (commentDraft) commentDraft = { ...commentDraft, editingId: null, text: '' }; }}>Cancel</button>
+            <button class="cmt-button primary" type="submit" disabled={!commentDraft.text.trim()}>Save</button>
+          {:else if isReply}
+            {#if canEdit}
+              <button class="cmt-button" type="button" onclick={startEditingComment}>Edit</button>
+              <button class="cmt-button danger" type="button" onclick={deleteDraftComment}>Delete</button>
+            {/if}
+            <button class="cmt-button primary" type="submit" disabled={!commentDraft.text.trim()}>Reply</button>
+          {:else}
+            <button class="cmt-button primary" type="submit" disabled={!commentDraft.text.trim()}>Add Comment</button>
           {/if}
-          <button class="signature-action primary" type="submit" disabled={!commentDraft.text.trim()}>
-            <img src="/comments.svg" alt="" />
-            <span>{isEditing ? 'Save' : thread ? 'Reply' : 'Add Comment'}</span>
-          </button>
         </footer>
       </form>
     </div>
@@ -10014,41 +10538,34 @@
     {@const neutral = RASTER_DEFAULTS[key]}
     {@const position = (value - min) / (max - min)}
     {@const origin = (neutral - min) / (max - min)}
-    <div class="raster-slider" class:changed={value !== neutral}>
-      <div class="raster-slider-label">
-        <span>{label}</span>
-        <button
-          type="button"
-          aria-label={`Reset ${label}`}
-          title="Reset"
-          disabled={value === neutral}
-          onclick={() => resetRasterValue(key)}
-        >{display ?? `${value > 0 && min < 0 ? '+' : ''}${value}`}</button>
-      </div>
-      <div
-        class={`raster-track ${track}`}
-        style:--raster-position={`${position * 100}%`}
-        style:--raster-fill-start={`${Math.min(position, origin) * 100}%`}
-        style:--raster-fill-end={`${(1 - Math.max(position, origin)) * 100}%`}
-        style:--raster-hue={`hsl(${(value + 360) % 360} 92% 55%)`}
-        style:--raster-temp={value >= 0 ? `color-mix(in srgb, #ff9a3c ${value}%, #ffffff)` : `color-mix(in srgb, #4a8dff ${-value}%, #ffffff)`}
-        style:--raster-exposure={`hsl(0 0% ${50 + value * 0.5}%)`}
-      >
-        <span class="raster-track-fill" aria-hidden="true"></span>
-        {#if min < 0}<span class="raster-track-origin" aria-hidden="true"></span>{/if}
-        <input
-          type="range"
-          aria-label={label}
-          {min}
-          {max}
-          {step}
-          {value}
-          disabled={rasterizing}
-          ondblclick={() => resetRasterValue(key)}
-          oninput={(event) => setRasterValue(key, Number(event.currentTarget.value))}
-        />
-      </div>
-    </div>
+    <!-- The whole 48px field is the slider: drag anywhere, double-click to reset. -->
+    <label
+      class={`raster-slider ${track}`}
+      class:changed={value !== neutral}
+      style:--raster-position={`${position * 100}%`}
+      style:--raster-fill-start={`${Math.min(position, origin) * 100}%`}
+      style:--raster-fill-end={`${(1 - Math.max(position, origin)) * 100}%`}
+      style:--raster-hue={`hsl(${(value + 360) % 360} 92% 55% / 0.28)`}
+      style:--raster-temp={value >= 0 ? 'rgba(255, 154, 60, 0.28)' : 'rgba(61, 134, 255, 0.24)'}
+    >
+      <span class="raster-fill" aria-hidden="true"></span>
+      {#if min < 0}<span class="raster-origin" aria-hidden="true"></span>{/if}
+      <span class="raster-handle" aria-hidden="true"></span>
+      <span class="raster-label">{label}</span>
+      <input
+        type="range"
+        aria-label={label}
+        aria-valuetext={display ?? `${value > 0 && min < 0 ? '+' : ''}${value}`}
+        title="Double-click to reset"
+        {min}
+        {max}
+        {step}
+        {value}
+        disabled={rasterizing}
+        ondblclick={() => resetRasterValue(key)}
+        oninput={(event) => setRasterValue(key, Number(event.currentTarget.value))}
+      />
+    </label>
   {/snippet}
   {#if rasterPanelOpen}
     {@const sharpKernel = rasterPipeline.sharpen}
@@ -10095,14 +10612,6 @@
       </header>
       <div class="raster-panel-content">
         <div class="raster-scroll">
-          <p class="raster-scope">
-            {#if selectedPages.size}
-              Applies to <strong>{selectedPages.size} selected {selectedPages.size === 1 ? 'page' : 'pages'}</strong>.
-            {:else}
-              Applies to <strong>all {pageCount} {pageCount === 1 ? 'page' : 'pages'}</strong>. Select pages in the sidebar to limit it.
-            {/if}
-          </p>
-
           <section class="raster-section" aria-label="Rotation">
             {@render rasterSlider('rotation', 'Rotation', -45, 45, 0.5, 'rotation-track', `${rasterAdjust.rotation > 0 ? '+' : ''}${rasterAdjust.rotation}°`)}
             <button
@@ -10391,13 +10900,15 @@
 
 <style>
   .editor-sidebar {
+    position: relative;
+    z-index: 2;
     grid-column: 1;
     grid-row: 2;
     min-height: 0;
     overflow-y: auto;
-    background: #f1f1f1;
-    border-right: 1px solid #cfcfcf;
-    box-shadow: inset -11px 0 25px rgba(0, 0, 0, 0.03);
+    background: #efefef;
+    border-right: 1px solid #c7c7c7;
+    box-shadow: 0 0 98.6px rgba(0, 0, 0, 0.06);
     scrollbar-width: none;
   }
 
@@ -10409,12 +10920,12 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 30px 32px 70px;
+    padding: 86px 20.5px 70px;
   }
 
   .thumbnail-entry {
     position: relative;
-    width: 244px;
+    width: 268px;
     transition: opacity 120ms ease, visibility 120ms ease;
   }
 
@@ -10467,12 +10978,12 @@
     position: relative;
     display: block;
     box-sizing: content-box;
-    width: 244px;
+    width: 266px;
     min-height: 120px;
     padding: 0;
     overflow: visible;
     border: 1px solid #dadada;
-    border-radius: 10px;
+    border-radius: 8px;
     background: #fff;
     box-shadow: 3px 8px 16px rgba(0, 0, 0, 0.05);
     cursor: pointer;
@@ -10491,14 +11002,19 @@
   .thumbnail-page.page-selected,
   .thumbnail-page.page-selected:hover,
   .thumbnail-page.page-selected:active {
-    border: 2px solid #529dff;
-    box-shadow: 2px 6px 15px rgba(82, 157, 255, 0.16);
+    border-color: #bbb;
+    box-shadow: 4px 4px 3px rgba(43, 43, 43, 0.1);
   }
 
   .thumbnail-page canvas {
     display: block;
-    width: 244px;
-    border-radius: 9px;
+    width: 266px;
+    border-radius: 7px;
+    transition: opacity 170ms ease;
+  }
+
+  .thumbnail-list.has-page-selection .thumbnail-page:not(.page-selected) canvas {
+    opacity: 0.75;
   }
 
   .thumbnail-watermark {
@@ -10525,55 +11041,66 @@
   .page-pill {
     position: absolute;
     z-index: 2;
-    top: -17px;
+    top: -16px;
     left: 50%;
     display: grid;
     place-items: center;
-    min-width: 54px;
-    height: 32px;
-    padding: 0 10px;
-    border: 1px solid #d5d5d5;
-    border-radius: 999px;
-    background: #e8e8e8;
-    color: #747474;
-    font-family: Geist, Inter, sans-serif;
-    font-size: 18px;
+    box-sizing: border-box;
+    min-width: 51px;
+    height: 29px;
+    padding: 0 8px;
+    border: 1px solid rgba(0, 0, 0, 0.07);
+    border-radius: 41px;
+    background: rgba(255, 255, 255, 0.5);
+    box-shadow: 0 0 40.5px rgba(255, 255, 255, 0.59);
+    color: rgba(0, 0, 0, 0.5);
+    font-family: "Geist Variable", Geist, Inter, sans-serif;
+    font-size: 20px;
     font-weight: 400;
     line-height: 1;
+    letter-spacing: -0.2px;
+    white-space: nowrap;
     transform: translateX(-50%);
+    backdrop-filter: blur(1.8px);
+    -webkit-backdrop-filter: blur(1.8px);
     -webkit-font-smoothing: antialiased;
+  }
+
+  .thumbnail-page.page-selected .page-pill {
+    border-color: rgba(0, 0, 0, 0.17);
   }
 
   .page-separator {
     position: relative;
     width: 100%;
-    height: 46.2px;
+    height: 48px;
     margin: 0;
   }
 
   .page-separator::before {
     position: absolute;
-    top: 20px;
-    right: 0;
-    left: 0;
-    height: 1.2px;
-    background: #d5d5d5;
+    top: 21px;
+    right: 7px;
+    left: 6px;
+    height: 1px;
+    border-radius: 1px;
+    background: rgba(129, 129, 129, 0.26);
     content: '';
-    transition: height 140ms ease, background-color 140ms ease, box-shadow 140ms ease;
+    transition: height 140ms ease, background 140ms ease;
   }
 
   .page-separator::after {
     position: absolute;
-    top: 20.6px;
+    top: 21.5px;
     left: 50%;
     box-sizing: border-box;
-    width: 24px;
-    height: 24px;
-    border-radius: 999px;
+    width: 26px;
+    height: 26px;
+    border: 1px solid #0073ff;
+    border-radius: 30px;
     background:
-      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M5 11h14M12 4v14' fill='none' stroke='white' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E") center / 24px 24px no-repeat,
-      #1684f8;
-    box-shadow: 0 2px 7px rgba(22, 132, 248, 0.28);
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M5 12h14M12 5v14' fill='none' stroke='white' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E") center / 24px 24px no-repeat,
+      radial-gradient(circle 13px at center, #0053b9 0%, #0976fa 100%);
     content: '';
     opacity: 0;
     pointer-events: none;
@@ -10582,9 +11109,9 @@
   }
 
   .page-separator.pdf-drop-target::before {
+    top: 20.5px;
     height: 2px;
-    background: #1684f8;
-    box-shadow: 0 0 0 0.5px rgba(22, 132, 248, 0.12);
+    background: linear-gradient(90deg, #0073ff 0, #0073ff calc(50% - 13px), transparent calc(50% - 13px), transparent calc(50% + 12px), #0073ff calc(50% + 12px));
   }
 
   .page-separator.pdf-drop-target::after {
@@ -10596,30 +11123,32 @@
     position: fixed;
     z-index: 70;
     box-sizing: border-box;
-    width: 204px;
-    padding: 5px;
-    border: 1px solid rgba(0, 0, 0, 0.18);
+    width: 206px;
+    padding: 4px 5px;
+    border: 1px solid rgba(0, 0, 0, 0.15);
     border-radius: 15px;
-    background: rgba(255, 255, 255, 0.78);
-    box-shadow: 0 7px 18px rgba(0, 0, 0, 0.11), 0 2px 5px rgba(0, 0, 0, 0.05);
-    backdrop-filter: blur(18px);
-    -webkit-backdrop-filter: blur(18px);
+    background: rgba(255, 255, 255, 0.75);
+    box-shadow: 0 0 100px rgba(0, 0, 0, 0.08);
+    backdrop-filter: blur(4.05px);
+    -webkit-backdrop-filter: blur(4.05px);
     transform-origin: top left;
   }
 
   .page-menu-item {
     display: grid;
-    grid-template-columns: 28px 1fr 28px;
+    grid-template-columns: 28px 1fr 26px;
     align-items: center;
+    box-sizing: border-box;
     width: 100%;
-    height: 40px;
-    padding: 0 7px;
+    height: 39px;
+    padding: 0 5px 0 6px;
     border: 1px solid transparent;
     border-radius: 10px;
     background: transparent;
-    color: #3f3f3f;
-    font-family: Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    font-size: 18px;
+    color: rgba(0, 0, 0, 0.75);
+    font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 20px;
+    letter-spacing: -0.2px;
     text-align: left;
     cursor: pointer;
     transition:
@@ -10631,11 +11160,10 @@
 
   .page-menu-item:hover:not(:disabled),
   .page-menu-item:focus-visible {
-    border-color: rgba(0, 0, 0, 0.07);
-    background: rgba(234, 234, 234, 0.62);
-    color: #111;
+    border-color: rgba(0, 0, 0, 0.08);
+    background: rgba(107, 107, 107, 0.05);
+    color: #000;
     outline: none;
-    transform: translateX(1px);
   }
 
   .page-menu-item img {
@@ -10643,17 +11171,28 @@
     width: 20px;
     height: 20px;
     object-fit: contain;
-    transform: translateX(-2px);
     transition: filter 180ms cubic-bezier(0.2, 0.7, 0.2, 1), opacity 180ms ease;
   }
 
   .page-menu-item.rotate-right img {
-    transform: translateX(-2px) scaleX(-1);
+    transform: scaleX(-1);
   }
 
   .page-menu-item.export-page img {
     width: 24px;
     height: 24px;
+    margin-left: -2px;
+    transform: scaleX(-1);
+  }
+
+  .page-menu-item:nth-child(4) img {
+    width: 19px;
+  }
+
+  .page-menu-item:nth-child(5) img {
+    width: 22px;
+    height: 22px;
+    margin-left: -1px;
   }
 
   .page-menu-item:hover:not(:disabled):not(.delete-page) img,
@@ -10664,35 +11203,36 @@
   .page-menu-item kbd {
     display: grid;
     place-items: center;
-    width: 28px;
-    height: 28px;
-    border: 1px solid rgba(0, 0, 0, 0.04);
-    border-radius: 7px;
-    background: rgba(0, 0, 0, 0.045);
-    color: rgba(0, 0, 0, 0.22);
+    box-sizing: border-box;
+    width: 26px;
+    height: 27px;
+    border: 1px solid rgba(0, 0, 0, 0.015);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.025);
+    color: rgba(0, 0, 0, 0.165);
     font-family: inherit;
-    font-size: 17px;
+    font-size: 20px;
+    letter-spacing: 0;
     transition: color 180ms ease, background-color 180ms ease, border-color 180ms ease;
   }
 
   .page-menu-item:hover:not(:disabled) kbd,
   .page-menu-item:focus-visible:not(:disabled) kbd {
-    border-color: rgba(0, 0, 0, 0.06);
-    background: rgba(0, 0, 0, 0.065);
-    color: rgba(0, 0, 0, 0.34);
+    border-color: rgba(0, 0, 0, 0.02);
+    background: rgba(0, 0, 0, 0.055);
   }
 
   .page-menu-item:disabled {
-    color: rgba(63, 63, 63, 0.34);
+    color: rgba(0, 0, 0, 0.3);
     cursor: default;
   }
 
   .page-menu-item:disabled img {
-    opacity: 0.32;
+    opacity: 0.55;
   }
 
   .page-menu-item.delete-page:not(:disabled) {
-    color: #ff2f38;
+    color: rgba(255, 0, 0, 0.85);
   }
 
   .pdf-workspace {
@@ -10702,27 +11242,32 @@
     min-width: 0;
     min-height: 0;
     overflow: hidden;
-    background: #f5f5f5;
+    background:
+      linear-gradient(90deg, rgba(0, 0, 0, 0.045) 1px, transparent 1px) 58px 122px / 140px 140px,
+      linear-gradient(180deg, rgba(0, 0, 0, 0.045) 1px, transparent 1px) 58px 122px / 140px 140px,
+      #e2e2e2;
   }
 
   .protect-panel {
     position: absolute;
     z-index: 40;
-    top: 20px;
-    right: 18px;
+    top: 12px;
+    right: 13px;
     display: grid;
     grid-template-rows: 50px 1fr;
     box-sizing: border-box;
-    width: min(320px, calc(100% - 36px));
+    width: min(320px, calc(100% - 26px));
     height: 392px;
-    max-height: calc(100% - 40px);
+    max-height: calc(100% - 24px);
     overflow: hidden;
-    border: 1.5px solid #c5c5c5;
-    border-radius: 13px;
-    background: #fafafa;
-    box-shadow: 0 9px 24px rgba(0, 0, 0, 0.07);
+    border: 1.5px solid #c3c2c2;
+    border-radius: 21px;
+    background: rgba(240, 236, 236, 0.75);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
     color: #000;
-    font-family: "Inter Variable", Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    backdrop-filter: blur(1.3px);
+    -webkit-backdrop-filter: blur(1.3px);
     font-size: 16px;
     transition: height 300ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 200ms ease;
     -webkit-font-smoothing: antialiased;
@@ -10757,8 +11302,9 @@
   }
 
   .protect-panel.selection-properties-panel {
+    width: min(293px, calc(100% - 26px));
     height: auto;
-    max-height: calc(100% - 40px);
+    max-height: calc(100% - 24px);
   }
 
   .protect-panel.text-selection-panel {
@@ -10946,19 +11492,38 @@
   }
 
   .selection-property-section {
-    padding: 16px 18px;
-    border-bottom: 1px solid #d7d7d7;
+    padding: 15px 11px 15px 12px;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+  }
+
+  .selection-property-section.geometry-section {
+    padding-top: 12px;
+    padding-bottom: 16px;
+  }
+
+  .selection-property-section.appearance-section {
+    padding-top: 14px;
+    padding-bottom: 16px;
   }
 
   .geometry-section,
   .appearance-section {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 9px 14px;
+    gap: 11px 8px;
   }
 
   .appearance-section {
-    grid-template-columns: minmax(0, 1.08fr) minmax(0, 0.92fr);
+    grid-template-columns: minmax(0, 154fr) minmax(0, 106fr);
+    gap: 10px;
+  }
+
+  .appearance-section .inspector-field {
+    padding: 0 10px 0 12px;
+  }
+
+  .appearance-section .inspector-field input {
+    padding-left: 4px;
   }
 
   .inspector-field {
@@ -10967,13 +11532,14 @@
     align-items: center;
     box-sizing: border-box;
     min-width: 0;
-    height: 39px;
-    padding: 0 10px;
-    border: 1px solid #d7d7d7;
-    border-radius: 8px;
-    background: #f3f3f3;
-    color: #7a7a7a;
-    font-size: 18px;
+    height: 48px;
+    padding: 0 12px 0 13px;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 15px;
+    background: #fff;
+    color: rgba(0, 0, 0, 0.5);
+    font-size: 21px;
+    letter-spacing: -0.21px;
     transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
   }
 
@@ -10987,14 +11553,18 @@
     grid-column: 1 / -1;
   }
 
+  .appearance-section .inspector-field {
+    height: 49px;
+  }
+
   .inspector-field input {
     min-width: 0;
     width: 100%;
-    padding: 0 0 0 7px;
+    padding: 0 0 0 6px;
     border: 0;
     outline: 0;
     background: transparent;
-    color: #111;
+    color: rgba(0, 0, 0, 0.75);
     font: inherit;
     appearance: textfield;
     -moz-appearance: textfield;
@@ -11014,13 +11584,33 @@
   }
 
   .inspector-field em {
-    color: #7a7a7a;
+    color: rgba(0, 0, 0, 0.5);
     font-style: normal;
+  }
+
+  .rotation-field-value {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    padding-left: 6px;
+    color: rgba(0, 0, 0, 0.75);
+  }
+
+  .rotation-sign {
+    font-weight: inherit;
+  }
+
+  .inspector-field .rotation-field-value input {
+    padding-left: 0;
+  }
+
+  .selection-properties-scroll > .selection-property-section:last-child {
+    border-bottom: 0;
   }
 
   .object-properties {
     display: grid;
-    gap: 9px;
+    gap: 10px;
   }
 
   .typography-section {
@@ -11175,22 +11765,23 @@
 
   .object-property-row {
     display: grid;
-    grid-template-columns: 37px auto minmax(0, 1fr) 38px;
+    grid-template-columns: 47px 92px minmax(0, 1fr) 38px;
     align-items: center;
     box-sizing: border-box;
-    min-height: 39px;
+    min-height: 49px;
     overflow: hidden;
-    border: 1px solid #d7d7d7;
-    border-radius: 8px;
-    background: #f3f3f3;
-    color: #111;
-    font-size: 18px;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 15px;
+    background: #fff;
+    color: rgba(0, 0, 0, 0.75);
+    font-size: 21px;
+    letter-spacing: -0.21px;
     transition: opacity 160ms ease, border-color 160ms ease, background-color 160ms ease;
   }
 
   .object-property-row:focus-within {
-    border-color: #bfc8d2;
-    background: #f7f7f7;
+    border-color: rgba(0, 0, 0, 0.18);
+    background: #fff;
   }
 
   .object-property-row.property-disabled > :not(.property-visibility):not(.property-remove) {
@@ -11210,14 +11801,15 @@
 
   .property-visibility {
     position: relative;
-    border-right: 1px solid #d7d7d7;
-    opacity: 0.82;
+    justify-items: start;
+    padding-left: 12px;
+    opacity: 1;
     transition: opacity 170ms ease, transform 190ms cubic-bezier(0.22, 1, 0.36, 1);
   }
 
   .property-visibility img {
-    width: 24px;
-    height: 24px;
+    width: 26px;
+    height: 22px;
     transition: transform 190ms cubic-bezier(0.22, 1, 0.36, 1);
   }
 
@@ -11237,8 +11829,8 @@
   }
 
   .property-name {
-    padding-left: 10px;
-    color: #7a7a7a;
+    padding-left: 0;
+    color: rgba(0, 0, 0, 0.5);
     white-space: nowrap;
   }
 
@@ -11247,23 +11839,24 @@
     box-sizing: border-box;
     min-width: 0;
     width: 100%;
-    padding: 0 5px 0 8px;
+    padding: 0 4px 0 0;
     border: 0;
     outline: 0;
     background: transparent;
-    color: #111;
+    color: rgba(0, 0, 0, 0.75);
     font: inherit;
-    text-align: right;
+    letter-spacing: inherit;
+    text-align: left;
   }
 
   .property-color {
     display: block;
     box-sizing: border-box;
-    width: 24px;
-    height: 24px;
+    width: 25px;
+    height: 25px;
     padding: 0;
-    border: 1px solid rgba(0, 0, 0, 0.16);
-    border-radius: 8px;
+    border: 1px solid color-mix(in srgb, var(--property-color) 19%, transparent);
+    border-radius: 17px;
     background: var(--property-color);
     cursor: pointer;
     transition: box-shadow 150ms ease, transform 150ms ease;
@@ -11274,16 +11867,9 @@
     box-shadow: 0 0 0 2px #fff, 0 0 0 3.5px #1684f8;
   }
 
-  .stroke-property-row {
-    grid-template-columns: 37px 79px 48px minmax(0, 1fr) 38px;
-  }
-
+  /* The Figma panel shows only the colour; the width stays adjustable by dragging the "Stroke" label. */
   .stroke-property-row .property-number {
-    align-self: stretch;
-    padding: 0 4px;
-    border-left: 1px solid #d7d7d7;
-    border-right: 1px solid #d7d7d7;
-    text-align: center;
+    display: none;
   }
 
   .figma-color-picker {
@@ -11448,9 +12034,9 @@
     align-items: center;
     box-sizing: border-box;
     min-width: 0;
-    padding: 0 12px 0 12px;
-    border-bottom: 1px solid #cacaca;
-    background: #eeeeee;
+    padding: 0 14px 0 14px;
+    border-bottom: 1.5px solid #c3c2c2;
+    background: rgba(214, 214, 214, 0.75);
     height: 50px;
   }
 
@@ -11459,19 +12045,25 @@
     height: 24px;
   }
 
+  .selection-properties-panel .protect-panel-header {
+    grid-template-columns: 19px 1fr 28px;
+    padding-left: 17px;
+  }
+
   .selection-properties-panel .protect-panel-header > img {
-    width: 21px;
-    height: 21px;
+    width: 16.7px;
+    height: 18.2px;
+    margin: 1px 0 0 0.5px;
   }
 
   .protect-panel-header h2 {
-    margin: 0 0 0 7px;
+    margin: 0 0 0 8px;
     overflow: hidden;
     color: #000;
-    font-size: 18px;
+    font-size: 20px;
     font-weight: 400;
     line-height: 1.22;
-    letter-spacing: -0.25px;
+    letter-spacing: -0.2px;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -11494,12 +12086,12 @@
 
   .protect-panel-close span {
     position: absolute;
-    top: 13px;
+    top: 13.3px;
     left: 6px;
     width: 16px;
-    height: 1.5px;
+    height: 1.4px;
     border-radius: 999px;
-    background: #929292;
+    background: #9d9d9d;
     transform: rotate(45deg);
     transition: background-color 160ms ease;
   }
@@ -11510,6 +12102,19 @@
 
   .protect-panel-close:hover span {
     background: #000;
+  }
+
+  /* The redesign draws the cross as one SVG so its 1.4px strokes keep their weight. */
+  .protect-panel .protect-panel-close {
+    background: url('/redesign/panel-close.svg') center / 12.67px 12.67px no-repeat;
+  }
+
+  .protect-panel .protect-panel-close span {
+    display: none;
+  }
+
+  .protect-panel .protect-panel-close:hover {
+    filter: brightness(0);
   }
 
   .protect-panel-form {
@@ -11885,160 +12490,215 @@
     font-weight: 400;
   }
 
+  /* Comment panel: the same sectioned layout as Password Protect — 19px text,
+     17px secondary text, 48px fields and buttons, thin dividers. */
   .protect-panel.comment-panel {
     height: auto;
-    max-height: calc(100% - 40px);
     grid-template-rows: 50px minmax(0, 1fr);
+    font-size: 19px;
+    letter-spacing: -0.19px;
   }
 
-  .comment-panel-content {
-    display: grid;
-    grid-template-rows: minmax(0, 1fr) auto;
+  .cmt {
+    display: flex;
+    flex-direction: column;
     min-height: 0;
-    background: #fafafa;
   }
 
-  .comment-panel-body {
+  .cmt-section {
     display: grid;
-    gap: 12px;
+    gap: 10px;
+    flex: 0 0 auto;
+    padding: 15px 11px 15px 12px;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+  }
+
+  .cmt-thread {
+    flex: 0 1 auto;
+    gap: 0;
     min-height: 0;
-    padding: 16px 18px;
+    max-height: 340px;
+    padding-block: 4px;
     overflow-y: auto;
-    border-bottom: 1px solid #cacaca;
+    scrollbar-width: none;
   }
 
-  .comment-quote,
-  .comment-hint {
-    margin: 0;
-    color: #7a7a7a;
-    font-size: 16px;
-    line-height: 1.38;
-    letter-spacing: -0.2px;
+  .cmt-thread::-webkit-scrollbar {
+    display: none;
   }
 
-  .comment-quote {
-    display: -webkit-box;
-    max-height: 120px;
-    padding: 9px 12px;
+  .cmt-entry {
+    display: grid;
+    gap: 4px;
+    padding: 11px 2px;
+  }
+
+  .cmt-entry + .cmt-entry {
+    border-top: 1px solid rgba(0, 0, 0, 0.06);
+  }
+
+  .cmt-meta {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .cmt-author {
     overflow: hidden;
-    border: 1px solid #d7d7d7;
-    border-left: 3px solid #ffd60a;
-    border-radius: 8px;
-    background: #f3f3f3;
-    color: #3f3f3f;
+    color: #000;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .cmt-meta time {
+    flex: none;
+    color: rgba(0, 0, 0, 0.5);
+    font-size: 17px;
+    letter-spacing: -0.17px;
+  }
+
+  .cmt-text {
+    margin: 0;
+    color: rgba(0, 0, 0, 0.75);
+    line-height: 1.32;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .cmt-quote {
+    display: -webkit-box;
+    margin: 4px 0 0;
+    padding-left: 10px;
+    overflow: hidden;
+    border-left: 2px solid #ffd60a;
+    color: rgba(0, 0, 0, 0.5);
+    font-size: 17px;
+    line-height: 1.35;
+    letter-spacing: -0.17px;
     -webkit-line-clamp: 4;
     line-clamp: 4;
     -webkit-box-orient: vertical;
   }
 
-  .comment-panel-body textarea {
+  .cmt-section > .cmt-quote {
+    margin: 0;
+  }
+
+  .cmt-field {
+    display: grid;
+    box-sizing: border-box;
+    min-height: 48px;
+    overflow: hidden;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 15px;
+    background: #fff;
+    transition: border-color 150ms ease;
+  }
+
+  .cmt-field:focus-within {
+    border-color: rgba(0, 0, 0, 0.18);
+  }
+
+  .cmt-field input,
+  .cmt-field textarea {
     box-sizing: border-box;
     width: 100%;
-    min-height: 64px;
-    padding: 10px 12px;
-    border: 1px solid #d7d7d7;
-    border-radius: 8px;
-    outline: none;
-    background: #f3f3f3;
-    color: #000;
+    min-width: 0;
+    margin: 0;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: rgba(0, 0, 0, 0.75);
     font: inherit;
-    font-size: 18px;
-    line-height: 1.35;
-    letter-spacing: -0.25px;
-    resize: vertical;
-    transition: border-color 160ms ease, background-color 160ms ease;
+    letter-spacing: inherit;
   }
 
-  .comment-thread {
+  .cmt-field input {
+    height: 46px;
+    padding: 0 13px;
+  }
+
+  .cmt-field textarea {
+    display: block;
+    height: 110px;
+    padding: 12px 13px;
+    line-height: 1.32;
+    resize: none;
+  }
+
+  .cmt-field-text.reply textarea {
+    height: 78px;
+  }
+
+  .cmt-field input::placeholder,
+  .cmt-field textarea::placeholder {
+    color: rgba(0, 0, 0, 0.5);
+    opacity: 1;
+  }
+
+  .cmt-actions {
     display: grid;
-    max-height: 320px;
-    overflow-y: auto;
-    border: 1px solid #d7d7d7;
-    border-radius: 8px;
-    background: #f3f3f3;
-    scrollbar-width: thin;
+    grid-auto-columns: minmax(0, 1fr);
+    grid-auto-flow: column;
+    gap: 10px;
+    flex: 0 0 auto;
+    padding: 15px 11px 15px 12px;
   }
 
-  .comment-thread-entry {
-    display: grid;
-    gap: 4px;
-    padding: 10px 12px 11px;
-  }
-
-  .comment-thread-entry + .comment-thread-entry {
-    border-top: 1px solid #dedede;
-  }
-
-  .comment-thread-entry.reply {
-    padding-left: 24px;
-  }
-
-  .comment-thread-entry header {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 8px;
-  }
-
-  .comment-thread-entry strong {
+  .cmt-button {
+    box-sizing: border-box;
+    min-width: 0;
+    height: 48px;
+    padding: 0 12px;
     overflow: hidden;
-    color: #000;
-    font-size: 16px;
-    font-weight: 400;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 15px;
+    background: #fff;
+    color: rgba(0, 0, 0, 0.75);
+    font: inherit;
+    letter-spacing: inherit;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .comment-thread-entry time {
-    flex: none;
-    color: #9a9a9a;
-    font-size: 13px;
-  }
-
-  .comment-thread-entry p {
-    margin: 0;
-    color: #4a4a4a;
-    font-size: 16px;
-    line-height: 1.35;
-    letter-spacing: -0.2px;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-  }
-
-  .comment-thread-entry .comment-quote {
-    margin-top: 4px;
-    font-size: 15px;
-  }
-
-  .comment-thread-tools {
-    display: flex;
-    gap: 6px;
-    margin-top: 4px;
-  }
-
-  .comment-thread-tools button {
-    height: 28px;
-    padding: 0 10px;
-    border: 1px solid #d7d7d7;
-    border-radius: 7px;
-    background: #fafafa;
-    color: #4a4a4a;
-    font: inherit;
-    font-size: 14px;
     cursor: pointer;
-    transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
+    transition: border-color 150ms ease, color 150ms ease, background-color 150ms ease, transform 160ms ease;
   }
 
-  .comment-thread-tools button:hover {
-    border-color: #c8c8c8;
-    background: #eeeeee;
+  .cmt-button:hover:not(:disabled) {
+    border-color: rgba(0, 0, 0, 0.18);
     color: #000;
   }
 
-  .comment-thread-tools button.danger:hover {
-    border-color: #e3b4b4;
-    background: #fbeaea;
-    color: #c83e3e;
+  .cmt-button.danger {
+    color: #de3542;
+  }
+
+  .cmt-button.danger:hover:not(:disabled) {
+    border-color: rgba(222, 53, 66, 0.4);
+    color: #de3542;
+  }
+
+  .cmt-button.primary {
+    border-color: #111;
+    background: #111;
+    color: #fff;
+  }
+
+  .cmt-button.primary:hover:not(:disabled) {
+    border-color: #000;
+    background: #000;
+    color: #fff;
+  }
+
+  .cmt-button.primary:disabled {
+    border-color: #b4b4b4;
+    background: #b4b4b4;
+    cursor: default;
+  }
+
+  .cmt-button:active:not(:disabled) {
+    transform: scale(0.97);
   }
 
   .comment-tether-layer {
@@ -12055,61 +12715,6 @@
   .comment-tether-layer line.hovered {
     stroke: #0878f9;
     stroke-dasharray: none;
-  }
-
-  .comment-author-row {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    align-items: center;
-    min-height: 39px;
-    overflow: hidden;
-    border: 1px solid #d7d7d7;
-    border-radius: 8px;
-    background: #f3f3f3;
-    font-size: 18px;
-  }
-
-  .comment-author-row span {
-    padding-left: 12px;
-    color: #7a7a7a;
-  }
-
-  .comment-author-row input {
-    min-width: 0;
-    height: 37px;
-    padding: 0 12px;
-    border: 0;
-    outline: 0;
-    background: transparent;
-    color: #111;
-    font: inherit;
-    text-align: right;
-  }
-
-  .comment-panel-body textarea::placeholder {
-    color: #8a8a8a;
-  }
-
-  .comment-panel-body textarea:focus {
-    border-color: #b8b8b8;
-    background: #f7f7f7;
-  }
-
-  .comment-actions {
-    display: grid;
-    grid-auto-flow: column;
-    grid-auto-columns: minmax(0, 1fr);
-    gap: 10px;
-    padding: 17px 18px;
-  }
-
-  .comment-panel.editing .comment-actions {
-    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.4fr);
-  }
-
-  .comment-actions .signature-action.primary:disabled {
-    cursor: default;
-    opacity: 0.45;
   }
 
   .raster-filter-defs {
@@ -12153,7 +12758,6 @@
     grid-template-rows: minmax(0, 1fr) auto;
     min-height: 0;
     overflow: hidden;
-    background: #fafafa;
   }
 
   .raster-scroll {
@@ -12168,162 +12772,91 @@
     display: none;
   }
 
-  .raster-scope {
-    margin: 0;
-    padding: 14px 18px 13px;
-    border-bottom: 1px solid #dedede;
-    color: #7a7a7a;
-    font-size: 16px;
-    line-height: 1.38;
-    letter-spacing: -0.2px;
-  }
-
-  .raster-scope strong {
-    color: #000;
-    font-weight: 400;
-  }
-
   .raster-section {
     display: grid;
-    gap: 14px;
-    padding: 15px 18px 16px;
-    border-bottom: 1px solid #dedede;
+    gap: 10px;
+    padding: 15px 11px 15px 12px;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.1);
   }
 
   .raster-section:last-child {
     border-bottom: 0;
   }
 
+  /* Sliders are the panels' white 48px field; the fill runs from the neutral value to the current one. */
   .raster-slider {
-    display: grid;
-    gap: 8px;
-  }
-
-  .raster-slider-label {
+    position: relative;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    height: 22px;
-    color: #000;
-    font-size: 18px;
-    line-height: 1;
-    letter-spacing: -0.25px;
-  }
-
-  .raster-slider-label button {
-    min-width: 46px;
-    height: 24px;
-    padding: 0 7px;
-    border: 1px solid transparent;
-    border-radius: 7px;
-    background: transparent;
-    color: #7a7a7a;
-    font: inherit;
-    font-size: 16px;
-    font-variant-numeric: tabular-nums;
-    text-align: right;
-    cursor: pointer;
-    transition: color 160ms ease, background-color 160ms ease, border-color 160ms ease;
-  }
-
-  .raster-slider.changed .raster-slider-label button {
-    color: #0878f9;
-  }
-
-  .raster-slider-label button:not(:disabled):hover {
-    border-color: #d7d7d7;
-    background: #f3f3f3;
-  }
-
-  .raster-slider-label button:disabled {
-    cursor: default;
-  }
-
-  .raster-track {
-    position: relative;
     box-sizing: border-box;
-    height: 18px;
-    border-radius: 999px;
-    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
-    background: #f3f3f3;
+    height: 48px;
+    padding: 0 13px;
+    overflow: hidden;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 15px;
+    background: #fff;
+    color: rgba(0, 0, 0, 0.5);
+    font-size: 21px;
+    letter-spacing: -0.21px;
+    transition: border-color 160ms ease;
   }
 
-  .raster-track-fill {
+  .raster-slider:hover {
+    border-color: rgba(0, 0, 0, 0.16);
+  }
+
+  .raster-slider.changed {
+    color: rgba(0, 0, 0, 0.75);
+  }
+
+  .raster-label {
+    position: relative;
+    pointer-events: none;
+  }
+
+  .raster-fill {
     position: absolute;
-    top: 50%;
+    top: 0;
+    bottom: 0;
     left: var(--raster-fill-start);
     right: var(--raster-fill-end);
-    height: 4px;
-    border-radius: 999px;
-    background: rgba(0, 0, 0, 0.42);
-    transform: translateY(-50%);
+    background: var(--raster-tint, rgba(0, 0, 0, 0.06));
     pointer-events: none;
   }
 
-  .raster-track-origin {
+  .hue-track { --raster-tint: var(--raster-hue); }
+  .temperature-track { --raster-tint: var(--raster-temp); }
+
+  .raster-origin {
     position: absolute;
-    top: 3px;
-    bottom: 3px;
+    top: 16px;
+    bottom: 16px;
     left: 50%;
-    width: 1.5px;
-    border-radius: 999px;
-    background: rgba(0, 0, 0, 0.32);
-    transform: translateX(-50%);
+    width: 1px;
+    background: rgba(0, 0, 0, 0.08);
     pointer-events: none;
   }
 
-  /* Each track previews its own effect from left to right. */
-  .rotation-track {
-    background:
-      repeating-linear-gradient(90deg, transparent 0 calc(10% - 1px), rgba(0, 0, 0, 0.13) calc(10% - 1px) 10%) 9px 50% / calc(100% - 18px) 8px no-repeat,
-      #f3f3f3;
+  .raster-handle {
+    position: absolute;
+    top: 12px;
+    bottom: 12px;
+    left: var(--raster-position);
+    width: 2px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.75);
+    transform: translateX(-50%);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 160ms ease;
   }
 
-  .exposure-track {
-    background: linear-gradient(90deg, #1b1b1b, #8c8c8c 50%, #ffffff);
+  .raster-slider:hover .raster-handle,
+  .raster-slider:focus-within .raster-handle {
+    opacity: 1;
   }
 
-  .contrast-track {
-    background:
-      linear-gradient(90deg, #a3a3a3, rgba(163, 163, 163, 0)),
-      linear-gradient(180deg, #ffffff 50%, #111111 50%);
-  }
-
-  .saturation-track {
-    background:
-      linear-gradient(90deg, #9b9b9b, rgba(155, 155, 155, 0)),
-      linear-gradient(90deg, #ff3b30, #ff9500, #ffcc00, #34c759, #0a84ff, #af52de);
-  }
-
-  .hue-track {
-    background: linear-gradient(90deg, #0ff, #00f, #f0f, #f00, #ff0, #0f0, #0ff);
-  }
-
-  .temperature-track {
-    background: linear-gradient(90deg, #3d86ff, #f4f4f4 50%, #ff9a3c);
-  }
-
-  .sharpness-track {
-    background:
-      linear-gradient(90deg, rgba(243, 243, 243, 0.94), rgba(243, 243, 243, 0) 85%),
-      repeating-linear-gradient(90deg, #1a1a1a 0 2px, #f3f3f3 2px 5px);
-  }
-
-  .exposure-track .raster-track-fill,
-  .contrast-track .raster-track-fill,
-  .saturation-track .raster-track-fill,
-  .hue-track .raster-track-fill,
-  .temperature-track .raster-track-fill,
-  .sharpness-track .raster-track-fill,
-  .exposure-track .raster-track-origin,
-  .contrast-track .raster-track-origin,
-  .saturation-track .raster-track-origin,
-  .hue-track .raster-track-origin,
-  .temperature-track .raster-track-origin {
-    display: none;
-  }
-
-  .raster-track input {
+  .raster-slider input {
     position: absolute;
     inset: 0;
     width: 100%;
@@ -12331,60 +12864,29 @@
     margin: 0;
     background: transparent;
     cursor: ew-resize;
+    opacity: 0;
     -webkit-appearance: none;
     appearance: none;
     touch-action: none;
   }
 
-  .raster-track input:focus-visible {
-    outline: none;
-  }
-
-  .raster-track input::-webkit-slider-runnable-track {
-    height: 18px;
-    background: transparent;
-  }
-
-  .raster-track input::-moz-range-track {
-    height: 18px;
-    background: transparent;
-  }
-
-  .raster-track input::-webkit-slider-thumb {
-    box-sizing: border-box;
-    width: 20px;
-    height: 20px;
-    margin-top: -1px;
-    border: 3px solid #fff;
-    border-radius: 50%;
-    background: var(--raster-thumb, #fff);
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  /* A hairline thumb so the input's travel matches the field edge to edge. */
+  .raster-slider input::-webkit-slider-thumb {
+    width: 1px;
+    height: 48px;
     -webkit-appearance: none;
     appearance: none;
-    transition: transform 140ms ease;
   }
 
-  .raster-track input::-moz-range-thumb {
-    box-sizing: border-box;
-    width: 20px;
-    height: 20px;
-    border: 3px solid #fff;
-    border-radius: 50%;
-    background: var(--raster-thumb, #fff);
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  .raster-slider input::-moz-range-thumb {
+    width: 1px;
+    height: 48px;
+    border: 0;
   }
 
-  .raster-track input:active::-webkit-slider-thumb {
-    transform: scale(1.12);
+  .raster-slider:focus-within {
+    border-color: rgba(0, 0, 0, 0.22);
   }
-
-  .raster-track input:focus-visible::-webkit-slider-thumb {
-    box-shadow: 0 0 0 3px rgba(8, 120, 249, 0.35), 0 1px 4px rgba(0, 0, 0, 0.5);
-  }
-
-  .exposure-track { --raster-thumb: var(--raster-exposure); }
-  .hue-track { --raster-thumb: var(--raster-hue); }
-  .temperature-track { --raster-thumb: var(--raster-temp); }
 
   .raster-toggle {
     width: 100%;
@@ -12397,7 +12899,6 @@
     box-sizing: border-box;
     padding: 17px 18px;
     border-top: 1px solid #cacaca;
-    background: #fafafa;
   }
 
   .raster-actions .signature-action:disabled {
@@ -12970,10 +13471,12 @@
   }
 
   .pdf-viewer {
+    --horizontal-pan-gutter: 0px;
     box-sizing: border-box;
     width: 100%;
     height: 100%;
-    padding: 36px 48px 80px;
+    /* The side padding is pan room: the same amount beyond both page edges, scrolled to the middle on open. */
+    padding: 54px var(--horizontal-pan-gutter) 80px;
     overflow: auto;
     scrollbar-width: none;
   }
@@ -12988,10 +13491,13 @@
     z-index: 2;
     top: 0;
     left: 0;
-    width: 117.6470588%;
-    height: 117.6470588%;
+    width: calc(100% / var(--ui-scale, 0.85));
+    height: calc(100% / var(--ui-scale, 0.85));
     overflow: hidden;
-    background: #f5f5f5;
+    background:
+      linear-gradient(90deg, rgba(0, 0, 0, 0.045) 1px, transparent 1px) 58px 122px / 140px 140px,
+      linear-gradient(180deg, rgba(0, 0, 0, 0.045) 1px, transparent 1px) 58px 122px / 140px 140px,
+      #e2e2e2;
     visibility: hidden;
     pointer-events: none;
   }
@@ -13081,6 +13587,15 @@
     to { opacity: 1; transform: scale(1) translateY(0); }
   }
 
+  /* Wraps the pages so a zoom gesture can be previewed with a transform before the real re-layout. */
+  .pdf-zoom-stage {
+    display: flow-root;
+    width: max-content;
+    min-width: 100%;
+    /* Kept on its own layer so a zoom gesture starts without a hitch. */
+    will-change: transform;
+  }
+
   .pdf-document {
     width: max-content;
     min-width: 100%;
@@ -13125,9 +13640,22 @@
   }
 
   .pdf-viewer.eraser-mode {
-    cursor: none;
+    cursor: crosshair;
     touch-action: none;
     user-select: none;
+  }
+
+  /* Over a page the brush circle stands in for the cursor. */
+  .pdf-viewer.brush-active {
+    cursor: none;
+  }
+
+  /* Text keeps its I-beam (.textLayer span); everywhere else Select uses the app's arrow. */
+  .pdf-viewer.select-mode {
+    /* PNGs per pixel density: WebKit draws SVG cursors at 1x, which blurs them on Retina screens. */
+    cursor: url('/cursors/select.png') 2 2, default;
+    cursor: -webkit-image-set(url('/cursors/select.png') 1x, url('/cursors/select@2x.png') 2x, url('/cursors/select@3x.png') 3x) 2 2, default;
+    cursor: image-set(url('/cursors/select.png') 1x, url('/cursors/select@2x.png') 2x, url('/cursors/select@3x.png') 3x) 2 2, default;
   }
 
   :global(.pdf-viewer.text-selecting),
@@ -13147,8 +13675,7 @@
     margin: 0 auto 30px;
     overflow: hidden;
     background: #fff;
-    box-shadow: 0 5px 22px rgba(0, 0, 0, 0.13);
-    transform: translateX(-80px);
+    box-shadow: 0 0 0 1px #bab6b6, 3px 8px 16px rgba(0, 0, 0, 0.05);
   }
 
   .annotation-layer {
@@ -13719,7 +14246,7 @@
     opacity: 0.94;
   }
 
-  .eraser-cursor {
+  .brush-cursor {
     position: absolute;
     z-index: 9;
     box-sizing: border-box;
@@ -13794,8 +14321,9 @@
     user-select: none;
   }
 
+  /* The app draws the selection itself (.native-selection-layer); the system highlight stays hidden. */
   :global(.textLayer ::selection) {
-    background: color-mix(in srgb, AccentColor, transparent 75%);
+    background: transparent;
   }
 
   :global(.textLayer br::selection) {
@@ -13814,4 +14342,824 @@
   :global(.textLayer.selecting .endOfContent) {
     top: 0;
   }
+
+  /* ---- Right-hand panels, all modelled on the Figma "Select" panel ---- */
+  .protect-panel {
+    width: min(293px, calc(100% - 26px));
+  }
+
+  .protect-panel :is(.protect-fields, .protect-warning, .protect-actions, .search-panel-content, .watermark-panel-content, .signature-actions, .saved-signature-content, .add-signature-content, .raster-actions) {
+    background: transparent;
+  }
+
+  .protect-fields,
+  .protect-warning {
+    border-bottom-color: rgba(0, 0, 0, 0.1);
+  }
+
+  .protect-fields {
+    padding: 12px 11px 12px 12px;
+  }
+
+  .protect-warning {
+    padding: 16px 14px 10px 14px;
+  }
+
+  .protect-warning h3 {
+    font-size: 20px;
+    letter-spacing: -0.2px;
+  }
+
+  .protect-warning p {
+    color: rgba(0, 0, 0, 0.5);
+    font-size: 18px;
+    letter-spacing: -0.18px;
+  }
+
+  .protect-actions {
+    padding: 15px 11px 15px 12px;
+  }
+
+  /* Text fields: the inspector's white 48px fields. */
+  .password-field {
+    height: 48px;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 15px;
+    background: #fff;
+  }
+
+  .password-field:focus-within {
+    border-color: rgba(0, 0, 0, 0.18);
+    background: #fff;
+    box-shadow: none;
+  }
+
+  .password-field input {
+    padding: 0 13px;
+    color: rgba(0, 0, 0, 0.75);
+    font-size: 21px;
+    letter-spacing: -0.21px;
+  }
+
+  .password-field input::placeholder {
+    color: rgba(0, 0, 0, 0.5);
+  }
+
+  .password-visibility {
+    border-left: 0;
+  }
+
+  .password-visibility:hover {
+    background: transparent;
+  }
+
+  /* Buttons share the field geometry. */
+  .protect-submit,
+  .signature-action {
+    height: 48px;
+    border-radius: 15px;
+    font-size: 20px;
+    letter-spacing: -0.2px;
+  }
+
+  .signature-action.secondary {
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    background: #fff;
+    color: rgba(0, 0, 0, 0.5);
+  }
+
+  .signature-action.secondary:hover {
+    border-color: rgba(0, 0, 0, 0.18);
+    background: #fff;
+    color: rgba(0, 0, 0, 0.75);
+  }
+
+  /* Heights follow from the 48px controls (header 50 + sections). */
+  .protect-panel {
+    height: 428px;
+  }
+
+  .protect-panel.encrypted {
+    height: 370px;
+  }
+
+  .protect-panel.has-error {
+    height: 464px;
+  }
+
+  .protect-panel.encrypted.has-error {
+    height: 406px;
+  }
+
+  .protect-panel-form {
+    grid-template-rows: 140px 160px 78px;
+  }
+
+  .protect-panel.encrypted .protect-panel-form {
+    grid-template-rows: 82px 160px 78px;
+  }
+
+  .protect-panel.has-error .protect-panel-form {
+    grid-template-rows: 176px 160px 78px;
+  }
+
+  .protect-panel.encrypted.has-error .protect-panel-form {
+    grid-template-rows: 118px 160px 78px;
+  }
+
+  .protect-panel.edit-locked-panel {
+    height: 428px;
+  }
+
+  .protect-panel.edit-locked-panel.has-error {
+    height: 464px;
+  }
+
+  .protect-panel.edit-locked-panel .protect-panel-form {
+    grid-template-rows: 82px 160px 136px;
+  }
+
+  .protect-panel.edit-locked-panel.has-error .protect-panel-form {
+    grid-template-rows: 118px 160px 136px;
+  }
+
+  .protect-panel.search-panel {
+    width: min(420px, calc(100% - 26px));
+    height: 124px;
+  }
+
+  .search-panel-content {
+    padding: 12px 11px 13px 12px;
+  }
+
+  .search-controls {
+    grid-template-columns: minmax(0, 1fr) 48px 48px;
+    gap: 8px;
+  }
+
+  .search-direction {
+    width: 48px;
+    height: 48px;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 15px;
+    background: #fff;
+  }
+
+  .protect-panel.watermark-panel {
+    height: 183px;
+  }
+
+  .watermark-panel-content {
+    grid-template-rows: 48px 48px;
+    padding: 12px 11px 13px 12px;
+  }
+
+  .signature-actions {
+    padding: 17px 11px 17px 12px;
+  }
+
+  .protect-panel.add-signature-panel {
+    top: 156px;
+  }
+
+  .protect-panel.add-signature-panel.below-signatures {
+    top: 324px;
+  }
+
+  .protect-panel.comment-panel,
+  .protect-panel.raster-panel {
+    max-height: calc(100% - 24px);
+  }
+
+  .raster-actions {
+    padding: 15px 11px 15px 12px;
+    border-top-color: rgba(0, 0, 0, 0.1);
+  }
+
+  .figma-color-picker {
+    right: 316px;
+    border: 1px solid #cbcaca;
+    border-radius: 21px;
+    background: rgba(240, 236, 236, 0.75);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+    backdrop-filter: blur(1.3px);
+    -webkit-backdrop-filter: blur(1.3px);
+  }
+
+  /* Every row-style control in the panels uses the inspector's white 48px field. */
+  .drawing-color-row,
+  .typography-color-row,
+  .typography-select-row,
+  .drawing-toggle,
+  .typography-segments,
+  .typography-style-row,
+  .text-mark-row {
+    box-sizing: border-box;
+    height: 48px;
+    min-height: 48px;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 15px;
+    background: #fff;
+    color: rgba(0, 0, 0, 0.75);
+    font-size: 21px;
+    letter-spacing: -0.21px;
+  }
+
+  .drawing-color-row > span,
+  .typography-color-row > span,
+  .typography-select-row > span {
+    padding-left: 13px;
+    color: rgba(0, 0, 0, 0.5);
+  }
+
+  .drawing-color-row input,
+  .typography-color-row input,
+  .typography-select-row select,
+  .text-mark-row input {
+    color: rgba(0, 0, 0, 0.75);
+    letter-spacing: inherit;
+  }
+
+  .text-mark-row button,
+  .text-mark-row input,
+  .typography-segments button,
+  .typography-style-row button {
+    border-color: rgba(0, 0, 0, 0.1);
+  }
+
+  .text-mark-row button {
+    padding: 0 13px;
+    color: rgba(0, 0, 0, 0.75);
+    font-size: 21px;
+    letter-spacing: -0.21px;
+  }
+
+  .text-mark-row > button:first-child:hover,
+  .typography-segments button:hover,
+  .typography-style-row button:hover {
+    background: rgba(0, 0, 0, 0.04);
+  }
+
+  .typography-segments button,
+  .typography-style-row button {
+    font-size: 20px;
+  }
+
+  .typography-alignment-row {
+    color: rgba(0, 0, 0, 0.5);
+    font-size: 20px;
+  }
+
+  .drawing-toggle {
+    padding: 0 13px;
+  }
+
+  .drawing-number-grid .inspector-field {
+    padding: 0 10px 0 12px;
+  }
+
+  .drawing-number-grid .inspector-field input {
+    padding-left: 4px;
+  }
+
+  .drawing-toggle em {
+    color: rgba(0, 0, 0, 0.5);
+  }
+
+  .drawing-toggle.active,
+  .drawing-toggle.active em {
+    color: #fff;
+  }
+
+  .drawing-property-section,
+  .text-mark-properties,
+  .typography-section {
+    gap: 10px;
+  }
+
+  .drawing-number-grid {
+    grid-template-columns: minmax(0, 112fr) minmax(0, 174fr);
+    gap: 10px;
+  }
+
+  .protect-panel.drawing-properties-panel {
+    width: min(320px, calc(100% - 26px));
+  }
+
+  .drawing-properties-panel .protect-panel-header {
+    grid-template-columns: 24px 1fr 28px;
+    padding-left: 15px;
+  }
+
+  .drawing-properties-panel .protect-panel-header > img {
+    width: 24px;
+    height: 24px;
+    margin: 0;
+  }
+
+  .typography-weight-size-grid,
+  .typography-spacing-grid {
+    gap: 10px;
+  }
+
+  .protect-panel.text-selection-panel,
+  .text-selection-panel button,
+  .text-selection-panel input {
+    font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  .protect-panel.text-selection-panel,
+  .text-selection-panel input {
+    font-size: 21px;
+  }
+
+  .figma-color-picker.drawing-color-picker,
+  .figma-color-picker.text-tool-color-picker {
+    top: 110px;
+  }
+
+  /* Clears the wider drawing panel (13px inset + 320px + 10px gap). */
+  .figma-color-picker.drawing-color-picker {
+    right: 343px;
+  }
+
+  /* Background tabs: kept rendered (scroll, pages, edits) but invisible and underneath the active editor. */
+  .pdf-workspace {
+    z-index: 1;
+  }
+
+  .editor-sidebar.editor-inactive,
+  .pdf-workspace.editor-inactive {
+    z-index: 0;
+    visibility: hidden;
+  }
+
+  .pdf-workspace.editor-inactive .html-editor-layer.active {
+    visibility: hidden;
+  }
+
+  /* Text-selection panel rows: same field look as the shape inspector's Fill / Stroke rows.
+     The mark name is a button: hover darkens the text, on turns it into a black pill hugging the name. */
+  .decorated-mark-row {
+    grid-template-columns: auto minmax(0, 1fr) 72px 38px;
+  }
+
+  .highlight-mark-row {
+    grid-template-columns: auto minmax(0, 1fr) 38px;
+  }
+
+  .text-mark-row button,
+  .text-mark-row input {
+    border-right: 0;
+  }
+
+  .text-mark-row > button:first-child {
+    align-self: stretch;
+    height: auto;
+    margin: 0;
+    padding: 0 13px;
+    border-radius: 14px;
+    background: transparent;
+    color: rgba(0, 0, 0, 0.5);
+    white-space: nowrap;
+    transition: color 180ms ease, background-color 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .text-mark-row > button:first-child:hover {
+    background: transparent;
+    color: #000;
+  }
+
+  .text-mark-row > button:first-child.active,
+  .text-mark-row > button:first-child.active:hover {
+    background: #111;
+    color: #fff;
+  }
+
+  .text-mark-row input {
+    height: 100%;
+    padding: 0 10px 0 0;
+    color: rgba(0, 0, 0, 0.75);
+    font-size: 21px;
+    text-align: right;
+  }
+
+  .text-mark-row input.text-mark-thickness {
+    padding: 0 0 0 6px;
+    color: rgba(0, 0, 0, 0.5);
+    text-align: center;
+  }
+
+  .decorated-mark-row input.text-mark-hex {
+    padding-right: 8px;
+  }
+
+  .text-mark-row button.text-mark-color {
+    align-self: center;
+    justify-self: start;
+    width: 25px !important;
+    height: 25px !important;
+    border: 1px solid color-mix(in srgb, var(--property-color) 19%, transparent) !important;
+    border-radius: 17px !important;
+    transform: none;
+  }
+
+  .text-redaction-grid {
+    gap: 10px;
+  }
+
+  .text-redaction-grid button {
+    height: 48px;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 15px;
+    background: #fff;
+    color: rgba(0, 0, 0, 0.75);
+    font-size: 21px;
+    letter-spacing: -0.21px;
+  }
+
+  .text-redaction-grid button:hover {
+    border-color: rgba(0, 0, 0, 0.18);
+  }
+
+  .text-redaction-grid button.active {
+    border-color: #111;
+    background: #111;
+    color: #fff;
+  }
+
+  /* Bottom 23% of the view fades the pages to 30%; the bottom 13% also blurs progressively more towards the bottom. */
+  .pdf-viewer,
+  .html-editor-layer {
+    -webkit-mask-image: linear-gradient(to bottom, #000 77%, rgba(0, 0, 0, 0.3) 100%);
+    mask-image: linear-gradient(to bottom, #000 77%, rgba(0, 0, 0, 0.3) 100%);
+  }
+
+  .bottom-fade {
+    position: absolute;
+    z-index: 3;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    /* The blur only takes the lower part of the faded area. */
+    height: 13%;
+    pointer-events: none;
+  }
+
+  .bottom-fade span {
+    position: absolute;
+    inset: 0;
+  }
+
+  .bottom-fade span:nth-child(1) {
+    -webkit-backdrop-filter: blur(0.5px);
+    backdrop-filter: blur(0.5px);
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 12.5%, #000 25%, transparent 37.5%);
+    mask-image: linear-gradient(to bottom, transparent 0%, #000 12.5%, #000 25%, transparent 37.5%);
+  }
+
+  .bottom-fade span:nth-child(2) {
+    -webkit-backdrop-filter: blur(1px);
+    backdrop-filter: blur(1px);
+    -webkit-mask-image: linear-gradient(to bottom, transparent 12.5%, #000 25%, #000 37.5%, transparent 50%);
+    mask-image: linear-gradient(to bottom, transparent 12.5%, #000 25%, #000 37.5%, transparent 50%);
+  }
+
+  .bottom-fade span:nth-child(3) {
+    -webkit-backdrop-filter: blur(2px);
+    backdrop-filter: blur(2px);
+    -webkit-mask-image: linear-gradient(to bottom, transparent 25%, #000 37.5%, #000 50%, transparent 62.5%);
+    mask-image: linear-gradient(to bottom, transparent 25%, #000 37.5%, #000 50%, transparent 62.5%);
+  }
+
+  .bottom-fade span:nth-child(4) {
+    -webkit-backdrop-filter: blur(4px);
+    backdrop-filter: blur(4px);
+    -webkit-mask-image: linear-gradient(to bottom, transparent 37.5%, #000 50%, #000 62.5%, transparent 75%);
+    mask-image: linear-gradient(to bottom, transparent 37.5%, #000 50%, #000 62.5%, transparent 75%);
+  }
+
+  .bottom-fade span:nth-child(5) {
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+    -webkit-mask-image: linear-gradient(to bottom, transparent 50%, #000 62.5%);
+    mask-image: linear-gradient(to bottom, transparent 50%, #000 62.5%);
+  }
+
+  /* dark theme: generated by scripts/generate-dark-theme.mjs — do not edit */
+  :global(:root[data-theme="dark"]) .editor-sidebar { background: #111111; border-right: 1px solid #2a2a2a; box-shadow: 0 0 98.6px rgba(0, 0, 0, 0.18); }
+  :global(:root[data-theme="dark"]) .page-drag-ghost { background: rgba(22, 22, 22, 0.96); box-shadow: 0 0 0 2px rgba(82, 157, 255, 0.6), 0 24px 48px rgba(0, 0, 0, 0.6), 0 7px 16px rgba(0, 0, 0, 0.42); }
+  :global(:root[data-theme="dark"]) .page-drag-count { background: rgba(255, 255, 255, 0.2); color: #111111; }
+  :global(:root[data-theme="dark"]) .thumbnail-watermark { color: rgba(255, 255, 255, 0.131); }
+  :global(:root[data-theme="dark"]) .page-pill { border: 1px solid rgba(255, 255, 255, 0.056); background: rgba(24, 24, 24, 0.95); box-shadow: 0 0 40.5px rgba(0, 0, 0, 0.354); color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .thumbnail-page.page-selected .page-pill { border-color: rgba(255, 255, 255, 0.136); }
+  :global(:root[data-theme="dark"]) .page-separator::before { background: rgba(255, 255, 255, 0.12); }
+  :global(:root[data-theme="dark"]) .page-separator::after { border: 1px solid #0073ff; background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M5 12h14M12 5v14' fill='none' stroke='white' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E") center / 24px 24px no-repeat,
+      radial-gradient(circle 13px at center, #0053b9 0%, #0976fa 100%); }
+  :global(:root[data-theme="dark"]) .page-separator.pdf-drop-target::before { background: linear-gradient(90deg, #0073ff 0, #0073ff calc(50% - 13px), transparent calc(50% - 13px), transparent calc(50% + 12px), #0073ff calc(50% + 12px)); }
+  :global(:root[data-theme="dark"]) .page-context-menu { border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(24, 24, 24, 0.95); box-shadow: 0 0 100px rgba(0, 0, 0, 0.24); }
+  :global(:root[data-theme="dark"]) .page-menu-item { border: 1px solid transparent; background: transparent; color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .page-menu-item:hover:not(:disabled),
+  :global(:root[data-theme="dark"]) .page-menu-item:focus-visible { border-color: rgba(255, 255, 255, 0.064); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.92); outline: none; }
+  :global(:root[data-theme="dark"]) .page-menu-item:hover:not(:disabled):not(.delete-page) img,
+  :global(:root[data-theme="dark"]) .page-menu-item:focus-visible:not(:disabled):not(.delete-page) img { filter: brightness(0) invert(1); }
+  :global(:root[data-theme="dark"]) .page-menu-item kbd { border: 1px solid rgba(255, 255, 255, 0.04); background: rgba(255, 255, 255, 0.033); color: rgba(255, 255, 255, 0.165); }
+  :global(:root[data-theme="dark"]) .page-menu-item:hover:not(:disabled) kbd,
+  :global(:root[data-theme="dark"]) .page-menu-item:focus-visible:not(:disabled) kbd { border-color: rgba(255, 255, 255, 0.04); background: rgba(255, 255, 255, 0.072); }
+  :global(:root[data-theme="dark"]) .page-menu-item:disabled { color: rgba(255, 255, 255, 0.3); }
+  :global(:root[data-theme="dark"]) .page-menu-item.delete-page:not(:disabled) { color: rgba(255, 0, 0, 0.85); }
+  :global(:root[data-theme="dark"]) .pdf-workspace { background: linear-gradient(90deg, rgba(255, 255, 255, 0.058) 1px, transparent 1px) 58px 122px / 140px 140px,
+      linear-gradient(180deg, rgba(255, 255, 255, 0.058) 1px, transparent 1px) 58px 122px / 140px 140px,
+      #0e0e0e; }
+  :global(:root[data-theme="dark"]) .protect-panel { border: 1.5px solid #2c2c2c; background: rgba(22, 22, 22, 0.96); box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15); color: rgba(255, 255, 255, 0.92); }
+  :global(:root[data-theme="dark"]) .text-mark-properties { border-bottom: 0; }
+  :global(:root[data-theme="dark"]) .drawing-property-section { border-bottom: 0; }
+  :global(:root[data-theme="dark"]) .drawing-color-row { border: 1px solid #232323; background: #121212; }
+  :global(:root[data-theme="dark"]) .drawing-color-row > span { color: rgba(255, 255, 255, 0.522); }
+  :global(:root[data-theme="dark"]) .drawing-color-row input { border: 0; outline: 0; background: transparent; color: rgba(255, 255, 255, 0.859); }
+  :global(:root[data-theme="dark"]) .drawing-toggle { border: 1px solid #232323; background: #121212; color: rgba(255, 255, 255, 0.859); }
+  :global(:root[data-theme="dark"]) .drawing-toggle em { color: rgba(255, 255, 255, 0.522); }
+  :global(:root[data-theme="dark"]) .drawing-toggle.active { border-color: #ececec; background: #ececec; color: #111111; }
+  :global(:root[data-theme="dark"]) .drawing-toggle.active em { color: #111111; }
+  :global(:root[data-theme="dark"]) .text-mark-row { border: 1px solid #232323; background: #121212; }
+  :global(:root[data-theme="dark"]) .text-mark-row button { border: 0; border-right: 1px solid #232323; background: transparent; color: rgba(255, 255, 255, 0.859); }
+  :global(:root[data-theme="dark"]) .text-mark-row > button:first-child:hover { background: #101010; }
+  :global(:root[data-theme="dark"]) .text-mark-row > button:first-child.active,
+  :global(:root[data-theme="dark"]) .text-redaction-grid button.active { border-color: #ececec; background: #ececec; color: #111111; }
+  :global(:root[data-theme="dark"]) .text-mark-row input { border: 0; border-right: 1px solid #232323; outline: 0; background: transparent; color: rgba(255, 255, 255, 0.859); }
+  :global(:root[data-theme="dark"]) .text-mark-color { border-right: 0 !important; background: var(--property-color) !important; }
+  :global(:root[data-theme="dark"]) .text-redaction-grid button { border: 1px solid #232323; }
+  :global(:root[data-theme="dark"]) .text-redaction-grid button { background: #121212; color: rgba(255, 255, 255, 0.859); }
+  :global(:root[data-theme="dark"]) .selection-property-section { border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+  :global(:root[data-theme="dark"]) .inspector-field { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .inspector-field:focus-within { border-color: #1684f8; background: rgba(22, 22, 22, 0.96); box-shadow: 0 0 0 1px rgba(22, 132, 248, 0.39); }
+  :global(:root[data-theme="dark"]) .inspector-field input { border: 0; outline: 0; background: transparent; color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .inspector-field em { color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .rotation-field-value { color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .selection-properties-scroll > .selection-property-section:last-child { border-bottom: 0; }
+  :global(:root[data-theme="dark"]) .typography-color-row,
+  :global(:root[data-theme="dark"]) .typography-select-row { border: 1px solid #232323; background: #121212; }
+  :global(:root[data-theme="dark"]) .typography-color-row > span,
+  :global(:root[data-theme="dark"]) .typography-select-row > span { color: rgba(255, 255, 255, 0.522); }
+  :global(:root[data-theme="dark"]) .typography-color-row input,
+  :global(:root[data-theme="dark"]) .typography-select-row select { border: 0; outline: 0; background: transparent; color: rgba(255, 255, 255, 0.859); }
+  :global(:root[data-theme="dark"]) .typography-alignment-row { color: rgba(255, 255, 255, 0.522); }
+  :global(:root[data-theme="dark"]) .typography-segments,
+  :global(:root[data-theme="dark"]) .typography-style-row { border: 1px solid #232323; background: #121212; }
+  :global(:root[data-theme="dark"]) .typography-segments button,
+  :global(:root[data-theme="dark"]) .typography-style-row button { border: 0; border-left: 1px solid #232323; background: transparent; color: rgba(255, 255, 255, 0.604); }
+  :global(:root[data-theme="dark"]) .typography-segments button:first-child,
+  :global(:root[data-theme="dark"]) .typography-style-row button:first-child { border-left: 0; }
+  :global(:root[data-theme="dark"]) .typography-segments button:hover,
+  :global(:root[data-theme="dark"]) .typography-style-row button:hover { color: rgba(255, 255, 255, 0.859); background: #111111; }
+  :global(:root[data-theme="dark"]) .typography-segments button.active,
+  :global(:root[data-theme="dark"]) .typography-style-row button.active { color: #111111; background: #ececec; }
+  :global(:root[data-theme="dark"]) .typography-segments button.active img { filter: brightness(0); }
+  :global(:root[data-theme="dark"]) .object-property-row { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .object-property-row:focus-within { border-color: rgba(255, 255, 255, 0.144); background: rgba(255, 255, 255, 0.05); }
+  :global(:root[data-theme="dark"]) .property-visibility,
+  :global(:root[data-theme="dark"]) .property-remove { border: 0; background: transparent; }
+  :global(:root[data-theme="dark"]) .property-remove { color: rgba(255, 255, 255, 0.522); }
+  :global(:root[data-theme="dark"]) .property-remove:hover { color: rgba(255, 255, 255, 0.859); }
+  :global(:root[data-theme="dark"]) .property-name { color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .property-hex,
+  :global(:root[data-theme="dark"]) .property-number { border: 0; outline: 0; background: transparent; color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .property-color { border: 1px solid color-mix(in srgb, var(--property-color) 19%, transparent); background: var(--property-color); }
+  :global(:root[data-theme="dark"]) .property-color:hover,
+  :global(:root[data-theme="dark"]) .property-color.active { box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.5), 0 0 0 3.5px rgba(22, 132, 248, 0.6); }
+  :global(:root[data-theme="dark"]) .figma-color-picker { border: 1.5px solid #2b2b2b; background: #141414; box-shadow: 0 9px 24px rgba(0, 0, 0, 0.21); }
+  :global(:root[data-theme="dark"]) .color-saturation { border: 1px solid #292929; background: linear-gradient(to top, #ececec, transparent),
+      linear-gradient(to right, rgba(255, 255, 255, 0.05), var(--picker-hue)); }
+  :global(:root[data-theme="dark"]) .color-saturation > span,
+  :global(:root[data-theme="dark"]) .picker-slider > span { border: 3px solid rgba(255, 255, 255, 0.08); background: var(--thumb-color, transparent); box-shadow: 0 1px 4px rgba(0, 0, 0, 0.6); }
+  :global(:root[data-theme="dark"]) .hue-slider { background: linear-gradient(90deg, #ff0000, #ffff00, #00ff00, #00ffff, #0000ff, #ff00ff, #ff0000); }
+  :global(:root[data-theme="dark"]) .alpha-slider { color: rgba(255, 255, 255, 0.5); background: linear-gradient(90deg, transparent, var(--picker-color)),
+      conic-gradient(rgba(255, 255, 255, 0.05) 25%, rgba(255, 255, 255, 0.065) 0 50%, rgba(255, 255, 255, 0.05) 0 75%, rgba(255, 255, 255, 0.065) 0) 0 0 / 12px 12px; }
+  :global(:root[data-theme="dark"]) .search-panel-content { background: #141414; }
+  :global(:root[data-theme="dark"]) .watermark-panel-content { background: #141414; }
+  :global(:root[data-theme="dark"]) .search-direction { border: 1px solid #232323; background: #121212; }
+  :global(:root[data-theme="dark"]) .search-direction:not(:disabled):hover { border-color: #2e2e2e; background: #111111; }
+  :global(:root[data-theme="dark"]) .protect-panel-header { border-bottom: 1.5px solid #2c2c2c; background: rgba(0, 0, 0, 0.45); }
+  :global(:root[data-theme="dark"]) .protect-panel-header h2 { color: rgba(255, 255, 255, 0.92); }
+  :global(:root[data-theme="dark"]) .protect-panel-close { border: 0; background: transparent; }
+  :global(:root[data-theme="dark"]) .protect-panel-close span { color: rgba(255, 255, 255, 0.5); background: rgba(255, 255, 255, 0.14); }
+  :global(:root[data-theme="dark"]) .protect-panel-close:hover span { background: #ececec; }
+  :global(:root[data-theme="dark"]) .protect-panel .protect-panel-close { filter: brightness(0) invert(1) opacity(0.78); background: url('/redesign/panel-close.svg') center / 12.67px 12.67px no-repeat; }
+  :global(:root[data-theme="dark"]) .protect-panel .protect-panel-close:hover { filter: brightness(0) invert(1); }
+  :global(:root[data-theme="dark"]) .protect-fields { border-bottom: 1px solid #292929; background: #141414; }
+  :global(:root[data-theme="dark"]) .password-field { border: 1px solid #232323; background: #121212; }
+  :global(:root[data-theme="dark"]) .password-field:focus-within { border-color: #373737; background: #121212; box-shadow: 0 0 0 3px rgba(0, 117, 255, 0.27); }
+  :global(:root[data-theme="dark"]) .password-field.error { border-color: #e15757; box-shadow: 0 0 0 3px rgba(225, 87, 87, 0.27); }
+  :global(:root[data-theme="dark"]) .password-field input { border: 0; outline: 0; background: transparent; color: rgba(255, 255, 255, 0.796); }
+  :global(:root[data-theme="dark"]) .password-field input::placeholder { color: rgba(255, 255, 255, 0.522); }
+  :global(:root[data-theme="dark"]) .password-visibility { border: 0; border-left: 1px solid #232323; background: transparent; }
+  :global(:root[data-theme="dark"]) .password-visibility:hover { background: rgba(255, 255, 255, 0.046); }
+  :global(:root[data-theme="dark"]) .protection-error { color: #c83e3e; }
+  :global(:root[data-theme="dark"]) .protect-warning { border-bottom: 1px solid #292929; background: #141414; }
+  :global(:root[data-theme="dark"]) .protect-warning h3 { color: rgba(255, 255, 255, 0.92); }
+  :global(:root[data-theme="dark"]) .protect-warning p { color: rgba(255, 255, 255, 0.522); }
+  :global(:root[data-theme="dark"]) .protect-warning p span { color: #0878f9; }
+  :global(:root[data-theme="dark"]) .protect-actions { background: #141414; }
+  :global(:root[data-theme="dark"]) .protect-submit { border: 0; background: #ececec; color: #111111; }
+  :global(:root[data-theme="dark"]) .protect-submit:hover { box-shadow: 0 5px 16px rgba(0, 0, 0, 0.48); }
+  :global(:root[data-theme="dark"]) .protect-submit.encrypted { background: #0878f9; box-shadow: 0 5px 16px rgba(8, 120, 249, 0.6); }
+  :global(:root[data-theme="dark"]) .protect-submit img { filter: brightness(0); }
+  :global(:root[data-theme="dark"]) .cmt-section { border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+  :global(:root[data-theme="dark"]) .cmt-entry + .cmt-entry { border-top: 1px solid rgba(255, 255, 255, 0.048); }
+  :global(:root[data-theme="dark"]) .cmt-author { color: rgba(255, 255, 255, 0.92); }
+  :global(:root[data-theme="dark"]) .cmt-meta time { color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .cmt-text { color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .cmt-quote { border-left: 2px solid #ffd60a; color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .cmt-field { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); }
+  :global(:root[data-theme="dark"]) .cmt-field:focus-within { border-color: rgba(255, 255, 255, 0.144); }
+  :global(:root[data-theme="dark"]) .cmt-field input,
+  :global(:root[data-theme="dark"]) .cmt-field textarea { border: 0; outline: 0; background: transparent; color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .cmt-field input::placeholder,
+  :global(:root[data-theme="dark"]) .cmt-field textarea::placeholder { color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .cmt-button { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .cmt-button:hover:not(:disabled) { border-color: rgba(255, 255, 255, 0.144); color: rgba(255, 255, 255, 0.92); }
+  :global(:root[data-theme="dark"]) .cmt-button.danger { color: #de3542; }
+  :global(:root[data-theme="dark"]) .cmt-button.danger:hover:not(:disabled) { border-color: rgba(222, 53, 66, 0.4); color: #de3542; }
+  :global(:root[data-theme="dark"]) .cmt-button.primary { border-color: #ececec; background: #ececec; color: #111111; }
+  :global(:root[data-theme="dark"]) .cmt-button.primary:hover:not(:disabled) { border-color: #ececec; background: #ececec; color: #111111; }
+  :global(:root[data-theme="dark"]) .cmt-button.primary:disabled { border-color: #333333; color: rgba(255, 255, 255, 0.5); background: rgba(255, 255, 255, 0.105); }
+  :global(:root[data-theme="dark"]) .raster-section { border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+  :global(:root[data-theme="dark"]) .raster-section:last-child { border-bottom: 0; }
+  :global(:root[data-theme="dark"]) .raster-slider { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .raster-slider:hover { border-color: rgba(255, 255, 255, 0.128); }
+  :global(:root[data-theme="dark"]) .raster-slider.changed { color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .raster-fill { background: var(--raster-tint, rgba(255, 255, 255, 0.078)); }
+  :global(:root[data-theme="dark"]) .raster-origin { background: rgba(255, 255, 255, 0.104); }
+  :global(:root[data-theme="dark"]) .raster-handle { background: rgba(255, 255, 255, 0.2); }
+  :global(:root[data-theme="dark"]) .raster-slider input { background: transparent; }
+  :global(:root[data-theme="dark"]) .raster-slider input::-moz-range-thumb { border: 0; }
+  :global(:root[data-theme="dark"]) .raster-slider:focus-within { border-color: rgba(255, 255, 255, 0.176); }
+  :global(:root[data-theme="dark"]) .raster-actions { border-top: 1px solid #292929; }
+  :global(:root[data-theme="dark"]) .saved-signature-content,
+  :global(:root[data-theme="dark"]) .add-signature-content { background: #141414; }
+  :global(:root[data-theme="dark"]) .saved-signature-list { border-bottom: 1px solid #292929; }
+  :global(:root[data-theme="dark"]) .saved-signature-row { border-bottom: 1px solid #202020; }
+  :global(:root[data-theme="dark"]) .saved-signature { border: 0; background: #141414; }
+  :global(:root[data-theme="dark"]) .saved-signature:hover { background: #131313; }
+  :global(:root[data-theme="dark"]) .saved-signature-remove { border: 0; background: transparent; }
+  :global(:root[data-theme="dark"]) .saved-signature-remove span { color: rgba(255, 255, 255, 0.5); background: rgba(255, 255, 255, 0.14); }
+  :global(:root[data-theme="dark"]) .saved-signature-remove:hover span { background: #ececec; }
+  :global(:root[data-theme="dark"]) .saved-signature-actions,
+  :global(:root[data-theme="dark"]) .signature-actions { background: #141414; }
+  :global(:root[data-theme="dark"]) .signature-tabs { border: 1px solid #232323; background: linear-gradient(#0b0b0b, #0b0b0b) 50% 0 / 1px 100% no-repeat,
+      #121212; }
+  :global(:root[data-theme="dark"]) .signature-tab-indicator { background: #ececec; box-shadow: 0 3px 9px rgba(0, 0, 0, 0.36); }
+  :global(:root[data-theme="dark"]) .signature-tabs button { border: 0; background: transparent; color: rgba(255, 255, 255, 0.522); }
+  :global(:root[data-theme="dark"]) .signature-tabs button.active { color: #111111; }
+  :global(:root[data-theme="dark"]) .signature-tab-content { border-bottom: 1px solid #292929; }
+  :global(:root[data-theme="dark"]) .signature-tab-copy p { color: rgba(255, 255, 255, 0.522); }
+  :global(:root[data-theme="dark"]) .signature-tab-copy .signature-processing-error { color: #c83e3e; }
+  :global(:root[data-theme="dark"]) .signature-action.primary { border: 0; background: #0878f9; color: #111111; box-shadow: 0 5px 16px rgba(8, 120, 249, 0.54); }
+  :global(:root[data-theme="dark"]) .signature-action.primary:hover { background: #006ff0; box-shadow: 0 6px 18px rgba(8, 120, 249, 0.6); }
+  :global(:root[data-theme="dark"]) .signature-action.primary img { filter: brightness(0); }
+  :global(:root[data-theme="dark"]) .signature-action.secondary { border: 1px solid #232323; background: #121212; color: rgba(255, 255, 255, 0.522); }
+  :global(:root[data-theme="dark"]) .signature-action.secondary:hover { border-color: #2a2a2a; background: #111111; }
+  :global(:root[data-theme="dark"]) .signature-plus::before,
+  :global(:root[data-theme="dark"]) .signature-plus::after { background: currentColor; }
+  :global(:root[data-theme="dark"]) .signature-camera-overlay { background: rgba(22, 22, 22, 0.96); }
+  :global(:root[data-theme="dark"]) .signature-camera-card { border: 1.5px solid #292929; background: #141414; box-shadow: 0 12px 34px rgba(0, 0, 0, 0.3); color: rgba(255, 255, 255, 0.522); }
+  :global(:root[data-theme="dark"]) .signature-draw-field { border: 1px solid #2f2f2f; background: rgba(255, 255, 255, 0.05); }
+  :global(:root[data-theme="dark"]) .signature-draw-baseline { color: rgba(255, 255, 255, 0.5); background: rgba(255, 255, 255, 0.099); }
+  :global(:root[data-theme="dark"]) .signature-camera-preview { border: 1px solid #2f2f2f; background: #ececec; }
+  :global(:root[data-theme="dark"]) .signature-camera-guide { border: 1.5px solid rgba(0, 0, 0, 0.752); box-shadow: 0 0 0 999px rgba(0, 0, 0, 0.3); }
+  :global(:root[data-theme="dark"]) .signature-camera-close { border: 1px solid rgba(0, 0, 0, 0.304); background: rgba(255, 255, 255, 0.2); }
+  :global(:root[data-theme="dark"]) .signature-camera-close span { background: rgba(255, 255, 255, 0.05); }
+  :global(:root[data-theme="dark"]) .signature-camera-status { background: rgba(255, 255, 255, 0.2); color: #111111; }
+  :global(:root[data-theme="dark"]) .signature-camera-status.error { background: rgba(140, 23, 23, 0.76); }
+  :global(:root[data-theme="dark"]) .html-editor-layer { background: linear-gradient(90deg, rgba(255, 255, 255, 0.058) 1px, transparent 1px) 58px 122px / 140px 140px,
+      linear-gradient(180deg, rgba(255, 255, 255, 0.058) 1px, transparent 1px) 58px 122px / 140px 140px,
+      #0e0e0e; }
+  :global(:root[data-theme="dark"]) .preparation-overlay { background: rgba(22, 22, 22, 0.96); }
+  :global(:root[data-theme="dark"]) .preparation-dialog { border: 1px solid rgba(255, 255, 255, 0.096); background: rgba(22, 22, 22, 0.96); box-shadow: 0 10px 35px rgba(0, 0, 0, 0.24); }
+  :global(:root[data-theme="dark"]) .preparation-text { background: linear-gradient(90deg, rgba(255, 255, 255, 0.14) 0%, rgba(255, 255, 255, 0.14) 31.877%, rgba(255, 255, 255, 0.14) 72.516%); color: transparent; }
+  :global(:root[data-theme="dark"]) .annotation-layer path { fill: none; }
+  :global(:root[data-theme="dark"]) .search-highlight-layer rect { fill: #ffe43b; }
+  :global(:root[data-theme="dark"]) .watermark-layer text { fill: rgba(255, 255, 255, 0.655); }
+  :global(:root[data-theme="dark"]) .marker-edge { stroke: #f4cd19; }
+  :global(:root[data-theme="dark"]) .marker-ink { stroke: #ffe43b; }
+  :global(:root[data-theme="dark"]) .text-highlight-layer .text-highlight { fill: #ffe43b; }
+  :global(:root[data-theme="dark"]) .text-highlight-layer .text-decoration { fill: none; }
+  :global(:root[data-theme="dark"]) .redaction-layer rect.blackout { fill: rgba(255, 255, 255, 0.92); }
+  :global(:root[data-theme="dark"]) .redaction-layer rect.whiteout { fill: #111111; }
+  :global(:root[data-theme="dark"]) .native-selection-layer rect { fill: #1684f8; stroke: rgba(0, 0, 0, 0.92); }
+  :global(:root[data-theme="dark"]) .crop-overlay-layer .crop-shade { fill: rgba(255, 255, 255, 0.665); stroke: none; }
+  :global(:root[data-theme="dark"]) .crop-edge { fill: none; stroke: #0d99ff; }
+  :global(:root[data-theme="dark"]) .crop-grid { stroke: rgba(0, 0, 0, 0.44); }
+  :global(:root[data-theme="dark"]) .crop-hit { fill: transparent; stroke: none; }
+  :global(:root[data-theme="dark"]) .crop-resize-edge { fill: none; stroke: transparent; }
+  :global(:root[data-theme="dark"]) .pdf-input-field,
+  :global(:root[data-theme="dark"]) .pdf-checkbox-field { outline: 0; border: 1px solid rgba(45, 139, 205, 0.72); background: rgba(255, 255, 255, 0.058); color: rgba(255, 255, 255, 0.837); }
+  :global(:root[data-theme="dark"]) .pdf-input-field:focus,
+  :global(:root[data-theme="dark"]) .pdf-checkbox-field:focus { border-color: #0878f9; background: rgba(255, 255, 255, 0.074); box-shadow: 0 0 0 2px rgba(8, 120, 249, 0.54); }
+  :global(:root[data-theme="dark"]) .pdf-checkbox-field:checked { border-color: #0878f9; background: #0878f9; }
+  :global(:root[data-theme="dark"]) .pdf-checkbox-field:checked::after { border: solid rgba(255, 255, 255, 0.08); }
+  :global(:root[data-theme="dark"]) .pdf-text-editor-overlay { color: rgba(255, 255, 255, 0.837); }
+  :global(:root[data-theme="dark"]) .pdf-text-editor-overlay [data-text-editor] { border: 0; outline: 0; background: transparent; color: inherit; }
+  :global(:root[data-theme="dark"]) .pdf-text-field-display text { fill: rgba(255, 255, 255, 0.837); }
+  :global(:root[data-theme="dark"]) .pdf-text-field-display.placeholder text { fill: rgba(255, 255, 255, 0.463); }
+  :global(:root[data-theme="dark"]) .pdf-text-field-hit { fill: transparent; }
+  :global(:root[data-theme="dark"]) .pdf-shape { fill: var(--shape-fill, #ff4d55); stroke: var(--shape-stroke, #de3542); }
+  :global(:root[data-theme="dark"]) .shape-symbol { fill: none; stroke: var(--shape-stroke, #ff4d55); }
+  :global(:root[data-theme="dark"]) .shape-linear { fill: none; stroke: var(--shape-stroke, #ff4d55); }
+  :global(:root[data-theme="dark"]) .shape-arrowhead { fill: none; stroke: var(--shape-stroke, #ff4d55); }
+  :global(:root[data-theme="dark"]) .shape-linear-hit { fill: none; stroke: transparent; }
+  :global(:root[data-theme="dark"]) .pdf-imported-image-stroke { fill: none; stroke: var(--shape-stroke, #de3542); }
+  :global(:root[data-theme="dark"]) .measure-halo,
+  :global(:root[data-theme="dark"]) .measure-rule,
+  :global(:root[data-theme="dark"]) .measure-tick { fill: none; }
+  :global(:root[data-theme="dark"]) .measure-halo { stroke: rgba(0, 0, 0, 0.92); }
+  :global(:root[data-theme="dark"]) .measure-rule,
+  :global(:root[data-theme="dark"]) .measure-tick { stroke: #1769e8; }
+  :global(:root[data-theme="dark"]) .measure-endpoint { fill: #111111; stroke: #1769e8; }
+  :global(:root[data-theme="dark"]) .measure-badge { filter: drop-shadow(0 3px 7px rgba(15, 37, 70, 0.6)); }
+  :global(:root[data-theme="dark"]) .measure-badge rect,
+  :global(:root[data-theme="dark"]) .measure-badge-pointer { fill: #b3cdef; stroke: rgba(0, 0, 0, 0.22); }
+  :global(:root[data-theme="dark"]) .measure-primary { fill: #111111; }
+  :global(:root[data-theme="dark"]) .measure-secondary { fill: #b9c9dc; }
+  :global(:root[data-theme="dark"]) .shape-marquee-layer rect { fill: rgba(13, 153, 255, 0.12); stroke: #0d99ff; }
+  :global(:root[data-theme="dark"]) .shape-hover-box,
+  :global(:root[data-theme="dark"]) .shape-hover-line { fill: none; stroke: #0d99ff; }
+  :global(:root[data-theme="dark"]) .shape-selection-box,
+  :global(:root[data-theme="dark"]) .shape-guide { fill: none; stroke: #0d99ff; }
+  :global(:root[data-theme="dark"]) .linear-selection-line { fill: none; stroke: #0d99ff; }
+  :global(:root[data-theme="dark"]) .linear-selection-hit { fill: none; stroke: transparent; }
+  :global(:root[data-theme="dark"]) .shape-rotate-zone { fill: transparent; stroke: none; }
+  :global(:root[data-theme="dark"]) .pen-soft-edge { stroke: #8d0613; }
+  :global(:root[data-theme="dark"]) .pen-ink { stroke: #e21d32; }
+  :global(:root[data-theme="dark"]) .brush-cursor { border: 1.5px solid rgba(255, 255, 255, 0.576); background: rgba(255, 255, 255, 0.019); box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.432), inset 0 0 0 1px rgba(0, 0, 0, 0.24); }
+  :global(:root[data-theme="dark"] .textLayer) { caret-color: CanvasText; }
+  :global(:root[data-theme="dark"] .textLayer span),
+  :global(:root[data-theme="dark"] .textLayer br) { color: transparent; }
+  :global(:root[data-theme="dark"] .textLayer ::selection) { background: transparent; }
+  :global(:root[data-theme="dark"] .textLayer br::selection) { background: transparent; }
+  :global(:root[data-theme="dark"]) .protect-panel :is(.protect-fields, .protect-warning, .protect-actions, .search-panel-content, .watermark-panel-content, .signature-actions, .saved-signature-content, .add-signature-content, .raster-actions) { background: transparent; }
+  :global(:root[data-theme="dark"]) .protect-fields,
+  :global(:root[data-theme="dark"]) .protect-warning { border-bottom-color: rgba(255, 255, 255, 0.08); }
+  :global(:root[data-theme="dark"]) .protect-warning p { color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .password-field { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); }
+  :global(:root[data-theme="dark"]) .password-field:focus-within { border-color: rgba(255, 255, 255, 0.144); background: rgba(255, 255, 255, 0.05); box-shadow: none; }
+  :global(:root[data-theme="dark"]) .password-field input { color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .password-field input::placeholder { color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .password-visibility { border-left: 0; }
+  :global(:root[data-theme="dark"]) .password-visibility:hover { background: transparent; }
+  :global(:root[data-theme="dark"]) .signature-action.secondary { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .signature-action.secondary:hover { border-color: rgba(255, 255, 255, 0.144); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .search-direction { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); }
+  :global(:root[data-theme="dark"]) .raster-actions { border-top-color: rgba(255, 255, 255, 0.08); }
+  :global(:root[data-theme="dark"]) .figma-color-picker { border: 1px solid #282828; background: rgba(22, 22, 22, 0.96); box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15); }
+  :global(:root[data-theme="dark"]) .drawing-color-row,
+  :global(:root[data-theme="dark"]) .typography-color-row,
+  :global(:root[data-theme="dark"]) .typography-select-row,
+  :global(:root[data-theme="dark"]) .drawing-toggle,
+  :global(:root[data-theme="dark"]) .typography-segments,
+  :global(:root[data-theme="dark"]) .typography-style-row,
+  :global(:root[data-theme="dark"]) .text-mark-row { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .drawing-color-row > span,
+  :global(:root[data-theme="dark"]) .typography-color-row > span,
+  :global(:root[data-theme="dark"]) .typography-select-row > span { color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .drawing-color-row input,
+  :global(:root[data-theme="dark"]) .typography-color-row input,
+  :global(:root[data-theme="dark"]) .typography-select-row select,
+  :global(:root[data-theme="dark"]) .text-mark-row input { color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .text-mark-row button,
+  :global(:root[data-theme="dark"]) .text-mark-row input,
+  :global(:root[data-theme="dark"]) .typography-segments button,
+  :global(:root[data-theme="dark"]) .typography-style-row button { border-color: rgba(255, 255, 255, 0.08); }
+  :global(:root[data-theme="dark"]) .text-mark-row button { color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .text-mark-row > button:first-child:hover,
+  :global(:root[data-theme="dark"]) .typography-segments button:hover,
+  :global(:root[data-theme="dark"]) .typography-style-row button:hover { background: rgba(255, 255, 255, 0.052); }
+  :global(:root[data-theme="dark"]) .typography-alignment-row { color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .drawing-toggle em { color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .drawing-toggle.active,
+  :global(:root[data-theme="dark"]) .drawing-toggle.active em { color: #111111; }
+  :global(:root[data-theme="dark"]) .text-mark-row button,
+  :global(:root[data-theme="dark"]) .text-mark-row input { border-right: 0; }
+  :global(:root[data-theme="dark"]) .text-mark-row > button:first-child { background: transparent; color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .text-mark-row > button:first-child:hover { background: transparent; color: rgba(255, 255, 255, 0.92); }
+  :global(:root[data-theme="dark"]) .text-mark-row > button:first-child.active,
+  :global(:root[data-theme="dark"]) .text-mark-row > button:first-child.active:hover { background: #ececec; color: #111111; }
+  :global(:root[data-theme="dark"]) .text-mark-row input { color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .text-mark-row input.text-mark-thickness { color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .text-mark-row button.text-mark-color { border: 1px solid color-mix(in srgb, var(--property-color) 19%, transparent) !important; }
+  :global(:root[data-theme="dark"]) .text-redaction-grid button { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .text-redaction-grid button:hover { border-color: rgba(255, 255, 255, 0.144); }
+  :global(:root[data-theme="dark"]) .text-redaction-grid button.active { border-color: #ececec; background: #ececec; color: #111111; }
+  /* dark theme: end generated */
+
+  /* dark theme: manual */
+  /* The canvas grid sits a touch lighter than the shell (about 5%) so pages float above it. */
+  :global(:root[data-theme="dark"]) .pdf-workspace { background-color: #1a1a1a; }
+  /* Comment pins keep their light-mode white icon; the primary comment button brightens on hover. */
+  :global(:root[data-theme="dark"]) .comment-pin img { filter: brightness(0) invert(1); }
+  :global(:root[data-theme="dark"]) .cmt-button.primary:hover:not(:disabled) { border-color: #fff; background: #fff; }
+  /* Page pills: black glass with a light edge, as in the Figma dark frame. */
+  :global(:root[data-theme="dark"]) .page-pill { border-color: rgba(255, 255, 255, 0.17); background: rgba(0, 0, 0, 0.7); box-shadow: 0 0 40.5px rgba(0, 0, 0, 0.59); color: rgba(255, 255, 255, 0.5); backdrop-filter: blur(6.25px); -webkit-backdrop-filter: blur(6.25px); }
+  :global(:root[data-theme="dark"]) .thumbnail-page.page-selected .page-pill { border-color: rgba(255, 255, 255, 0.3); color: rgba(255, 255, 255, 0.75); }
+
 </style>

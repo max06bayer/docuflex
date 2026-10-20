@@ -18,8 +18,15 @@ use tauri::{webview::DownloadEvent, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri::{LogicalPosition, TitleBarStyle};
 use url::Url;
 
+// The side-by-side build ("Docuflex Redesign") uses its own ports so it can run next to the regular app.
+#[cfg(not(feature = "side-by-side"))]
 const FRONTEND_PORT: u16 = 43_127;
+#[cfg(not(feature = "side-by-side"))]
 const BACKEND_PORT: u16 = 43_128;
+#[cfg(feature = "side-by-side")]
+const FRONTEND_PORT: u16 = 43_137;
+#[cfg(feature = "side-by-side")]
+const BACKEND_PORT: u16 = 43_138;
 const MAX_OPEN_PDF_BYTES: u64 = 230 * 1024 * 1024;
 
 type PendingPdf = Arc<Mutex<Option<PathBuf>>>;
@@ -341,6 +348,9 @@ fn spawn_services(
         // Turns on the local MCP server (/mcp) so AI agents on this computer
         // can drive the editor. The hosted web build never sets this.
         .env("DOCUFLEX_MCP", "1")
+        // The bundle leaves out the ~1 GB translation engine; the server
+        // downloads it into ~/.cache/docuflex the first time Translate runs.
+        .env("DOCUFLEX_TRANSLATE_AUTO_INSTALL", "1")
         // The desktop invokes only its checksum-pinned bundled tools. Linux's
         // RLIMIT_NPROC counts every process owned by the logged-in user, so the
         // server profile's limit can prevent pdf2htmlEX from forking on a
@@ -455,6 +465,30 @@ fn choose_download_destination(suggested: &Path) -> Option<PathBuf> {
         .save_file()
 }
 
+/// Hides or shows the native traffic lights (the web view can still ask for this).
+#[cfg(target_os = "macos")]
+fn set_native_window_buttons_hidden(window: &tauri::WebviewWindow, hidden: bool) {
+    let Ok(ns_window) = window.ns_window() else {
+        return;
+    };
+    let ns_window = ns_window as usize;
+    let _ = window.run_on_main_thread(move || {
+        use objc2_app_kit::{NSWindow, NSWindowButton};
+        // SAFETY: Tauri hands out the live NSWindow pointer, and this closure runs on the main thread.
+        let ns_window = unsafe { &*(ns_window as *const NSWindow) };
+        for kind in [
+            NSWindowButton::CloseButton,
+            NSWindowButton::MiniaturizeButton,
+            NSWindowButton::ZoomButton,
+        ] {
+            if let Some(button) = ns_window.standardWindowButton(kind) {
+                button.setHidden(hidden);
+            }
+        }
+
+    });
+}
+
 fn editor_initialization_script() -> &'static str {
     include_str!("../../runtime/chrome.js")
 }
@@ -562,7 +596,11 @@ pub fn run() {
             let window_builder = window_builder
                 .title_bar_style(TitleBarStyle::Overlay)
                 .hidden_title(true)
-                .traffic_light_position(LogicalPosition::new(24.0, 24.0));
+                // Centers the native close button on the redesign's close-button spot:
+                // 23.4 × 22.6 pt from the top-left (Figma's 29 × 28 at the macOS UI scale
+                // of 0.8075). Tauri places the 14 pt button's left edge at x and its
+                // center at y − 2.
+                .traffic_light_position(LogicalPosition::new(16.4, 24.6));
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             let window_builder = window_builder.decorations(false).shadow(true);
             #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -596,6 +634,14 @@ pub fn run() {
                                     "close" => {
                                         let _ = window.close();
                                     }
+                                    "fullscreen" => {
+                                        let fullscreen = window.is_fullscreen().unwrap_or(false);
+                                        let _ = window.set_fullscreen(!fullscreen);
+                                    }
+                                    #[cfg(target_os = "macos")]
+                                    "native-buttons-hide" => set_native_window_buttons_hidden(&window, true),
+                                    #[cfg(target_os = "macos")]
+                                    "native-buttons-show" => set_native_window_buttons_hidden(&window, false),
                                     _ => {}
                                 }
                             }

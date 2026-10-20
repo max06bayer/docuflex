@@ -98,33 +98,53 @@
 </div>
 
 <style>
-  .flatten-panel { position: absolute; z-index: 45; top: 20px; left: 14px; display: grid; grid-template-rows: 50px 164px 78px; box-sizing: border-box; width: min(320px, calc(100% - 28px)); height: 292px; overflow: hidden; border: 1.5px solid #c5c5c5; border-radius: 13px; background: #fafafa; box-shadow: 0 9px 24px rgba(0,0,0,.07); color: #000; font-family: "Inter Variable", Inter, sans-serif; font-size: 16px; }
-  .panel-header { display: grid; grid-template-columns: 26px 1fr 28px; align-items: center; box-sizing: border-box; height: 50px; padding: 0 12px; border-bottom: 1px solid #cacaca; background: #eee; }
-  .panel-header > img { width: 24px; height: 24px; }
-  .panel-header h2 { margin: 0 0 0 7px; font-size: 18px; font-weight: 400; line-height: 1.22; letter-spacing: -.25px; }
-  .panel-close { position: relative; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 9px; background: transparent; cursor: pointer; transition: transform 160ms ease; }
-  .panel-close:active { transform: scale(.94); }
-  .panel-close span { position: absolute; top: 13px; left: 6px; width: 16px; height: 1.5px; border-radius: 99px; background: #929292; transform: rotate(45deg); transition: background-color 160ms ease; }
-  .panel-close span + span { transform: rotate(-45deg); }
-  .panel-close:hover span { background: #000; }
-  .flatten-content { display: grid; grid-template-rows: 44px auto; gap: 15px; box-sizing: border-box; padding: 17px 18px 15px; border-bottom: 1px solid #cacaca; }
-  .upload-file { display: flex; align-items: center; justify-content: center; gap: 7px; min-width: 0; height: 44px; padding: 0 12px; border: 1px solid #d7d7d7; border-radius: 8px; background: #f3f3f3; color: #7a7a7a; font: inherit; font-size: 18px; cursor: pointer; transition: border-color 180ms ease, background-color 220ms ease, transform 160ms ease; }
-  .upload-file:hover { border-color: #c8c8c8; background: #eee; }
-  .upload-file:active { transform: scale(.985); }
+  /* Matches the redesign panels (TranslateFilesPanel, SettingsPanel, PdfEditor .protect-panel). */
+  .flatten-panel { position: absolute; z-index: 45; top: 12px; left: 13px; display: grid; box-sizing: border-box; width: min(320px, calc(100% - 26px)); border: 1.5px solid #c3c2c2; border-radius: 21px; background: rgba(240, 236, 236, 0.75); box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05); backdrop-filter: blur(1.3px); -webkit-backdrop-filter: blur(1.3px); color: #000; font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 19px; letter-spacing: -0.19px; -webkit-font-smoothing: antialiased; }
+  .panel-header { display: grid; grid-template-columns: 24px 1fr 28px; align-items: center; box-sizing: border-box; height: 50px; padding: 0 14px 0 15px; border-bottom: 1.5px solid #c3c2c2; border-radius: 19.5px 19.5px 0 0; background: rgba(214, 214, 214, 0.75); }
+  .panel-header > img { width: 24px; height: 24px; object-fit: contain; }
+  .panel-header h2 { margin: 0 0 0 8px; overflow: hidden; font-size: 20px; font-weight: 400; line-height: 1.22; letter-spacing: -0.2px; text-overflow: ellipsis; white-space: nowrap; }
+  .panel-close { width: 28px; height: 28px; padding: 0; border: 0; border-radius: 9px; background: url('/redesign/panel-close.svg') center / 12.67px 12.67px no-repeat; cursor: pointer; transition: transform 160ms ease, filter 160ms ease; }
+  .panel-close span { display: none; }
+  .panel-close:hover { filter: brightness(0); }
+  .panel-close:active { transform: scale(0.94); }
+  .flatten-content { display: grid; gap: 14px; padding: 15px 11px 16px 12px; border-bottom: 1px solid rgba(0, 0, 0, 0.1); }
+  .upload-file { display: flex; align-items: center; justify-content: center; gap: 8px; box-sizing: border-box; min-width: 0; height: 48px; padding: 0 13px; border: 1px solid rgba(0, 0, 0, 0.1); border-radius: 15px; background: #fff; color: rgba(0, 0, 0, 0.5); font: inherit; letter-spacing: inherit; cursor: pointer; transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease, transform 160ms ease; }
+  .upload-file:hover:not(:disabled) { border-color: rgba(0, 0, 0, 0.18); color: rgba(0, 0, 0, 0.75); }
+  .upload-file:active { transform: scale(0.985); }
   .upload-file span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .action-plus { position: relative; flex: 0 0 auto; width: 20px; height: 20px; }
-  .action-plus::before, .action-plus::after { position: absolute; top: 50%; left: 50%; width: 14px; height: 1.5px; border-radius: 99px; background: currentColor; content: ''; transform: translate(-50%,-50%); }
-  .action-plus::after { transform: translate(-50%,-50%) rotate(90deg); }
-  .method-setting { display: grid; gap: 9px; color: #7a7a7a; font-size: 18px; }
-  .method-options { display: grid; grid-template-columns: repeat(2,1fr); height: 44px; overflow: hidden; border: 1px solid #d7d7d7; border-radius: 8px; background: #f3f3f3; }
-  .method-options button { padding: 0 8px; border: 0; border-right: 1px solid #d7d7d7; background: transparent; color: #7a7a7a; font: inherit; font-size: 18px; cursor: pointer; transition: color 170ms ease, background-color 170ms ease; }
-  .method-options button:last-child { border-right: 0; }
-  .method-options button.active { background: #000; color: #fff; }
-  .flatten-actions { display: grid; align-content: center; box-sizing: border-box; padding: 17px 18px; background: #fafafa; }
-  .flatten-submit { display: flex; align-items: center; justify-content: center; gap: 7px; width: 100%; height: 44px; padding: 0 12px; border: 0; border-radius: 8px; background: #0878f9; color: #fff; box-shadow: 0 5px 16px rgba(8,120,249,.18); font: inherit; font-size: 18px; cursor: pointer; transition: background-color 220ms ease, box-shadow 220ms ease, transform 160ms ease; }
-  .flatten-submit:hover:not(:disabled) { background: #006ff0; box-shadow: 0 6px 18px rgba(8,120,249,.27); }
-  .flatten-submit:active { transform: scale(.985); }
+  .action-plus::before, .action-plus::after { position: absolute; top: 50%; left: 50%; width: 14px; height: 1.5px; border-radius: 99px; background: currentColor; content: ''; transform: translate(-50%, -50%); }
+  .action-plus::after { transform: translate(-50%, -50%) rotate(90deg); }
+  .method-setting { display: grid; gap: 8px; color: rgba(0, 0, 0, 0.5); }
+  .method-setting > span { padding-left: 2px; }
+  .method-options { display: grid; grid-template-columns: repeat(2, 1fr); box-sizing: border-box; height: 48px; padding: 4px; gap: 4px; border: 1px solid rgba(0, 0, 0, 0.1); border-radius: 15px; background: #fff; }
+  .method-options button { padding: 0 8px; border: 0; border-radius: 11px; background: transparent; color: rgba(0, 0, 0, 0.5); font: inherit; letter-spacing: inherit; cursor: pointer; transition: color 170ms ease, background-color 220ms cubic-bezier(0.22, 1, 0.36, 1); }
+  .method-options button:hover { color: #000; }
+  .method-options button.active { background: #111; color: #fff; }
+  .flatten-actions { display: grid; padding: 15px 11px 15px 12px; }
+  .flatten-submit { display: flex; align-items: center; justify-content: center; gap: 10px; box-sizing: border-box; width: 100%; min-width: 0; height: 48px; padding: 0 17px; border: 1px solid #111; border-radius: 15px; background: #111; color: #fff; font: inherit; letter-spacing: inherit; cursor: pointer; transition: opacity 150ms ease, background-color 150ms ease, transform 160ms ease; }
+  .flatten-submit:active { transform: scale(0.97); }
   .flatten-submit img { width: 24px; height: 24px; filter: brightness(0) invert(1); }
-  .flatten-submit:disabled, .upload-file:disabled { cursor: default; opacity: .55; }
+  .flatten-submit:disabled, .upload-file:disabled { cursor: default; opacity: 0.35; }
   .file-input { display: none; }
+
+  /* dark theme: generated by scripts/generate-dark-theme.mjs — do not edit */
+  :global(:root[data-theme="dark"]) .flatten-panel { border: 1.5px solid #2c2c2c; background: rgba(22, 22, 22, 0.96); box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15); color: rgba(255, 255, 255, 0.92); }
+  :global(:root[data-theme="dark"]) .panel-header { border-bottom: 1.5px solid #2c2c2c; background: rgba(0, 0, 0, 0.45); }
+  :global(:root[data-theme="dark"]) .panel-close { border: 0; filter: brightness(0) invert(1) opacity(0.78); background: url('/redesign/panel-close.svg') center / 12.67px 12.67px no-repeat; }
+  :global(:root[data-theme="dark"]) .panel-close:hover { filter: brightness(0) invert(1); }
+  :global(:root[data-theme="dark"]) .flatten-content { border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+  :global(:root[data-theme="dark"]) .upload-file { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .upload-file:hover:not(:disabled) { border-color: rgba(255, 255, 255, 0.144); color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .action-plus::before,
+  :global(:root[data-theme="dark"]) .action-plus::after { background: currentColor; }
+  :global(:root[data-theme="dark"]) .method-setting { color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .method-options { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); }
+  :global(:root[data-theme="dark"]) .method-options button { border: 0; background: transparent; color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .method-options button:hover { color: rgba(255, 255, 255, 0.92); }
+  :global(:root[data-theme="dark"]) .method-options button.active { background: #ececec; color: #111111; }
+  :global(:root[data-theme="dark"]) .flatten-submit { border: 1px solid #ececec; background: #ececec; color: #111111; }
+  :global(:root[data-theme="dark"]) .flatten-submit img { filter: brightness(0); }
+  /* dark theme: end generated */
+
 </style>

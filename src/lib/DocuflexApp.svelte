@@ -15,8 +15,10 @@
   import TranslateFilesPanel from '$lib/TranslateFilesPanel.svelte';
   // @ts-ignore Fontsource exposes CSS through package exports without JS type declarations.
   import '@fontsource-variable/geist/wght.css';
+  import '@fontsource-variable/geist-mono/wght.css';
   // @ts-ignore Fontsource exposes CSS through package exports without JS type declarations.
   import '@fontsource-variable/inter/wght.css';
+  import '$lib/theme-dark.css';
   import mergeIcon from '../../public/quicktools/merge.svg?raw';
   import splitIcon from '../../public/quicktools/split.svg?raw';
   import convertIcon from '../../public/quicktools/convert.svg?raw';
@@ -55,6 +57,19 @@
   let recentDocuments = [];
   /** @type {number | null} */
   let activeTab = null;
+  /** The public website (no desktop shell): one header row with the logo top-left; search and home move to the toolbar. */
+  let isWebsite = false;
+  /** On the website, the browser's Back button returns from a document to the home screen instead of leaving the page. */
+  let documentHistoryEntry = false;
+  $: if (isWebsite && typeof window !== 'undefined') {
+    if (activeTab !== null && !documentHistoryEntry) {
+      history.pushState({ docuflexDocument: true }, '');
+      documentHistoryEntry = true;
+    } else if (activeTab === null && documentHistoryEntry) {
+      documentHistoryEntry = false;
+      if (history.state?.docuflexDocument) history.back();
+    }
+  }
   let nextTabId = 1;
   let closingTabs = new Set();
   let sortExpanded = false;
@@ -80,6 +95,29 @@
   /** @type {{ id: number; name: string; type: 'pdf'; file: File; protection: { enabled: boolean; password: string }; initialTool?: string; sourcePath?: string | null } | undefined} */
   let activeDocument;
   $: activeDocument = tabs.find((tab) => tab.id === activeTab);
+  /** Set for a moment after a document opens, so the editor fades in and its pages settle instead of popping in. */
+  let documentEntering = false;
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let documentEnterTimer;
+  /** @type {number | null} */
+  let previousActiveTab = null;
+  $: if (activeTab !== previousActiveTab) {
+    if (activeTab !== null && previousActiveTab === null) playDocumentEnter();
+    previousActiveTab = activeTab;
+  }
+
+  /** @type {HTMLElement | undefined} */
+  let shellElement;
+
+  async function playDocumentEnter() {
+    clearTimeout(documentEnterTimer);
+    // Drop the class and force a style pass so the animation restarts when it is already running.
+    documentEntering = false;
+    await tick();
+    void shellElement?.offsetWidth;
+    documentEntering = true;
+    documentEnterTimer = setTimeout(() => (documentEntering = false), 1100);
+  }
   $: visibleRecentDocuments = recentDocuments
     .filter((document) => document.name.toLocaleLowerCase().includes(searchQuery.trim().toLocaleLowerCase()))
     .sort((left, right) => {
@@ -92,6 +130,9 @@
   let fileInput;
   /** @type {{ downloadPdf: () => Promise<void>; exportPdfForSave: () => Promise<{ blob: Blob; suggestedName: string }>; openSearchPanel: () => void; openRasterPanel: () => void; mcpCall: (name: string, args: Record<string, any>) => Promise<any>; aiContext: () => any; undo: () => Promise<void>; redo: () => Promise<void> } | undefined} */
   let pdfEditor;
+  /** @type {Record<number, any>} */
+  let editorRefs = {};
+  $: pdfEditor = activeTab !== null ? editorRefs[activeTab] : undefined;
   let isDownloading = false;
   let isSaving = false;
   /** @type {{ id: number; title: string; message: string } | null} */
@@ -110,14 +151,13 @@
   /** @type {ReturnType<typeof setInterval> | undefined} */
   let mcpHeartbeat;
   let aiPanelOpen = false;
-  /** Whether the AI chat can run here (desktop app or dev with an OpenRouter key). */
-  /** @type {{ available: boolean; model?: string; fallbackModel?: string; tools?: { name: string; title: string; readOnly: boolean; needsApproval: boolean }[] } | null} */
+  /** Whether the AI chat can run here (desktop app or dev with a saved OpenRouter key); configurable: a key can be saved in Settings. */
+  /** @type {{ available: boolean; configurable?: boolean; keyHint?: string | null; model?: string; fallbackModel?: string; tools?: { name: string; title: string; readOnly: boolean; needsApproval: boolean }[] } | null} */
   let aiStatus = null;
   /** The agent keeps working while its panel is closed; the brain button shows it. */
   let aiBusy = false;
-
   /** The AI chat is still in testing: its button stays greyed out until this is true. */
-  const AI_CHAT_ENABLED = false;
+  const AI_CHAT_ENABLED = true;
 
   async function refreshAiStatus() {
     if (!AI_CHAT_ENABLED) {
@@ -331,6 +371,8 @@
   let translatePanelOpen = false;
   let flattenPanelOpen = false;
   let settingsPanelOpen = false;
+  /** Opened from the AI button without a key: Settings focuses the key field. */
+  let settingsKeyFocus = false;
   let pendingInitialTool = 'select';
 
   /** @param {{ name: string; description: string }} tool @param {HTMLElement} element */
@@ -729,6 +771,7 @@
     recentDocuments = [recent, ...recentDocuments.filter((document) => document.name !== file.name)].slice(0, MAX_RECENT_DOCUMENTS);
     void persistRecentDocument(recent);
     if (!thumbnailUrl) void renderRecentThumbnail(file, protection.password);
+    if (activeTab !== null) playDocumentEnter();
     activeTab = id;
   }
 
@@ -813,6 +856,7 @@
       convertPanelOpen = false;
       compressPanelOpen = false;
       protectHomePanelOpen = false;
+      flattenPanelOpen = false;
       return;
     }
     const target = event.target;
@@ -830,6 +874,13 @@
   }
 
   onMount(() => {
+    isWebsite = !document.documentElement.dataset.docuflexDesktop;
+    const handleHistoryBack = () => {
+      if (!isWebsite || !documentHistoryEntry) return;
+      documentHistoryEntry = false;
+      activeTab = null;
+    };
+    window.addEventListener('popstate', handleHistoryBack);
     void restoreRecentDocuments();
     /** @param {PointerEvent} event */
     const closeHomepageMenus = (event) => {
@@ -852,6 +903,7 @@
       mcpStream?.close();
       mcpStream = null;
       clearInterval(mcpHeartbeat);
+      window.removeEventListener('popstate', handleHistoryBack);
       window.removeEventListener('pointerdown', closeHomepageMenus);
       window.removeEventListener('keydown', handleQuickToolShortcut);
       window.removeEventListener('docuflex:error', /** @type {EventListener} */ (handleNativeError));
@@ -861,6 +913,7 @@
   });
 
   onDestroy(() => {
+    clearTimeout(documentEnterTimer);
     if (shortcutTimer) clearTimeout(shortcutTimer);
     if (quickTooltipTimer) clearTimeout(quickTooltipTimer);
   });
@@ -873,24 +926,31 @@
   <link rel="icon" href="/logo.svg" type="image/svg+xml" />
 </svelte:head>
 
-<main class="editor-shell" class:editor-mode={activeTab !== null}>
+<main bind:this={shellElement} class="editor-shell" class:website={isWebsite} class:editor-mode={activeTab !== null} class:document-entering={documentEntering} class:ai-docked={aiPanelOpen && aiStatus?.available}>
   <header class="topbar">
-    <div class="brand-area">
-      <button class="logo-button" aria-label="Go to Home" title="Home" onclick={() => (activeTab = null)}>
-        <img class="logo" src="/logo.svg" alt="Docuflex" />
-      </button>
-      <nav class="history" aria-label="History navigation">
-        <button class="plain-button" aria-label="Undo" title="Undo" onclick={() => pdfEditor?.undo()}>
-          <img src="/arrowleft.svg" alt="" />
+    <div class="window-head">
+      <span class="window-head-texture" aria-hidden="true"></span>
+      {#if isWebsite}
+        <button class="web-logo" aria-label="Go to Home" title="Home" onclick={() => (activeTab = null)}>
+          <img src="/redesign/docuflex-logo1.svg" alt="Docuflex" />
         </button>
-        <button class="plain-button" aria-label="Redo" title="Redo" onclick={() => pdfEditor?.redo()}>
-          <img src="/arrowright.svg" alt="" />
+      {:else}
+        <img class="sidebar-toggle" src="/redesign/sidebar-toggle.svg" alt="" />
+      {/if}
+      <nav class="history" aria-label="History navigation">
+        <button class="history-button back" aria-label="Undo" title="Undo" onclick={() => pdfEditor?.undo()}>
+          <img src="/redesign/vector543.svg" alt="" />
+        </button>
+        <button class="history-button forward" aria-label="Redo" title="Redo" onclick={() => pdfEditor?.redo()}>
+          <img src="/redesign/vector542.svg" alt="" />
         </button>
       </nav>
     </div>
+    <span class="topbar-backdrop" aria-hidden="true"><img src="/redesign/rectangle997.png" alt="" /></span>
 
     <div class="tab-strip" role="tablist" aria-label="Open documents">
       {#each tabs as tab (tab.id)}
+        {@const tabLabel = tab.name.replace(/\.pdf$/i, '')}
         <button
           class:active={tab.id === activeTab}
           class:closing={closingTabs.has(tab.id)}
@@ -900,11 +960,11 @@
           aria-selected={tab.id === activeTab}
           onclick={() => (activeTab = tab.id)}
         >
-          <img src="/pdficon.svg" alt="" />
+          <img class="tab-file-icon" src={tab.id === activeTab ? '/redesign/subtract2.svg' : '/redesign/pdf-tab-inactive.svg'} alt="" />
           {#if tab.protection.enabled}
             <img class="tab-lock-icon" src="/lock.svg" alt="Encrypted" title="Encrypted" />
           {/if}
-          <span class="tab-title" class:long-title={tab.name.length > 22}>{tab.name}</span>
+          <span class="tab-title" class:long-title={tabLabel.length > 22}>{tabLabel}</span>
           <span
             class="close-tab"
             role="button"
@@ -913,13 +973,13 @@
             onclick={(event) => closeTab(event, tab.id)}
             onkeydown={(event) => (event.key === 'Enter' || event.key === ' ') && closeTab(event, tab.id)}
           >
-            <img src="/close.svg" alt="" />
+            <img class="close-tab-cross" src="/redesign/tab-close.svg" alt="" />
           </span>
         </button>
       {/each}
 
       <button class="add-tab" data-tab-motion="add" aria-label="Open another document" title="Open document" onclick={() => openFilePicker()}>
-        <img src="/plus.svg" alt="" />
+        <img class="add-tab-cross" src="/redesign/add-tab-plus.svg" alt="" />
       </button>
     </div>
 
@@ -939,7 +999,35 @@
           onblur={hideUtilityTooltip}
           onclick={() => { hideUtilityTooltip(); mcpPanelOpen = !mcpPanelOpen; if (mcpPanelOpen) { settingsPanelOpen = false; aiPanelOpen = false; void refreshMcpStatus(); } }}
         >
-          <img src="/mcp.svg" alt="" />
+          <img class="utility-icon-mcp" src="/redesign/icon-code-xml.svg" alt="" />
+        </button>
+      {/if}
+      {#if activeTab !== null && isWebsite}
+        {@const webSearchUtility = { label: 'Search', description: 'Find text in the current PDF.' }}
+        {@const webHomeUtility = { label: 'Home', description: 'Return to the document overview.' }}
+        <button
+          class="utility-button"
+          aria-label={webSearchUtility.label}
+          aria-describedby={utilityTooltip?.label === webSearchUtility.label ? 'utility-tooltip' : undefined}
+          onmouseenter={(event) => scheduleUtilityTooltip(webSearchUtility, event.currentTarget)}
+          onmouseleave={hideUtilityTooltip}
+          onfocus={(event) => scheduleUtilityTooltip(webSearchUtility, event.currentTarget)}
+          onblur={hideUtilityTooltip}
+          onclick={() => { hideUtilityTooltip(); pdfEditor?.openSearchPanel(); }}
+        >
+          <img class="utility-icon-search" src="/redesign/icon-search.svg" alt="" />
+        </button>
+        <button
+          class="utility-button"
+          aria-label={webHomeUtility.label}
+          aria-describedby={utilityTooltip?.label === webHomeUtility.label ? 'utility-tooltip' : undefined}
+          onmouseenter={(event) => scheduleUtilityTooltip(webHomeUtility, event.currentTarget)}
+          onmouseleave={hideUtilityTooltip}
+          onfocus={(event) => scheduleUtilityTooltip(webHomeUtility, event.currentTarget)}
+          onblur={hideUtilityTooltip}
+          onclick={() => { hideUtilityTooltip(); activeTab = null; }}
+        >
+          <img class="utility-icon-home" src="/redesign/vector537.svg" alt="" />
         </button>
       {/if}
       {#if activeTab !== null}
@@ -956,7 +1044,7 @@
           onblur={hideUtilityTooltip}
           onclick={() => { hideUtilityTooltip(); commentMode = !commentMode; }}
         >
-          <img src="/comments.svg" alt="" />
+          <img class="utility-icon-comments" src="/redesign/icon-message-square-quote.svg" alt="" />
         </button>
         {@const rasterUtility = { label: 'Adjust & Rasterize', description: 'Rotate, color-correct and rasterize pages.' }}
         <button
@@ -970,7 +1058,7 @@
           onblur={hideUtilityTooltip}
           onclick={() => { hideUtilityTooltip(); pdfEditor?.openRasterPanel(); }}
         >
-          <img src="/color.svg" alt="" />
+          <img class="utility-icon-palette" src="/redesign/icon-palette.svg" alt="" />
         </button>
         <button
           class="utility-button"
@@ -992,21 +1080,22 @@
         </button>
       {/if}
       {#each [
-        { id: 'home', icon: '/home.svg', label: 'Home', description: 'Return to the document overview.' },
+        { id: 'home', icon: '/redesign/vector537.svg', label: 'Home', description: 'Return to the document overview.' },
         { id: 'search', icon: '/search.svg', label: 'Search', description: 'Find text in the current PDF.' },
-        { id: 'assistant', icon: '/brain.svg', label: 'AI Chat', description: aiStatus?.available ? (aiBusy ? 'Docuflex AI is working…' : 'Ask AI about your document or let it edit for you.') : 'Chat with AI about your document.' },
-        { id: 'settings', icon: '/settings.svg', label: 'Settings', description: 'Open Docuflex settings.' }
-      ].filter((utility) => utility.id !== 'search' || activeTab !== null) as utility (utility.id)}
+        { id: 'assistant', icon: '/redesign/icon-brain.svg', label: 'AI Chat', description: aiStatus?.available ? (aiBusy ? 'Docuflex AI is working…' : 'Ask AI about your document or let it edit for you.') : aiStatus?.configurable ? 'Add your OpenRouter API key in Settings to chat with AI.' : 'Chat with AI about your document.' },
+        { id: 'settings', icon: '/redesign/icon-settings2.svg', label: 'Settings', description: 'Open Docuflex settings.' }
+      ].filter((utility) => activeTab === null ? utility.id !== 'search' : utility.id !== 'home' && utility.id !== 'search') as utility (utility.id)}
         {@const aiUtility = utility.id === 'assistant'}
         <button
           class="utility-button"
-          class:ai-disabled={aiUtility && !aiStatus?.available}
+          class:ai-disabled={aiUtility && !aiStatus?.configurable}
           class:ai-button={aiUtility}
           class:ai-busy={aiUtility && aiBusy}
           class:active={aiUtility && aiPanelOpen && aiStatus?.available}
+          data-utility={utility.id}
           aria-label={utility.label}
           aria-pressed={aiUtility ? aiPanelOpen : undefined}
-          disabled={aiUtility && !aiStatus?.available}
+          disabled={aiUtility && !aiStatus?.configurable}
           aria-describedby={utilityTooltip?.label === utility.label ? 'utility-tooltip' : undefined}
           onmouseenter={(event) => scheduleUtilityTooltip(utility, event.currentTarget)}
           onmouseleave={hideUtilityTooltip}
@@ -1016,7 +1105,8 @@
             hideUtilityTooltip();
             if (utility.id === 'home') activeTab = null;
             else if (utility.id === 'search') pdfEditor?.openSearchPanel();
-            else if (utility.id === 'settings') { settingsPanelOpen = !settingsPanelOpen; mcpPanelOpen = false; if (settingsPanelOpen) aiPanelOpen = false; }
+            else if (utility.id === 'settings') { settingsKeyFocus = false; settingsPanelOpen = !settingsPanelOpen; mcpPanelOpen = false; if (settingsPanelOpen) aiPanelOpen = false; }
+            else if (utility.id === 'assistant' && !aiStatus?.available) { settingsKeyFocus = true; settingsPanelOpen = true; mcpPanelOpen = false; aiPanelOpen = false; }
             else if (utility.id === 'assistant') { aiPanelOpen = !aiPanelOpen; if (aiPanelOpen) { settingsPanelOpen = false; mcpPanelOpen = false; } }
           }}
         >
@@ -1025,6 +1115,42 @@
       {/each}
     </nav>
   </header>
+
+  {#if !isWebsite}
+  <div class="sidebar-head">
+    <button class="sidebar-logo" aria-label="Go to Home" title="Home" onclick={() => (activeTab = null)}>
+      <img src="/redesign/docuflex-logo1.svg" alt="Docuflex" />
+    </button>
+    {#if activeTab !== null}
+      {@const searchUtility = { label: 'Search', description: 'Find text in the current PDF.' }}
+      {@const homeUtility = { label: 'Home', description: 'Return to the document overview.' }}
+      <button
+        class="sidebar-head-button"
+        aria-label={searchUtility.label}
+        aria-describedby={utilityTooltip?.label === searchUtility.label ? 'utility-tooltip' : undefined}
+        onmouseenter={(event) => scheduleUtilityTooltip(searchUtility, event.currentTarget)}
+        onmouseleave={hideUtilityTooltip}
+        onfocus={(event) => scheduleUtilityTooltip(searchUtility, event.currentTarget)}
+        onblur={hideUtilityTooltip}
+        onclick={() => { hideUtilityTooltip(); pdfEditor?.openSearchPanel(); }}
+      >
+        <img class="sidebar-search-icon" src="/redesign/icon-search.svg" alt="" />
+      </button>
+      <button
+        class="sidebar-head-button"
+        aria-label={homeUtility.label}
+        aria-describedby={utilityTooltip?.label === homeUtility.label ? 'utility-tooltip' : undefined}
+        onmouseenter={(event) => scheduleUtilityTooltip(homeUtility, event.currentTarget)}
+        onmouseleave={hideUtilityTooltip}
+        onfocus={(event) => scheduleUtilityTooltip(homeUtility, event.currentTarget)}
+        onblur={hideUtilityTooltip}
+        onclick={() => { hideUtilityTooltip(); activeTab = null; }}
+      >
+        <img class="sidebar-home-icon" src="/redesign/vector537.svg" alt="" />
+      </button>
+    {/if}
+  </div>
+  {/if}
 
   {#if utilityTooltip}
     <div
@@ -1079,7 +1205,7 @@
   <section class="workspace" aria-label="Document workspace">
     <button class="drop-zone" aria-label="Open or drop a document" onclick={() => openFilePicker()} ondragover={(event) => event.preventDefault()} ondrop={handleFileDrop}>
       <span class="drop-zone-content">
-        <img src="/bigplus.svg" alt="" />
+        <img src="/redesign/add-tab-plus.svg" alt="" />
         <span>Drop any Document to edit</span>
       </span>
     </button>
@@ -1091,7 +1217,7 @@
       </button>
 
       <label class="document-search">
-        <img src="/search.svg" alt="" />
+        <img src="/redesign/icon-search.svg" alt="" />
         <input bind:value={searchQuery} type="search" placeholder="Search" aria-label="Search recent documents" />
       </label>
 
@@ -1099,7 +1225,7 @@
         <div class="sort-button">
           <span>Sort By: <strong>{sortModeText}</strong></span>
           <button class="sort-arrow" class:expanded={sortExpanded} aria-label="Toggle sort options" aria-expanded={sortExpanded} onclick={(event) => { event.stopPropagation(); sortExpanded = !sortExpanded; }}>
-            <img src="/arrowright.svg" alt="" />
+            <span class="chevron" aria-hidden="true"></span>
           </button>
           {#if sortExpanded}
             <div class="sort-menu" transition:scale={{ duration: 125, easing: cubicOut, start: 0.94, opacity: 0 }}>
@@ -1175,7 +1301,7 @@
           <kbd>E</kbd>
         </button>
         <button class="recent-menu-item delete-document" role="menuitem" onclick={() => deleteRecentDocument(contextDocument)}>
-          <img src="/pages/trash.svg" alt="" />
+          <img src="/redesign/icon-trash1.svg" alt="" />
           <span>Delete</span>
           <kbd>D</kbd>
         </button>
@@ -1197,28 +1323,30 @@
       <HomeProtectPanel onClose={() => (protectHomePanelOpen = false)} />
     {/if}
     {#if translatePanelOpen}
-      <TranslateFilesPanel onClose={() => (translatePanelOpen = false)} />
+      <TranslateFilesPanel onClose={() => (translatePanelOpen = false)} onOpen={(file) => addFileTab(file)} />
     {/if}
     {#if flattenPanelOpen}
       <FlattenFilesPanel onClose={() => (flattenPanelOpen = false)} />
     {/if}
   </section>
-  {:else}
-    {#key activeDocument.id}
-      <PdfEditor
-        file={activeDocument.file}
-        protection={activeDocument.protection}
-        initialTool={activeDocument.initialTool ?? 'select'}
-        {commentMode}
-        documentId={activeDocument.id}
-        savedState={editorStates.get(activeDocument.id) ?? null}
-        onSaveState={saveEditorState}
-        onProtectionChange={(protection) => updateDocumentProtection(activeDocument.id, protection)}
-        onRequestClose={() => requestCloseTab(activeDocument.id)}
-        bind:this={pdfEditor}
-      />
-    {/key}
   {/if}
+
+  <!-- One editor per open tab stays mounted, so switching tabs never reloads a PDF. -->
+  {#each tabs as tab (tab.id)}
+    <PdfEditor
+      file={tab.file}
+      protection={tab.protection}
+      initialTool={tab.initialTool ?? 'select'}
+      active={tab.id === activeTab}
+      {commentMode}
+      documentId={tab.id}
+      savedState={editorStates.get(tab.id) ?? null}
+      onSaveState={saveEditorState}
+      onProtectionChange={(protection) => updateDocumentProtection(tab.id, protection)}
+      onRequestClose={() => requestCloseTab(tab.id)}
+      bind:this={editorRefs[tab.id]}
+    />
+  {/each}
 
   {#if aiStatus?.available}
     <AiChatPanel
@@ -1236,7 +1364,7 @@
   {/if}
 
   {#if settingsPanelOpen}
-    <SettingsPanel onClose={() => (settingsPanelOpen = false)} />
+    <SettingsPanel aiStatus={aiStatus} focusKey={settingsKeyFocus} onAiKeyChange={refreshAiStatus} onClose={() => (settingsPanelOpen = false)} />
   {/if}
 
   {#if errorToast}
@@ -1279,53 +1407,43 @@
     font: inherit;
   }
 
+  /*
+   * The AI chat docks on the right, the full height of the window: the shell
+   * reserves its width as right padding (top bar and document shrink), and the
+   * panel sits in that padding. Padding rather than a third grid column, which
+   * WebKit did not collapse to zero while the chat was closed.
+   */
   .editor-shell {
     --ui-scale: 0.85;
+    --ai-dock: 0px;
+    position: relative;
+    box-sizing: border-box;
     display: grid;
     grid-template-columns: 310px minmax(0, 1fr);
+    padding-right: var(--ai-dock);
     grid-template-rows: 56px minmax(0, 1fr);
-    width: 117.6470588vw;
-    height: 117.6470588dvh;
+    width: calc(100vw / var(--ui-scale));
+    height: calc(100dvh / var(--ui-scale));
     min-width: 760px;
+    overflow: clip;
     background: #f5f5f5;
     zoom: var(--ui-scale);
+    transition: padding-right 280ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .editor-shell.ai-docked {
+    --ai-dock: 440px;
   }
 
   .topbar {
     grid-column: 1 / -1;
+    min-width: 0;
     display: grid;
     grid-template-columns: 310px minmax(0, 1fr) auto;
     height: 56px;
     background: #fff;
     border-bottom: 1px solid #cecece;
     overflow: hidden;
-  }
-
-  .brand-area {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    min-width: 0;
-    padding: 0 17px 0 21px;
-    border-right: 1px solid #cfcfcf;
-  }
-
-  .logo {
-    display: block;
-    width: 187px;
-    height: 41px;
-    flex: 0 0 auto;
-  }
-
-  .logo-button {
-    display: grid;
-    place-items: center;
-    width: 187px;
-    height: 41px;
-    padding: 0;
-    border: 0;
-    background: transparent;
-    cursor: pointer;
   }
 
   .history {
@@ -1335,7 +1453,6 @@
     margin-left: 12px;
   }
 
-  .plain-button,
   .add-tab {
     display: grid;
     place-items: center;
@@ -1344,45 +1461,6 @@
     background: transparent;
     cursor: pointer;
     transition: opacity 150ms ease;
-  }
-
-  .plain-button {
-    position: relative;
-    width: 18px;
-    height: 22px;
-  }
-
-  .plain-button img {
-    width: 16px;
-    height: 17px;
-    transition: filter 150ms ease, opacity 150ms ease, transform 150ms ease;
-  }
-
-  .plain-button::after {
-    position: absolute;
-    width: 16px;
-    height: 17px;
-    background: #000;
-    content: "";
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 150ms ease, transform 150ms ease;
-    -webkit-mask: center / contain no-repeat;
-    mask: center / contain no-repeat;
-  }
-
-  .plain-button:first-child::after {
-    -webkit-mask-image: url('/arrowleft.svg');
-    mask-image: url('/arrowleft.svg');
-  }
-
-  .plain-button:last-child::after {
-    -webkit-mask-image: url('/arrowright.svg');
-    mask-image: url('/arrowright.svg');
-  }
-
-  .plain-button:hover::after {
-    opacity: 0.7;
   }
 
   .tab-strip {
@@ -1545,17 +1623,14 @@
     50% { opacity: 0.35; }
   }
 
-  /* Green dot while the MCP server is on and this window is serving it. */
-  .mcp-button.mcp-live::after {
-    position: absolute;
-    top: 6px;
-    right: 6px;
-    width: 7px;
-    height: 7px;
-    border: 1.5px solid #f8f8f8;
-    border-radius: 50%;
-    background: #2fb344;
-    content: '';
+  /* While the MCP server is on and this window is serving it, the button's fill slowly breathes 5% darker. */
+  .mcp-button.mcp-live:not(.active):not(:hover) {
+    animation: mcp-live-pulse 2.6s ease-in-out infinite alternate;
+  }
+
+  @keyframes mcp-live-pulse {
+    from { background-color: #f8f8f8; }
+    to { background-color: #ececec; }
   }
 
   .utility-button.active,
@@ -1593,27 +1668,19 @@
     transition: filter 160ms ease, opacity 160ms ease, transform 160ms ease;
   }
 
-  .plain-button:hover img,
   .add-tab:hover img,
   .close-tab:hover img,
   .utility-button:hover img {
     filter: brightness(0.72);
   }
 
-  .plain-button:active img,
   .add-tab:active img,
   .close-tab:active img,
   .utility-button:active img {
     transform: scale(0.94);
   }
 
-  .plain-button:active::after {
-    transform: scale(0.94);
-  }
-
   @media (prefers-reduced-motion: reduce) {
-    .plain-button,
-    .plain-button img,
     .add-tab,
     .add-tab img,
     .document-tab,
@@ -1712,13 +1779,15 @@
   }
 
   .sidebar {
+    position: relative;
+    z-index: 2;
     grid-column: 1;
     grid-row: 2;
     min-height: 0;
     overflow-y: auto;
-    background: #f1f1f1;
-    border-right: 1px solid #cfcfcf;
-    box-shadow: inset -11px 0 25px 0 rgba(0, 0, 0, 0.03);
+    background: #efefef;
+    border-right: 1px solid #c7c7c7;
+    box-shadow: 0 0 98.6px rgba(0, 0, 0, 0.06);
     scrollbar-width: none;
   }
 
@@ -1731,23 +1800,25 @@
   .quick-tools {
     display: flex;
     flex-direction: column;
-    gap: 14px;
-    padding: 20px 12px 0;
+    gap: 10px;
+    /* Clears the 61px logo row that sits over the sidebar, like the editor's thumbnails. */
+    padding: 79px 13px 24px 12px;
   }
 
   .quick-tool {
     display: flex;
     align-items: center;
-    width: 286px;
-    height: 61px;
-    min-height: 61px;
-    padding: 0 15px;
-    border: 1px solid rgba(0, 0, 0, 0.08);
-    border-radius: 10px;
-    background: rgba(107, 107, 107, 0.05);
-    color: rgba(0, 0, 0, 0.7);
+    box-sizing: border-box;
+    width: 100%;
+    height: 68px;
+    min-height: 68px;
+    padding: 0 12px 0 15px;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 15px;
+    background: rgba(255, 255, 255, 0.6);
+    color: rgba(0, 0, 0, 0.75);
     cursor: pointer;
-    transition: background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease, transform 160ms ease;
+    transition: background-color 180ms ease, border-color 180ms ease, transform 160ms ease;
   }
 
   .quick-tool-tooltip {
@@ -1862,11 +1933,11 @@
   }
 
   .quick-tool-name {
-    font-family: Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    font-size: 18px;
+    font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 21px;
     font-weight: 400;
     line-height: 1;
-    letter-spacing: -0.2px;
+    letter-spacing: -0.21px;
     white-space: nowrap;
     -webkit-font-smoothing: antialiased;
   }
@@ -1874,28 +1945,27 @@
   .quick-tool kbd {
     display: grid;
     place-items: center;
-    width: 27px;
+    box-sizing: border-box;
+    width: 26px;
     height: 27px;
     margin-left: auto;
-    border: 1px solid rgba(0, 0, 0, 0.04);
+    border: 1px solid rgba(0, 0, 0, 0.015);
     border-radius: 6px;
-    background: rgba(0, 0, 0, 0.055);
+    background: rgba(0, 0, 0, 0.025);
     color: rgba(0, 0, 0, 0.165);
-    font-family: Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    font-size: 18px;
+    font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 20px;
     font-weight: 400;
     line-height: 1;
-    letter-spacing: 1.8px;
-    text-indent: 1.8px;
-    transition: background-color 160ms ease, color 160ms ease;
+    letter-spacing: 0;
+    transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
     -webkit-font-smoothing: antialiased;
   }
 
   .quick-tool:hover,
   .quick-tool.keyboard-active {
-    border-color: rgba(0, 0, 0, 0.13);
-    background: rgba(107, 107, 107, 0.09);
-    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.035);
+    border-color: rgba(0, 0, 0, 0.18);
+    background: #fff;
   }
 
   .quick-tool-icon :global([stroke="#777777"]),
@@ -1922,8 +1992,8 @@
 
   .quick-tool:hover kbd,
   .quick-tool.keyboard-active kbd {
-    background: rgba(0, 0, 0, 0.075);
-    color: rgba(0, 0, 0, 0.25);
+    border-color: rgba(0, 0, 0, 0.02);
+    background: rgba(0, 0, 0, 0.055);
   }
 
   .quick-tool:active {
@@ -1943,10 +2013,13 @@
     grid-column: 2;
     grid-row: 2;
     display: grid;
-    grid-template-rows: 155px 65px minmax(0, 1fr);
+    grid-template-rows: 154px 76px minmax(0, 1fr);
     min-width: 0;
     min-height: 0;
-    background: #f5f5f5;
+    background:
+      linear-gradient(90deg, rgba(0, 0, 0, 0.045) 1px, transparent 1px) 58px 122px / 140px 140px,
+      linear-gradient(180deg, rgba(0, 0, 0, 0.045) 1px, transparent 1px) 58px 122px / 140px 140px,
+      #e2e2e2;
   }
 
   .drop-zone {
@@ -1954,35 +2027,29 @@
     display: grid;
     grid-row: 1;
     place-items: center;
-    height: 126px;
-    margin: 14px 17px 15px 14px;
+    height: 130px;
+    margin: 12px 13px 12px;
     padding: 0;
     overflow: hidden;
-    border: 1px solid rgba(202, 202, 202, 0.65);
-    border-radius: 12px;
-    background: rgba(83, 83, 83, 0.05) url('/pattern.jpg') center / cover;
-    color: rgba(0, 0, 0, 0.375);
+    border: 1.5px solid #c3c2c2;
+    border-radius: 21px;
+    background: rgba(240, 236, 236, 0.75);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+    color: rgba(0, 0, 0, 0.5);
     cursor: pointer;
-    transition: border-color 180ms ease, box-shadow 180ms ease, color 180ms ease;
-  }
-
-  .drop-zone::after {
-    position: absolute;
-    inset: 0;
-    border-radius: inherit;
-    box-shadow: inset 0 0 18px rgba(0, 0, 0, 0.025);
-    content: "";
-    pointer-events: none;
+    backdrop-filter: blur(1.3px);
+    -webkit-backdrop-filter: blur(1.3px);
+    transition: border-color 180ms ease, background-color 180ms ease, color 180ms ease;
   }
 
   .drop-zone-content {
     z-index: 1;
     display: flex;
     align-items: center;
-    gap: 13px;
-    font-family: Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    gap: 14px;
+    font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-size: 28px;
-    font-weight: 200;
+    font-weight: 300;
     line-height: 1;
     letter-spacing: -0.28px;
     -webkit-font-smoothing: antialiased;
@@ -1995,13 +2062,13 @@
   }
 
   .drop-zone:hover {
-    border-color: rgba(150, 150, 150, 0.7);
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.035);
-    color: rgba(0, 0, 0, 0.55);
+    border-color: #b3b1b1;
+    background: rgba(246, 243, 243, 0.85);
+    color: rgba(0, 0, 0, 0.75);
   }
 
   .drop-zone:hover .drop-zone-content img {
-    filter: brightness(0.78);
+    filter: brightness(0.6);
     transform: scale(1.04);
   }
 
@@ -2010,36 +2077,46 @@
   }
 
   .drop-zone:active {
-    color: rgba(0, 0, 0, 0.65);
+    color: #000;
   }
 
   .document-browser {
+    position: relative;
+    z-index: 3;
     display: flex;
     align-items: center;
     grid-row: 2;
-    height: 65px;
-    padding: 0 42px;
-    border-top: 1px solid #e0e0e0;
-    border-bottom: 1px solid #e0e0e0;
-    background: rgba(255, 255, 255, 0.65);
-    color: rgba(0, 0, 0, 0.7);
-    font-family: Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    font-size: 18px;
+    box-sizing: border-box;
+    height: 64px;
+    margin: 0 13px 12px;
+    padding: 0 7px 0 18px;
+    border: 1.5px solid #c3c2c2;
+    border-radius: 21px;
+    background: rgba(240, 236, 236, 0.75);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+    color: rgba(0, 0, 0, 0.75);
+    font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 21px;
     font-weight: 400;
-    letter-spacing: -0.18px;
+    letter-spacing: -0.21px;
+    backdrop-filter: blur(1.3px);
+    -webkit-backdrop-filter: blur(1.3px);
     -webkit-font-smoothing: antialiased;
   }
 
   .recent-heading {
     display: flex;
     align-items: center;
-    gap: 7px;
-    width: 200px;
-    height: 40px;
+    gap: 8px;
+    flex: 0 0 auto;
+    height: 48px;
+    margin-right: 22px;
     padding: 0;
     border: 0;
     background: transparent;
-    color: rgba(0, 0, 0, 0.7);
+    color: rgba(0, 0, 0, 0.75);
+    font: inherit;
+    letter-spacing: inherit;
     cursor: pointer;
     white-space: nowrap;
     transition: color 160ms ease;
@@ -2065,7 +2142,7 @@
   }
 
   .recent-heading:hover {
-    color: rgba(0, 0, 0, 0.9);
+    color: #000;
   }
 
   .recent-heading:hover .recent-arrow :global(path) {
@@ -2075,43 +2152,44 @@
   .document-search {
     display: flex;
     align-items: center;
+    box-sizing: border-box;
     width: 314px;
-    height: 40px;
-    padding: 0 8px;
-    border: 1px solid rgba(0, 0, 0, 0.08);
-    border-radius: 10px;
-    background: rgba(107, 107, 107, 0.05);
-    transition: background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+    height: 48px;
+    padding: 0 13px 0 11px;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 15px;
+    background: #fff;
+    transition: border-color 180ms ease;
   }
 
   .document-search:focus-within {
-    border-color: rgba(0, 0, 0, 0.16);
-    background: rgba(255, 255, 255, 0.75);
-    box-shadow: none;
+    border-color: rgba(0, 0, 0, 0.18);
   }
 
   .document-search img {
-    width: 24px;
-    height: 24px;
+    width: 25px;
+    height: 25px;
     flex: 0 0 auto;
+    opacity: 0.75;
   }
 
   .document-search input {
     width: 100%;
     min-width: 0;
-    height: 38px;
-    padding: 0 0 0 6px;
+    height: 46px;
+    padding: 0 0 0 7px;
     border: 0;
     outline: 0;
     background: transparent;
     color: rgba(0, 0, 0, 0.75);
     font: inherit;
+    letter-spacing: inherit;
     appearance: none;
     -webkit-appearance: none;
   }
 
   .document-search input::placeholder {
-    color: rgba(0, 0, 0, 0.47);
+    color: rgba(0, 0, 0, 0.5);
     opacity: 1;
   }
 
@@ -2122,7 +2200,7 @@
   .browser-actions {
     display: flex;
     align-items: center;
-    gap: 13px;
+    gap: 10px;
     margin-left: auto;
   }
 
@@ -2131,99 +2209,119 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    height: 40px;
-    padding: 0 9px 0 12px;
-    border: 1px solid rgba(0, 0, 0, 0.08);
-    border-radius: 10px;
-    background: rgba(107, 107, 107, 0.05);
-    color: rgba(0, 0, 0, 0.7);
+    box-sizing: border-box;
+    height: 48px;
+    padding: 0 11px 0 13px;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 15px;
+    background: #fff;
+    color: rgba(0, 0, 0, 0.5);
+    font: inherit;
+    letter-spacing: inherit;
     cursor: pointer;
-    transition: background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease, transform 150ms ease;
+    transition: border-color 180ms ease, transform 150ms ease;
   }
 
   .sort-button {
     position: relative;
-    width: 175px;
-    padding-right: 3px;
+    width: 212px;
+    padding-right: 4px;
+    white-space: nowrap;
     cursor: default;
   }
 
   .filter-button {
-    width: 120px;
+    width: 128px;
   }
 
   .sort-button strong,
   .filter-button strong {
-    color: #000;
+    color: rgba(0, 0, 0, 0.75);
     font-weight: 400;
   }
 
   .sort-arrow {
     display: grid;
     place-items: center;
-    width: 28px;
-    height: 32px;
+    width: 32px;
+    height: 40px;
     padding: 0;
     border: 0;
     background: transparent;
     cursor: pointer;
   }
 
-  .sort-arrow img {
-    width: 16px;
-    height: 17px;
-    transform: rotate(90deg) translateY(2px);
-    transition: filter 150ms ease, transform 200ms cubic-bezier(0.22, 1, 0.36, 1);
+  .sort-arrow .chevron {
+    width: 8px;
+    height: 8px;
+    margin-top: -5px;
+    border-right: 1.5px solid rgba(0, 0, 0, 0.45);
+    border-bottom: 1.5px solid rgba(0, 0, 0, 0.45);
+    transform: rotate(45deg);
+    transition: border-color 150ms ease, margin-top 200ms cubic-bezier(0.22, 1, 0.36, 1), transform 200ms cubic-bezier(0.22, 1, 0.36, 1);
   }
 
-  .sort-arrow.expanded img {
-    transform: rotate(270deg) translateY(-2px);
+  .sort-arrow:hover .chevron {
+    border-color: rgba(0, 0, 0, 0.75);
+  }
+
+  .sort-arrow.expanded .chevron {
+    margin-top: 4px;
+    transform: rotate(-135deg);
   }
 
   .sort-menu {
     position: absolute;
     z-index: 70;
-    top: calc(100% + 13px);
+    top: calc(100% + 10px);
     right: 0;
-    width: 204px;
-    padding: 5px;
-    border: 1px solid rgba(0, 0, 0, 0.18);
+    box-sizing: border-box;
+    width: 206px;
+    padding: 4px 5px;
+    border: 1px solid rgba(0, 0, 0, 0.15);
     border-radius: 15px;
-    background: rgba(255, 255, 255, 0.78);
-    box-shadow: 0 7px 18px rgba(0, 0, 0, 0.11), 0 2px 5px rgba(0, 0, 0, 0.05);
-    backdrop-filter: blur(18px);
-    -webkit-backdrop-filter: blur(18px);
+    background: rgba(255, 255, 255, 0.75);
+    box-shadow: 0 0 100px rgba(0, 0, 0, 0.08);
+    backdrop-filter: blur(4.05px);
+    -webkit-backdrop-filter: blur(4.05px);
     transform-origin: top right;
   }
 
   .sort-menu-item {
     display: grid;
-    grid-template-columns: 28px 1fr 28px;
+    grid-template-columns: 28px 1fr 26px;
     align-items: center;
+    box-sizing: border-box;
     width: 100%;
-    height: 40px;
-    padding: 0 7px;
+    height: 39px;
+    padding: 0 5px 0 6px;
     border: 1px solid transparent;
-    border-radius: 9px;
+    border-radius: 10px;
     background: transparent;
-    color: #3f3f3f;
-    font-size: 18px;
+    color: rgba(0, 0, 0, 0.75);
+    font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 20px;
+    letter-spacing: -0.2px;
     text-align: left;
     cursor: pointer;
+    transition: color 180ms ease, background-color 180ms ease, border-color 180ms ease;
   }
 
   .sort-menu-item.active {
     border-color: rgba(0, 0, 0, 0.08);
-    background: rgba(234, 234, 234, 0.574);
+    background: rgba(107, 107, 107, 0.05);
+    color: #000;
   }
 
   .sort-menu-item:hover {
+    border-color: rgba(0, 0, 0, 0.08);
+    background: rgba(107, 107, 107, 0.05);
     color: #000;
   }
 
   .sort-check {
     opacity: 0;
-    color: #1684f8;
+    color: #0073ff;
     text-align: center;
   }
 
@@ -2234,18 +2332,17 @@
   .filter-button img {
     width: 24px;
     height: 24px;
-    transition: filter 150ms ease;
+    opacity: 0.75;
+    transition: filter 150ms ease, opacity 150ms ease;
   }
 
   .sort-button:hover,
   .filter-button:hover {
-    border-color: rgba(0, 0, 0, 0.13);
-    background: rgba(107, 107, 107, 0.09);
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.025);
+    border-color: rgba(0, 0, 0, 0.18);
   }
 
   .filter-button:hover img {
-    filter: brightness(0.75);
+    opacity: 1;
   }
 
   .sort-arrow:active,
@@ -2256,14 +2353,56 @@
   .recent-grid {
     display: grid;
     grid-row: 3;
-    grid-template-columns: repeat(5, minmax(0, 264px));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     grid-auto-rows: auto;
-    gap: 45px clamp(18px, 2.4vw, 46px);
-    justify-content: space-between;
+    gap: 17px clamp(9px, 1.2vw, 23px);
     align-content: start;
-    padding: 37px 42px 42px;
+    padding: 13px 21px 21px;
     overflow: auto;
     scrollbar-width: none;
+  }
+
+  /* Home fades in when you come back to it. */
+  .quick-tools,
+  .workspace > :is(.drop-zone, .document-browser, .recent-grid) {
+    animation: home-view-in 240ms ease-out both;
+  }
+
+  @keyframes home-view-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  /* Opening a document: the editor fades in and its pages and thumbnails settle into place. */
+  .editor-shell.document-entering :global(.pdf-workspace:not(.editor-inactive)),
+  .editor-shell.document-entering :global(.editor-sidebar:not(.editor-inactive)) {
+    animation: document-view-in 220ms ease-out both;
+  }
+
+  .editor-shell.document-entering :global(.pdf-workspace:not(.editor-inactive) .pdf-page),
+  .editor-shell.document-entering :global(.editor-sidebar:not(.editor-inactive) .thumbnail-page) {
+    animation: document-page-in 480ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  @keyframes -global-document-view-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  @keyframes -global-document-page-in {
+    from { opacity: 0; transform: translateY(14px) scale(0.985); }
+    to { opacity: 1; transform: none; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .quick-tools,
+    .workspace > :is(.drop-zone, .document-browser, .recent-grid),
+    .editor-shell.document-entering :global(.pdf-workspace),
+    .editor-shell.document-entering :global(.editor-sidebar),
+    .editor-shell.document-entering :global(.pdf-page),
+    .editor-shell.document-entering :global(.thumbnail-page) {
+      animation: none;
+    }
   }
 
   .recent-grid::-webkit-scrollbar {
@@ -2274,7 +2413,7 @@
 
   .recent-document {
     display: grid;
-    grid-template-rows: auto 50px;
+    grid-template-rows: auto 48px;
     width: 100%;
     height: auto;
     padding: 0;
@@ -2288,21 +2427,23 @@
   .document-preview {
     display: grid;
     place-items: center;
+    box-sizing: border-box;
     width: 100%;
     height: auto;
-    aspect-ratio: 264 / 355;
+    aspect-ratio: 266 / 355;
     overflow: hidden;
     border: 1px solid #dadada;
-    border-radius: 7px;
+    border-radius: 8px;
     background: #fff;
     box-shadow: 3px 8px 16px rgba(0, 0, 0, 0.05);
-    transition: border-color 180ms ease, box-shadow 180ms ease, background-color 180ms ease;
+    transition: border-color 170ms ease, box-shadow 170ms ease, background-color 170ms ease;
   }
 
   .recent-thumbnail {
     display: block;
     width: 100%;
     height: 100%;
+    border-radius: 7px;
     object-fit: contain;
     background: #fff;
     animation: recent-thumbnail-in 180ms ease both;
@@ -2319,24 +2460,23 @@
     justify-content: center;
     gap: 6px;
     width: 100%;
-    height: 50px;
+    min-width: 0;
     overflow: hidden;
-    font-family: Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    font-size: 18px;
+    font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 20px;
     font-weight: 400;
     line-height: 1;
-    letter-spacing: -0.18px;
-    text-align: center;
+    letter-spacing: -0.2px;
     white-space: nowrap;
-    -webkit-mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 28px), transparent 100%);
-    mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 28px), transparent 100%);
     -webkit-font-smoothing: antialiased;
   }
+
 
   .document-name > span {
     display: block;
     max-width: 100%;
     overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
   }
 
@@ -2353,7 +2493,9 @@
   }
 
   .open-document .document-preview {
-    background: rgba(255, 255, 255, 0.36);
+    border-color: #c3c2c2;
+    background: rgba(240, 236, 236, 0.75);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
   }
 
   .open-document-plus {
@@ -2378,13 +2520,18 @@
   }
 
   .recent-document:hover {
-    color: rgba(0, 0, 0, 0.7);
+    color: rgba(0, 0, 0, 0.75);
     transform: translateY(-2px);
   }
 
   .recent-document:hover .document-preview {
-    border-color: #cfcfcf;
-    box-shadow: 3px 10px 20px rgba(0, 0, 0, 0.075);
+    border-color: #bbb;
+    box-shadow: 4px 8px 18px rgba(0, 0, 0, 0.08);
+  }
+
+  .open-document:hover .document-preview {
+    border-color: #b3b1b1;
+    background: rgba(246, 243, 243, 0.85);
   }
 
   .open-document:hover .open-document-plus {
@@ -2400,46 +2547,46 @@
     position: fixed;
     z-index: 70;
     box-sizing: border-box;
-    width: 204px;
-    padding: 5px;
-    border: 1px solid rgba(0, 0, 0, 0.18);
+    width: 206px;
+    padding: 4px 5px;
+    border: 1px solid rgba(0, 0, 0, 0.15);
     border-radius: 15px;
-    background: rgba(255, 255, 255, 0.78);
-    box-shadow: 0 7px 18px rgba(0, 0, 0, 0.11), 0 2px 5px rgba(0, 0, 0, 0.05);
-    backdrop-filter: blur(18px);
-    -webkit-backdrop-filter: blur(18px);
+    background: rgba(255, 255, 255, 0.75);
+    box-shadow: 0 0 100px rgba(0, 0, 0, 0.08);
+    backdrop-filter: blur(4.05px);
+    -webkit-backdrop-filter: blur(4.05px);
     transform-origin: top left;
   }
 
   .recent-menu-item {
     display: grid;
-    grid-template-columns: 28px 1fr 28px;
+    grid-template-columns: 28px 1fr 26px;
     align-items: center;
+    box-sizing: border-box;
     width: 100%;
-    height: 40px;
-    padding: 0 7px;
+    height: 39px;
+    padding: 0 5px 0 6px;
     border: 1px solid transparent;
     border-radius: 10px;
     background: transparent;
-    color: #3f3f3f;
-    font-family: Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    font-size: 18px;
+    color: rgba(0, 0, 0, 0.75);
+    font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 20px;
+    letter-spacing: -0.2px;
     text-align: left;
     cursor: pointer;
     transition:
       color 180ms cubic-bezier(0.2, 0.7, 0.2, 1),
       background-color 180ms cubic-bezier(0.2, 0.7, 0.2, 1),
-      border-color 180ms cubic-bezier(0.2, 0.7, 0.2, 1),
-      transform 180ms cubic-bezier(0.2, 0.7, 0.2, 1);
+      border-color 180ms cubic-bezier(0.2, 0.7, 0.2, 1);
   }
 
   .recent-menu-item:hover,
   .recent-menu-item:focus-visible {
-    border-color: rgba(0, 0, 0, 0.07);
-    background: rgba(234, 234, 234, 0.62);
-    color: #111;
+    border-color: rgba(0, 0, 0, 0.08);
+    background: rgba(107, 107, 107, 0.05);
+    color: #000;
     outline: none;
-    transform: translateX(1px);
   }
 
   .recent-menu-item img {
@@ -2447,13 +2594,13 @@
     width: 20px;
     height: 20px;
     object-fit: contain;
-    transform: translateX(-2px);
     transition: filter 180ms cubic-bezier(0.2, 0.7, 0.2, 1), opacity 180ms ease;
   }
 
   .recent-menu-item.export-document img {
     width: 24px;
     height: 24px;
+    margin-left: -2px;
   }
 
   .recent-menu-item:hover:not(.delete-document) img,
@@ -2464,75 +2611,638 @@
   .recent-menu-item kbd {
     display: grid;
     place-items: center;
-    width: 28px;
-    height: 28px;
-    border: 1px solid rgba(0, 0, 0, 0.04);
-    border-radius: 7px;
-    background: rgba(0, 0, 0, 0.045);
-    color: rgba(0, 0, 0, 0.22);
+    box-sizing: border-box;
+    width: 26px;
+    height: 27px;
+    border: 1px solid rgba(0, 0, 0, 0.015);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.025);
+    color: rgba(0, 0, 0, 0.165);
     font-family: inherit;
-    font-size: 17px;
+    font-size: 20px;
+    letter-spacing: 0;
     transition: color 180ms ease, background-color 180ms ease, border-color 180ms ease;
   }
 
   .recent-menu-item:hover kbd,
   .recent-menu-item:focus-visible kbd {
-    border-color: rgba(0, 0, 0, 0.06);
-    background: rgba(0, 0, 0, 0.065);
-    color: rgba(0, 0, 0, 0.34);
+    border-color: rgba(0, 0, 0, 0.02);
+    background: rgba(0, 0, 0, 0.055);
   }
 
   .recent-menu-item.delete-document {
-    color: #ff2f38;
+    color: rgba(255, 0, 0, 0.85);
   }
 
   .file-input {
     display: none;
   }
 
-  @media (max-width: 935px) {
-    .editor-shell {
-      grid-template-columns: 260px minmax(0, 1fr);
-    }
-
-    .topbar {
-      grid-template-columns: 260px minmax(0, 1fr) auto;
-    }
-
-    .brand-area {
-      padding-left: 14px;
-      padding-right: 12px;
-    }
-
-    .logo {
-      width: 154px;
-      height: auto;
-    }
-
-    .logo-button {
-      width: 154px;
-    }
-
-    .history {
-      gap: 12px;
-    }
-
-    .document-tab {
-      padding: 0 14px;
-      font-size: 16px;
-    }
-
-    .quick-tools {
-      padding-right: 14px;
-      padding-left: 14px;
-    }
-
-    .quick-tool {
-      width: 232px;
-    }
-
-    .quick-tool.wide-icon .quick-tool-icon {
-      flex-basis: 106px;
-    }
+  /* ---- Redesign (Figma "Redesign" frame), shared by home and the document view. Values are frame px; the shell's 0.85 zoom maps them to the screen. ---- */
+  .editor-shell,
+  .editor-shell.editor-mode {
+    background: #e2e2e2;
   }
+
+  .editor-shell .topbar {
+    position: relative;
+    z-index: 6;
+    grid-template-columns: 310px minmax(0, 1fr) auto;
+    isolation: isolate;
+    overflow: visible;
+    border-bottom: 0;
+    background: transparent;
+    font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  .window-head {
+    position: relative;
+    z-index: 1;
+    grid-column: 1;
+    height: 56px;
+    overflow: hidden;
+  }
+
+  .window-head-texture {
+    position: absolute;
+    inset: -2px;
+    background: #efefef;
+    pointer-events: none;
+  }
+
+  .window-head-texture::before,
+  .window-head-texture::after {
+    position: absolute;
+    inset: 2px;
+    content: '';
+  }
+
+  /* The exported texture already carries the layer's 50% opacity in its alpha channel. */
+  .window-head-texture::before {
+    background: url('/redesign/rectangle992.png') center / 100% 100% no-repeat;
+  }
+
+  .window-head-texture::after {
+    background:
+      linear-gradient(90deg, rgba(255, 255, 255, 0) 43.47%, #fff 100%),
+      linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, #fff 100%);
+  }
+
+  .sidebar-toggle {
+    position: absolute;
+    top: 18px;
+    left: 186px;
+    width: 20px;
+    height: 20px;
+    pointer-events: none;
+  }
+
+  .editor-shell .history {
+    position: static;
+    margin: 0;
+  }
+
+  .history-button {
+    position: absolute;
+    top: 14px;
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .history-button.back {
+    left: 226px;
+  }
+
+  .history-button.forward {
+    left: 266px;
+  }
+
+  .history-button img {
+    display: block;
+    transition: opacity 150ms ease;
+  }
+
+  .history-button.back img {
+    width: 18.4px;
+    height: 16.649px;
+    transform: rotate(-90deg) scaleY(-1);
+  }
+
+  .history-button.forward img {
+    width: 18.5px;
+    height: 16.7668px;
+    transform: rotate(-90deg);
+  }
+
+  .history-button:hover img {
+    opacity: 0.7;
+  }
+
+  .history-button:active img {
+    opacity: 0.55;
+  }
+
+  .topbar-backdrop {
+    position: absolute;
+    z-index: 0;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 310px;
+    overflow: hidden;
+    border-bottom: 1px solid #b3b0b0;
+    background: rgba(255, 255, 255, 0.65);
+    box-shadow: 0 4px 50px rgba(0, 0, 0, 0.1);
+    pointer-events: none;
+  }
+
+  /* The exported texture already carries the layer's 25% opacity in its alpha channel. */
+  .topbar-backdrop img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: fill;
+  }
+
+  .topbar-backdrop::after {
+    position: absolute;
+    inset: 0;
+    background:
+      linear-gradient(90deg, rgba(255, 255, 255, 0) 33.804%, #fff 100%),
+      linear-gradient(90deg, #fff 0%, rgba(255, 255, 255, 0) 54.345%);
+    content: '';
+  }
+
+  .editor-shell .tab-strip {
+    position: relative;
+    z-index: 1;
+    height: 56px;
+  }
+
+  .editor-shell .document-tab {
+    position: relative;
+    gap: 11px;
+    max-width: 340px;
+    height: 56px;
+    margin-right: -1px;
+    padding: 0 27px 0 17px;
+    border: 1px solid #b0b0b0;
+    border-top: 0;
+    background: linear-gradient(180deg, rgba(209, 209, 209, 0.15) 0%, rgba(156, 156, 156, 0.15) 100%);
+    color: rgba(154, 63, 63, 0.75);
+    font-family: "Geist Variable", Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 21px;
+    font-weight: 400;
+    letter-spacing: -0.21px;
+  }
+
+  .editor-shell .document-tab.active {
+    z-index: 1;
+    padding-right: 16.5px;
+    border-color: #c5c3c3;
+    background: linear-gradient(180deg, #efefef 0%, #fff 100%);
+    color: #000;
+  }
+
+  .editor-shell .document-tab img.tab-file-icon {
+    width: 21px;
+    height: 21px;
+  }
+
+  /* Inactive tabs keep the close button folded away; hovering grows the tab to its selected width and reveals it. */
+  .editor-shell .document-tab {
+    transition: padding-right 220ms cubic-bezier(0.22, 1, 0.36, 1), background-color 180ms ease, color 180ms ease, opacity 110ms ease;
+  }
+
+  .editor-shell .close-tab {
+    flex: 0 0 auto;
+    width: 20px;
+    height: 20px;
+    margin-left: 3px;
+    overflow: hidden;
+    transition: width 220ms cubic-bezier(0.22, 1, 0.36, 1), margin-left 220ms cubic-bezier(0.22, 1, 0.36, 1), opacity 160ms ease;
+  }
+
+  .editor-shell .document-tab:not(.active):not(:hover):not(:focus-within) {
+    padding-right: 27px;
+  }
+
+  .editor-shell .document-tab:not(.active):hover,
+  .editor-shell .document-tab:not(.active):focus-within {
+    padding-right: 16.5px;
+  }
+
+  .editor-shell .document-tab:not(.active):not(:hover):not(:focus-within) .close-tab {
+    width: 0;
+    margin-left: -11px;
+    opacity: 0;
+  }
+
+  .editor-shell .close-tab img.close-tab-cross {
+    flex: 0 0 auto;
+  }
+
+  .close-tab-cross,
+  .add-tab-cross {
+    display: block;
+    max-width: none;
+  }
+
+  .editor-shell .close-tab img.close-tab-cross {
+    width: 14.4px;
+    height: 14.4px;
+  }
+
+  .editor-shell .close-tab:hover img.close-tab-cross {
+    filter: brightness(0.6);
+  }
+
+  .editor-shell .add-tab {
+    flex-basis: 55px;
+    width: 55px;
+    height: 56px;
+  }
+
+  .editor-shell .add-tab img.add-tab-cross {
+    width: 19.5px;
+    height: 19.5px;
+  }
+
+  .editor-shell .add-tab:hover img.add-tab-cross {
+    filter: brightness(0.75);
+  }
+
+  .editor-shell .add-tab:active img.add-tab-cross {
+    transform: scale(0.94);
+  }
+
+  .editor-shell .utilities {
+    position: relative;
+    z-index: 1;
+    gap: 10px;
+    height: 56px;
+    padding: 0 13px 0 14px;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .editor-shell .utility-button {
+    width: 40px;
+    height: 40px;
+    border: 1px solid rgba(0, 0, 0, 0.05);
+    border-radius: 15px;
+    background: rgba(0, 0, 0, 0.05);
+  }
+
+  .editor-shell .utility-button:hover {
+    border-color: rgba(0, 0, 0, 0.07);
+    background: rgba(0, 0, 0, 0.08);
+  }
+
+  .editor-shell .utility-button:disabled:hover {
+    border-color: rgba(0, 0, 0, 0.05);
+    background: rgba(0, 0, 0, 0.05);
+  }
+
+  .editor-shell .utility-button.active,
+  .editor-shell .utility-button.active:hover {
+    border-color: #171717;
+    background: #171717;
+  }
+
+  .editor-shell .utility-button img,
+  .editor-shell .utility-button:nth-child(n) img {
+    width: 24px;
+    height: 24px;
+  }
+
+  .editor-shell .utility-button img.utility-icon-mcp,
+  .editor-shell .utility-button img.utility-icon-comments {
+    width: 25px;
+    height: 25px;
+  }
+
+  .editor-shell .utility-button.ai-button img {
+    width: 23px;
+    height: 24px;
+  }
+
+  .editor-shell .utility-button[data-utility='settings'] img {
+    width: 26px;
+    height: 26px;
+  }
+
+  .editor-shell .ai-button.ai-busy::after {
+    border-color: #ececec;
+  }
+
+  .editor-shell .mcp-button.mcp-live:not(.active):not(:hover) {
+    animation-name: mcp-live-pulse-editor;
+  }
+
+  @keyframes mcp-live-pulse-editor {
+    from { background-color: rgba(0, 0, 0, 0.05); }
+    to { background-color: rgba(0, 0, 0, 0.1); }
+  }
+
+  .sidebar-head {
+    position: relative;
+    z-index: 5;
+    grid-column: 1;
+    grid-row: 2;
+    align-self: start;
+    box-sizing: border-box;
+    width: 310px;
+    height: 61px;
+    border: 1px solid #d3d0d0;
+    border-left: 0;
+    background: #fff;
+  }
+
+  /* 5% larger than the Figma logo, same left edge, centred in the 59px row. */
+  .sidebar-logo {
+    position: absolute;
+    /* The wordmark sits high inside the asset; this centres the letters themselves. */
+    top: calc((100% - 45.15px) / 2 + 2.6px);
+    left: 15px;
+    width: 204.75px;
+    height: 45.15px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .sidebar-logo img {
+    display: block;
+    width: 204.75px;
+    height: 45.15px;
+  }
+
+  .sidebar-head-button {
+    position: absolute;
+    top: 9px;
+    display: grid;
+    place-items: center;
+    box-sizing: border-box;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border: 1px solid rgba(0, 0, 0, 0.05);
+    border-radius: 15px;
+    background: rgba(0, 0, 0, 0.05);
+    cursor: pointer;
+    transition: background-color 180ms ease, border-color 180ms ease;
+  }
+
+  .sidebar-head-button:nth-of-type(2) {
+    left: 207px;
+  }
+
+  .sidebar-head-button:nth-of-type(3) {
+    left: 257px;
+  }
+
+  .sidebar-head-button:hover {
+    border-color: rgba(0, 0, 0, 0.07);
+    background: rgba(0, 0, 0, 0.08);
+  }
+
+  .sidebar-head-button img {
+    display: block;
+    transition: filter 160ms ease, transform 160ms ease;
+  }
+
+  .sidebar-head-button:hover img {
+    filter: brightness(0.72);
+  }
+
+  .sidebar-head-button:active img {
+    transform: scale(0.94);
+  }
+
+  .sidebar-search-icon {
+    width: 27px;
+    height: 27px;
+  }
+
+  .sidebar-home-icon {
+    width: 21.4px;
+    height: 21.7397px;
+    margin-top: 1px;
+  }
+
+  /* macOS app and website: 95% of the base 0.85 scale. The shell's traffic-light
+     position (desktop/src-tauri/src/lib.rs) is derived from this value. */
+  :global(html[data-docuflex-desktop='macos']) .editor-shell,
+  .editor-shell.website {
+    --ui-scale: 0.8075;
+  }
+
+  /* Public website: a wider sidebar, and one header row
+     (logo + history on the left, search and home in the toolbar on the right). */
+  .editor-shell.website {
+    grid-template-columns: 340px minmax(0, 1fr);
+  }
+
+  /* The logo corner closes the header and sidebar lines: its bottom edge continues the
+     top bar's line and its right edge continues the sidebar's, meeting in one cross. */
+  .editor-shell.website .window-head {
+    box-sizing: border-box;
+    border-right: 1px solid #c7c7c7;
+    border-bottom: 1px solid #b3b0b0;
+  }
+
+  .editor-shell.website .topbar {
+    grid-template-columns: 340px minmax(0, 1fr) auto;
+  }
+
+  .editor-shell.website .topbar-backdrop {
+    left: 340px;
+  }
+
+  .editor-shell.website .quick-tools {
+    padding-top: 18px;
+  }
+
+  .editor-shell.website :global(.thumbnail-list) {
+    padding-top: 34px;
+  }
+
+  .editor-shell.website .history-button.back {
+    left: 246px;
+  }
+
+  .editor-shell.website .history-button.forward {
+    left: 286px;
+  }
+
+  .web-logo {
+    position: absolute;
+    top: calc((100% - 40.6px) / 2 + 1px);
+    left: 20px;
+    display: block;
+    width: 184px;
+    height: 40.6px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .web-logo img {
+    display: block;
+    width: 184px;
+    height: 40.6px;
+  }
+
+  .utility-icon-search,
+  .utility-icon-home {
+    width: 22px;
+    height: 22px;
+  }
+
+  /* dark theme: generated by scripts/generate-dark-theme.mjs — do not edit */
+  :global(:root[data-theme="dark"] body) { color: rgba(255, 255, 255, 0.859); background: #131313; }
+  :global(:root[data-theme="dark"]) .editor-shell { background: #131313; }
+  :global(:root[data-theme="dark"]) .topbar { background: rgba(255, 255, 255, 0.05); border-bottom: 1px solid #272727; }
+  :global(:root[data-theme="dark"]) .add-tab { border: 0; background: transparent; }
+  :global(:root[data-theme="dark"]) .document-tab { border: 0; border-right: 1px solid #202020; background: #141414; color: rgba(255, 255, 255, 0.859); }
+  :global(:root[data-theme="dark"]) .document-tab.active { background: #101010; }
+  :global(:root[data-theme="dark"]) .utilities { background: rgba(22, 22, 22, 0.96); box-shadow: -12px 0 18px rgba(0, 0, 0, 0.5); }
+  :global(:root[data-theme="dark"]) .utility-button { border: 1px solid #202020; background: #141414; }
+  :global(:root[data-theme="dark"]) .utility-button:hover { border-color: #2a2a2a; background: #111111; }
+  :global(:root[data-theme="dark"]) .ai-button.ai-busy::after { border: 1.5px solid rgba(255, 255, 255, 0.08); background: #0878f9; }
+  :global(:root[data-theme="dark"]) .ai-button.active.ai-busy::after { border-color: #ececec; }
+  :global(:root[data-theme="dark"]) .utility-button.active,
+  :global(:root[data-theme="dark"]) .utility-button.active:hover { border-color: #ececec; background: #ececec; }
+  :global(:root[data-theme="dark"]) .utility-button.active img,
+  :global(:root[data-theme="dark"]) .utility-button.active:hover img { filter: brightness(0); }
+  :global(:root[data-theme="dark"]) .utility-button:disabled:hover { border-color: #202020; background: #141414; }
+  :global(:root[data-theme="dark"]) .error-toast { border: 1px solid rgba(0, 0, 0, 0.064); background: #ececec; box-shadow: 0 10px 28px rgba(0, 0, 0, 0.6), 0 2px 7px rgba(0, 0, 0, 0.36); }
+  :global(:root[data-theme="dark"]) .error-toast-body { color: #111111; }
+  :global(:root[data-theme="dark"]) .error-toast-body strong { color: #111111; }
+  :global(:root[data-theme="dark"]) .error-toast-body span { color: rgba(255, 255, 255, 0.333); }
+  :global(:root[data-theme="dark"]) .sidebar { background: #111111; border-right: 1px solid #2a2a2a; box-shadow: 0 0 98.6px rgba(0, 0, 0, 0.18); }
+  :global(:root[data-theme="dark"]) .quick-tool { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.07); color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .quick-tool kbd { border: 1px solid rgba(255, 255, 255, 0.04); background: rgba(255, 255, 255, 0.033); color: rgba(255, 255, 255, 0.165); }
+  :global(:root[data-theme="dark"]) .quick-tool:hover,
+  :global(:root[data-theme="dark"]) .quick-tool.keyboard-active { border-color: rgba(255, 255, 255, 0.144); background: rgba(255, 255, 255, 0.05); }
+  :global(:root[data-theme="dark"]) .quick-tool:hover kbd,
+  :global(:root[data-theme="dark"]) .quick-tool.keyboard-active kbd { border-color: rgba(255, 255, 255, 0.04); background: rgba(255, 255, 255, 0.072); }
+  :global(:root[data-theme="dark"]) .workspace { background: linear-gradient(90deg, rgba(255, 255, 255, 0.058) 1px, transparent 1px) 58px 122px / 140px 140px,
+      linear-gradient(180deg, rgba(255, 255, 255, 0.058) 1px, transparent 1px) 58px 122px / 140px 140px,
+      #0e0e0e; }
+  :global(:root[data-theme="dark"]) .drop-zone { border: 1.5px solid #2c2c2c; background: rgba(22, 22, 22, 0.96); box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15); color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .drop-zone:hover { border-color: #343434; background: rgba(22, 22, 22, 0.96); color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .drop-zone:active { color: rgba(255, 255, 255, 0.92); }
+  :global(:root[data-theme="dark"]) .document-browser { border: 1.5px solid #2c2c2c; background: rgba(22, 22, 22, 0.96); box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15); color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .recent-heading { border: 0; background: transparent; color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .recent-heading:hover { color: rgba(255, 255, 255, 0.92); }
+  :global(:root[data-theme="dark"]) .document-search { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); }
+  :global(:root[data-theme="dark"]) .document-search:focus-within { border-color: rgba(255, 255, 255, 0.144); }
+  :global(:root[data-theme="dark"]) .document-search input { border: 0; outline: 0; background: transparent; color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .document-search input::placeholder { color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .sort-button,
+  :global(:root[data-theme="dark"]) .filter-button { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .sort-button strong,
+  :global(:root[data-theme="dark"]) .filter-button strong { color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .sort-arrow { border: 0; background: transparent; }
+  :global(:root[data-theme="dark"]) .sort-arrow .chevron { border-right: 1.5px solid rgba(255, 255, 255, 0.36); border-bottom: 1.5px solid rgba(255, 255, 255, 0.36); }
+  :global(:root[data-theme="dark"]) .sort-arrow:hover .chevron { border-color: rgba(255, 255, 255, 0.6); }
+  :global(:root[data-theme="dark"]) .sort-menu { border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(24, 24, 24, 0.95); box-shadow: 0 0 100px rgba(0, 0, 0, 0.24); }
+  :global(:root[data-theme="dark"]) .sort-menu-item { border: 1px solid transparent; background: transparent; color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .sort-menu-item.active { border-color: rgba(255, 255, 255, 0.064); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.92); }
+  :global(:root[data-theme="dark"]) .sort-menu-item:hover { border-color: rgba(255, 255, 255, 0.064); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.92); }
+  :global(:root[data-theme="dark"]) .sort-check { color: #0073ff; }
+  :global(:root[data-theme="dark"]) .sort-button:hover,
+  :global(:root[data-theme="dark"]) .filter-button:hover { border-color: rgba(255, 255, 255, 0.144); }
+  :global(:root[data-theme="dark"]) .recent-document { border: 0; background: transparent; color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .document-preview { border: 1px solid #212121; background: rgba(22, 22, 22, 0.96); box-shadow: 3px 8px 16px rgba(0, 0, 0, 0.15); }
+  :global(:root[data-theme="dark"]) .recent-thumbnail { background: rgba(255, 255, 255, 0.05); }
+  :global(:root[data-theme="dark"]) .open-document .document-preview { border-color: #2c2c2c; background: rgba(22, 22, 22, 0.96); box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15); }
+  :global(:root[data-theme="dark"]) .recent-document:hover { color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .recent-document:hover .document-preview { border-color: #2f2f2f; box-shadow: 4px 8px 18px rgba(0, 0, 0, 0.24); }
+  :global(:root[data-theme="dark"]) .open-document:hover .document-preview { border-color: #343434; background: rgba(22, 22, 22, 0.96); }
+  :global(:root[data-theme="dark"]) .recent-context-menu { border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(24, 24, 24, 0.95); box-shadow: 0 0 100px rgba(0, 0, 0, 0.24); }
+  :global(:root[data-theme="dark"]) .recent-menu-item { border: 1px solid transparent; background: transparent; color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .recent-menu-item:hover,
+  :global(:root[data-theme="dark"]) .recent-menu-item:focus-visible { border-color: rgba(255, 255, 255, 0.064); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.92); outline: none; }
+  :global(:root[data-theme="dark"]) .recent-menu-item:hover:not(.delete-document) img,
+  :global(:root[data-theme="dark"]) .recent-menu-item:focus-visible:not(.delete-document) img { filter: brightness(0) invert(1); }
+  :global(:root[data-theme="dark"]) .recent-menu-item kbd { border: 1px solid rgba(255, 255, 255, 0.04); background: rgba(255, 255, 255, 0.033); color: rgba(255, 255, 255, 0.165); }
+  :global(:root[data-theme="dark"]) .recent-menu-item:hover kbd,
+  :global(:root[data-theme="dark"]) .recent-menu-item:focus-visible kbd { border-color: rgba(255, 255, 255, 0.04); background: rgba(255, 255, 255, 0.072); }
+  :global(:root[data-theme="dark"]) .recent-menu-item.delete-document { color: rgba(255, 0, 0, 0.85); }
+  :global(:root[data-theme="dark"]) .editor-shell,
+  :global(:root[data-theme="dark"]) .editor-shell.editor-mode { background: #0e0e0e; }
+  :global(:root[data-theme="dark"]) .editor-shell .topbar { border-bottom: 0; background: transparent; }
+  :global(:root[data-theme="dark"]) .window-head-texture { background: #111111; }
+  :global(:root[data-theme="dark"]) .window-head-texture::before { background: url('/redesign/rectangle992.png') center / 100% 100% no-repeat; }
+  :global(:root[data-theme="dark"]) .window-head-texture::after { background: linear-gradient(90deg, rgba(255, 255, 255, 0) 43.47%, rgba(255, 255, 255, 0.05) 100%),
+      linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.05) 100%); }
+  :global(:root[data-theme="dark"]) .history-button { border: 0; background: transparent; }
+  :global(:root[data-theme="dark"]) .topbar-backdrop { border-bottom: 1px solid #343434; background: rgba(24, 24, 24, 0.95); box-shadow: 0 4px 50px rgba(0, 0, 0, 0.3); }
+  :global(:root[data-theme="dark"]) .topbar-backdrop::after { background: linear-gradient(90deg, rgba(255, 255, 255, 0) 33.804%, rgba(255, 255, 255, 0.05) 100%),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0) 54.345%); }
+  :global(:root[data-theme="dark"]) .editor-shell .document-tab { border: 1px solid #343434; border-top: 0; background: linear-gradient(180deg, rgba(0, 0, 0, 0.09) 0%, rgba(255, 255, 255, 0.12) 100%); color: rgba(154, 63, 63, 0.75); }
+  :global(:root[data-theme="dark"]) .editor-shell .document-tab.active { border-color: #2b2b2b; background: linear-gradient(180deg, #111111 0%, rgba(255, 255, 255, 0.05) 100%); color: rgba(255, 255, 255, 0.92); }
+  :global(:root[data-theme="dark"]) .editor-shell .utilities { background: transparent; box-shadow: none; }
+  :global(:root[data-theme="dark"]) .editor-shell .utility-button { border: 1px solid rgba(255, 255, 255, 0.04); background: rgba(255, 255, 255, 0.065); }
+  :global(:root[data-theme="dark"]) .editor-shell .utility-button:hover { border-color: rgba(255, 255, 255, 0.056); background: rgba(255, 255, 255, 0.104); }
+  :global(:root[data-theme="dark"]) .editor-shell .utility-button:disabled:hover { border-color: rgba(255, 255, 255, 0.04); background: rgba(255, 255, 255, 0.065); }
+  :global(:root[data-theme="dark"]) .editor-shell .utility-button.active,
+  :global(:root[data-theme="dark"]) .editor-shell .utility-button.active:hover { border-color: #ececec; background: #ececec; }
+  :global(:root[data-theme="dark"]) .editor-shell .ai-button.ai-busy::after { border-color: rgba(255, 255, 255, 0.08); }
+  :global(:root[data-theme="dark"]) .sidebar-head { border: 1px solid #252525; border-left: 0; background: rgba(255, 255, 255, 0.05); }
+  :global(:root[data-theme="dark"]) .sidebar-logo { border: 0; background: transparent; }
+  :global(:root[data-theme="dark"]) .sidebar-head-button { border: 1px solid rgba(255, 255, 255, 0.04); background: rgba(255, 255, 255, 0.065); }
+  :global(:root[data-theme="dark"]) .sidebar-head-button:hover { border-color: rgba(255, 255, 255, 0.056); background: rgba(255, 255, 255, 0.104); }
+  :global(:root[data-theme="dark"]) .editor-shell.website .window-head { border-right: 1px solid #2a2a2a; border-bottom: 1px solid #343434; }
+  :global(:root[data-theme="dark"]) .web-logo { border: 0; background: transparent; }
+  /* dark theme: end generated */
+
+  /* dark theme: manual */
+  /* Shell, after the Figma dark frame (Docuflex › Redesign): black glass top bar and sidebar. */
+  :global(:root[data-theme="dark"]) .topbar-backdrop img { filter: invert(1) brightness(0.6) contrast(1.2); }
+  /* Dark window head: Figma's starry Rectangle 992 (node 801:1490) with its black fade, not the inverted marble. */
+  :global(:root[data-theme="dark"]) .window-head-texture { background: #000; }
+  :global(:root[data-theme="dark"]) .window-head-texture::before { background: url('/redesign/rectangle992-dark.png') center bottom / 100% 100% no-repeat; filter: none; }
+  /* The marble runs under the whole bar, including the buttons on the right, and fades
+     smoothly into black at both ends, like the light bar fades into white. */
+  :global(:root[data-theme="dark"]) .topbar-backdrop { border-bottom-color: #222121; background: rgba(0, 0, 0, 0.2); box-shadow: 0 4px 42.5px rgba(0, 0, 0, 0.3); }
+  :global(:root[data-theme="dark"]) .topbar-backdrop::after {
+    background:
+      linear-gradient(90deg, rgba(0, 0, 0, 0) 33.804%, rgba(0, 0, 0, 0.6) 100%),
+      linear-gradient(90deg, rgba(0, 0, 0, 0.6) 0%, rgba(0, 0, 0, 0) 54.345%);
+  }
+  :global(:root[data-theme="dark"]) .window-head-texture::after { background: linear-gradient(180.54deg, rgba(0, 0, 0, 0) 2.67%, #000 97.32%); }
+  :global(:root[data-theme="dark"]) .topbar { border-bottom-color: #222121; background: rgba(0, 0, 0, 0.35); }
+  /* Home grid matches the editor canvas: about 5% lighter than the shell. */
+  :global(:root[data-theme="dark"]) .workspace { background-color: #1a1a1a; }
+  :global(:root[data-theme="dark"]) .sidebar { border-color: #202020; background: rgba(12, 12, 12, 0.85); }
+  :global(:root[data-theme="dark"]) .sidebar-head { border-color: #232323; background: linear-gradient(180deg, rgba(0, 0, 0, 0.85) 0%, rgba(8, 8, 8, 0.85) 100%); }
+  :global(:root[data-theme="dark"]) .sidebar-head-button { border-color: rgba(255, 255, 255, 0.05); background: rgba(255, 255, 255, 0.05); }
+  :global(:root[data-theme="dark"]) .sidebar-head-button:hover { border-color: rgba(255, 255, 255, 0.1); background: rgba(255, 255, 255, 0.09); }
+  /* Tabs: inactive PDF tabs carry a dark red wash, the active tab a lifted grey glass with a soft glow. */
+  :global(:root[data-theme="dark"]) .editor-shell .document-tab { border-color: #3b3a3a; background: linear-gradient(180deg, rgba(45, 45, 45, 0.15) 0%, rgba(104, 0, 0, 0.15) 100%); color: rgba(254, 206, 206, 0.5); }
+  :global(:root[data-theme="dark"]) .editor-shell .document-tab.active { border-color: #575757; background: linear-gradient(180deg, rgba(77, 77, 77, 0.15) 0%, rgba(255, 255, 255, 0.15) 100%); color: #fff; text-shadow: 0 0 10px rgba(255, 255, 255, 0.25); }
+  /* Inline quick-tool icons: grey line work turns light, tile outlines soften. */
+  :global(:root[data-theme="dark"]) .quick-tool-icon :global([stroke="#777777"]),
+  :global(:root[data-theme="dark"]) .quick-tool-icon :global([stroke="#7C7D7F"]),
+  :global(:root[data-theme="dark"]) .quick-tool-icon :global([stroke="#888888"]),
+  :global(:root[data-theme="dark"]) .quick-tool-icon :global([stroke="#404040"]),
+  :global(:root[data-theme="dark"]) .quick-tool-icon :global([stroke="black"]) { stroke: rgba(255, 255, 255, 0.78); }
+  :global(:root[data-theme="dark"]) .quick-tool-icon :global([stroke="#353535"]),
+  :global(:root[data-theme="dark"]) .quick-tool-icon :global([stroke="#474747"]) { stroke: #2a2a2c; }
+  :global(:root[data-theme="dark"]) .quick-tool:hover .quick-tool-icon :global([stroke]),
+  :global(:root[data-theme="dark"]) .quick-tool.keyboard-active .quick-tool-icon :global([stroke]) { filter: brightness(1.35); }
+
 </style>
