@@ -227,6 +227,8 @@ function generate(css) {
     if (/tooltip|comment-(card|pin|tether|quote-layer)/i.test(rule.selector)) return;
     // Handles and the size badge are drawn on the white page, so they keep the light look too.
     if (/(shape|crop|linear)-[a-z-]*handle|shape-size-badge/.test(rule.selector)) return;
+    // Blackout and whiteout boxes are part of the page and show the color they paint.
+    if (/redaction-layer/.test(rule.selector)) return;
     // PDF pages and their thumbnails are paper: they stay white.
     if (/(^|[\s,>])\.(pdf-page|thumbnail-page|quick-thumbnail-page)(?![\w-])[^\s,]*\s*$/m.test(rule.selector) && !/page-pill|page-separator|drop|placeholder/.test(rule.selector)) return;
     /** @type {string[]} */

@@ -7696,6 +7696,74 @@
     return matches;
   }
 
+  /**
+   * Finds text in the pages' rendered text layers and returns the boxes a
+   * mouse selection of the same text would get (editor pixels). Text split
+   * across spans is matched both with and without a space between them.
+   * @param {string} query @param {number} [pageFilter]
+   * @returns {{ page: number; rects: { x: number; y: number; width: number; height: number }[] }[]}
+   */
+  function textLayerMatches(query, pageFilter) {
+    const currentViewer = viewer;
+    const needle = query.replace(/\s+/g, ' ').trim().toLowerCase();
+    if (!currentViewer || !needle) return [];
+    /** @type {{ page: number; rects: { x: number; y: number; width: number; height: number }[] }[]} */
+    const matches = [];
+    [...currentViewer.querySelectorAll('.pdf-page')].forEach((shell, pageIndex) => {
+      if (pageFilter !== undefined && pageIndex !== pageFilter) return;
+      const layer = shell.querySelector('.textLayer');
+      if (!layer) return;
+      /** @type {Text[]} */
+      const nodes = [];
+      const walker = document.createTreeWalker(layer, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        const node = /** @type {Text} */ (walker.currentNode);
+        if (node.data) nodes.push(node);
+      }
+      const seen = new Set();
+      for (const joiner of [' ', '']) {
+        // Build the page text with a map from each character back to its node.
+        let text = '';
+        /** @type {{ node: Text; start: number }[]} */
+        const segments = [];
+        for (const node of nodes) {
+          if (text && joiner && !/\s$/.test(text) && !/^\s/.test(node.data)) text += joiner;
+          segments.push({ node, start: text.length });
+          text += node.data;
+        }
+        const haystack = text.replace(/\s/g, ' ').toLowerCase();
+        /** @param {number} index @param {boolean} isEnd */
+        const locate = (index, isEnd) => {
+          for (let segment = segments.length - 1; segment >= 0; segment -= 1) {
+            const { node, start } = segments[segment];
+            if (isEnd ? index > start : index >= start) return { node, offset: Math.min(node.data.length, index - start) };
+          }
+          return null;
+        };
+        let from = 0;
+        while (from <= haystack.length - needle.length) {
+          const at = haystack.indexOf(needle, from);
+          if (at < 0) break;
+          from = at + Math.max(1, needle.length);
+          const start = locate(at, false);
+          const end = locate(at + needle.length, true);
+          if (!start || !end) continue;
+          const key = `${nodes.indexOf(start.node)}:${start.offset}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const range = document.createRange();
+          range.setStart(start.node, start.offset);
+          range.setEnd(end.node, end.offset);
+          const rects = textSelectionPages(range, currentViewer)?.[pageIndex];
+          if (rects?.length) matches.push({ page: pageIndex + 1, rects });
+        }
+      }
+    });
+    // Two passes find matches out of order; occurrence counts in reading order.
+    return matches.sort((first, second) => first.page - second.page ||
+      first.rects[0].y - second.rects[0].y || first.rects[0].x - second.rects[0].x);
+  }
+
   /** @param {AnnotationShape} shape @param {number} pageIndex */
   function mcpDescribeShape(shape, pageIndex) {
     const kind = shape.existingField ? 'form-field' : shape.latex ? 'math' : shape.type === 'textfield' ? 'text' : shape.type === 'input' || shape.type === 'checkbox' ? 'form-field' : shape.type;
@@ -8378,12 +8446,19 @@
         } else {
           const query = String(args.query ?? '');
           if (!query) throw new Error('Give a query or rects.');
-          let matches = await mcpFindText(query, { pageIndex: args.page !== undefined ? mcpPageIndex(args.page) : undefined });
+          const pageFilter = args.page !== undefined ? mcpPageIndex(args.page) : undefined;
+          // Boxes come from the rendered text layer, exactly like selecting the
+          // text with the mouse; measuring is only the fallback.
+          let matches = textLayerMatches(query, pageFilter);
+          if (!matches.length) {
+            matches = (await mcpFindText(query, { pageIndex: pageFilter })).map((match) => ({
+              page: match.page,
+              rects: match.rects.map((rect) => ({ x: toPx(rect.x), y: toPx(rect.y), width: toPx(rect.width), height: toPx(rect.height) }))
+            }));
+          }
           if (args.occurrence) matches = matches.slice(Number(args.occurrence) - 1, Number(args.occurrence));
           if (!matches.length) throw new Error(`"${query}" was not found${args.page ? ` on page ${args.page}` : ''}.`);
-          for (const match of matches) {
-            (byPage[match.page - 1] ??= []).push(...match.rects.map((rect) => ({ x: toPx(rect.x), y: toPx(rect.y), width: toPx(rect.width), height: toPx(rect.height) })));
-          }
+          for (const match of matches) (byPage[match.page - 1] ??= []).push(...match.rects);
         }
         const colorHex = mcpColor(args.color, type === 'highlight' ? selectionHighlightColor : type === 'underline' ? selectionUnderlineColor : selectionCrossoutColor);
         /** @type {number[]} */
@@ -15068,8 +15143,6 @@
   :global(:root[data-theme="dark"]) .marker-ink { stroke: #ffe43b; }
   :global(:root[data-theme="dark"]) .text-highlight-layer .text-highlight { fill: #ffe43b; }
   :global(:root[data-theme="dark"]) .text-highlight-layer .text-decoration { fill: none; }
-  :global(:root[data-theme="dark"]) .redaction-layer rect.blackout { fill: rgba(255, 255, 255, 0.92); }
-  :global(:root[data-theme="dark"]) .redaction-layer rect.whiteout { fill: #111111; }
   :global(:root[data-theme="dark"]) .native-selection-layer rect { fill: #1684f8; stroke: rgba(0, 0, 0, 0.92); }
   :global(:root[data-theme="dark"]) .crop-overlay-layer .crop-shade { fill: rgba(255, 255, 255, 0.665); stroke: none; }
   :global(:root[data-theme="dark"]) .crop-edge { fill: none; stroke: #0d99ff; }

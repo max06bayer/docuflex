@@ -135,9 +135,19 @@
   $: onBusyChange(busy);
   $: if (open) void onOpen();
   $: activeDocument = liveContext?.active ?? null;
+  const SMART_BLACKOUT_PROMPT = [
+    'Smart Blackout: find and black out all sensitive information in this document.',
+    '1. Read every page with get_page_text. If a page has little or no text (a scan), run run_ocr once, then read the pages again.',
+    '2. Look for personal and confidential data: names of people, signatures, postal addresses, email addresses, phone numbers, dates of birth, ID, passport, tax and social security numbers, IBANs, bank account and card numbers, license plates, health details, usernames and passwords. Leave company names, headings and ordinary content alone.',
+    '3. Black out each item with mark_text type "blackout", using the exact text as the query so every occurrence is covered. For things that are not text, such as handwritten signatures, photos of people or stamps, look at the page with render_page and use mark_text type "blackout" with rects. Never use add_shape for this: a drawn rectangle does not remove anything.',
+    '4. Boxes on text are placed exactly on the text, the same as selecting it by hand, and are made safe when saved, so never move, resize or redo them. Only use render_page to find things that are not text, and to check that you did not miss anything.',
+    '5. Finish with a short list of what you blacked out on each page, and remind me that it is permanently removed when I save.'
+  ].join('\n');
+
   $: suggestions = hasDocument
     ? [
         { label: 'Summarize', prompt: 'Summarize this document in a few bullet points with page references.', icon: '/redesign/icon-letter-text.svg' },
+        { label: 'Smart Blackout', prompt: SMART_BLACKOUT_PROMPT, shown: 'Smart Blackout: black out all sensitive information', icon: '/toolbar/small/blackout.svg' },
         { label: 'Highlight dates and amounts', prompt: 'Highlight every date and every money amount in this document.', icon: '/toolbar/small/highlight.svg' },
         { label: 'Fill out the form', prompt: 'List the form fields in this document and help me fill them out.', icon: '/toolbar/small/input.svg' }
       ]
@@ -853,7 +863,8 @@
   }
 
   /** @param {string} [text] */
-  async function send(text = draft) {
+  /** @param {string} [text] @param {string} [shown] what the chat shows instead of a long built-in prompt */
+  async function send(text = draft, shown = '') {
     const message = text.trim();
     if ((!message && !attachments.length) || busy || !status?.available) return;
     compactHistory();
@@ -866,9 +877,9 @@
       content: images.length ? [{ type: 'text', text: prompt }, ...images.map((url) => ({ type: 'image_url', image_url: { url } }))] : prompt
     }];
     uncompactedFrom = history.length;
-    chat ??= { id: crypto.randomUUID(), createdAt: new Date().toISOString(), title: (message || 'Image').replace(/\s+/g, ' ').slice(0, 80) };
+    chat ??= { id: crypto.randomUUID(), createdAt: new Date().toISOString(), title: (shown || message || 'Image').replace(/\s+/g, ' ').slice(0, 80) };
     showHistory = false;
-    entries = [...entries, { id: nextId++, role: 'user', text: message, quote, images, startedAt: Date.now() }];
+    entries = [...entries, { id: nextId++, role: 'user', text: shown || message, quote, images, startedAt: Date.now() }];
     draft = '';
     attachments = [];
     if (selectionQuote) usedSelection = selectionQuote.text;
@@ -1202,7 +1213,7 @@
       <div class="ai-empty" in:fade={{ duration: 180 }}>
         <div class="ai-list">
           {#each suggestions as suggestion (suggestion.label)}
-            <button type="button" class="ai-suggestion" disabled={!status?.available} onclick={() => send(suggestion.prompt)}>
+            <button type="button" class="ai-suggestion" disabled={!status?.available} onclick={() => send(suggestion.prompt, suggestion.shown)}>
               <img src={suggestion.icon} alt="" />
               <span>{suggestion.label}</span>
             </button>

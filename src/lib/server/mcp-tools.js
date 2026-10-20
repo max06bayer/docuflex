@@ -252,7 +252,7 @@ export const MCP_TOOLS = [
   {
     name: 'mark_text',
     title: 'Highlight / strike / redact text',
-    description: 'Highlights, underlines or crosses out text, or redacts it with blackout/whiteout (redactions permanently remove the content on export). Target text by query (optionally limited to a page and occurrence) or by explicit rectangles in points.',
+    description: 'Highlights, underlines or crosses out text, or redacts it with blackout/whiteout. Redaction is permanent on save: the text, images and drawings under the box are destroyed, not covered. Target text by query (optionally limited to a page and occurrence): the boxes then match the text exactly, like a selection by hand, so do not adjust them. Or give explicit rectangles in points; rectangles also redact things that are not text, like signatures, photos or stamps. A black add_shape rectangle is only a drawing and removes nothing, so always redact with this tool.',
     inputSchema: {
       type: 'object',
       properties: {
