@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { access, cp, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -111,11 +111,45 @@ async function prepareJavaRuntime() {
   }
 }
 
+// macOS builds bring their own Python: a pinned, relocatable CPython from
+// python-build-standalone, verified by checksum, with the conversion packages
+// installed into it. Nothing is borrowed from an installed Docuflex or the system.
+const macPython = {
+  version: '3.12.15',
+  release: '20261013',
+  archive: 'cpython-3.12.15+20261013-aarch64-apple-darwin-install_only.tar.gz',
+  sha256: 'ba32036ad8f4c434d97a1ee7feef8b7edc0fac16777639b97e39c74a108e4440'
+};
+const pythonPackages = ['pillow', 'python-docx', 'lxml', 'openpyxl', 'python-pptx', 'xlsxwriter'];
+
+async function provisionMacPython() {
+  const root = join(cacheRoot, `python-${macPython.version}-${macPython.release}`);
+  const python = join(root, 'python');
+  const executable = join(python, 'bin', 'python3.12');
+  const ready = join(root, '.packages-installed');
+  if (await exists(ready)) return python;
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  const archivePath = join(cacheRoot, macPython.archive);
+  if (!(await exists(archivePath))) {
+    const url = `https://github.com/astral-sh/python-build-standalone/releases/download/${macPython.release}/${encodeURIComponent(macPython.archive)}`;
+    console.log(`Downloading ${macPython.archive}`);
+    await download(url, archivePath);
+  }
+  const actual = createHash('sha256').update(await readFile(archivePath)).digest('hex');
+  if (actual !== macPython.sha256) {
+    await rm(archivePath, { force: true });
+    throw new Error(`Python checksum failed for ${macPython.archive}.`);
+  }
+  run('tar', ['-xzf', archivePath, '-C', root]);
+  run(executable, ['-m', 'pip', 'install', '--disable-pip-version-check', '--no-warn-script-location', ...pythonPackages]);
+  await writeFile(ready, `${pythonPackages.join('\n')}\n`);
+  return python;
+}
+
 async function preparePythonRuntime() {
   const configured = process.env.DOCUFLEX_PYTHON_RUNTIME?.trim();
-  const source = configured || (process.platform === 'darwin'
-    ? join(homedir(), '.cache/codex-runtimes/codex-primary-runtime/dependencies/python')
-    : '');
+  const source = configured || (process.platform === 'darwin' ? await provisionMacPython() : '');
   if (!source || !(await exists(source))) {
     throw new Error('DOCUFLEX_PYTHON_RUNTIME must point to a self-contained native Python 3.12 runtime.');
   }
