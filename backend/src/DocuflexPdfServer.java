@@ -34,6 +34,7 @@ import java.util.concurrent.TimeUnit;
 import org.apache.pdfbox.contentstream.operator.Operator;
 import org.apache.pdfbox.cos.COSArray;
 import org.apache.pdfbox.cos.COSBase;
+import org.apache.pdfbox.cos.COSDictionary;
 import org.apache.pdfbox.cos.COSFloat;
 import org.apache.pdfbox.cos.COSInteger;
 import org.apache.pdfbox.cos.COSName;
@@ -209,6 +210,12 @@ public class DocuflexPdfServer {
       List<PdfReplyData> pdfReplies = parsePdfReplies(payload.get("commentReplies"));
       boolean incremental = Boolean.TRUE.equals(payload.get("incremental"));
       byte[] exported;
+      boolean redacting = annotations.stream().anyMatch((annotation) ->
+          "blackout".equals(annotation.type) || "whiteout".equals(annotation.type));
+      if (redacting && (incremental || !formValues.isEmpty())) {
+        // An incremental save keeps the original bytes in the file.
+        throw new IllegalArgumentException("Redactions need a full save, not an incremental one.");
+      }
       if (incremental || !formValues.isEmpty()) {
         exported = applyAllowedChangesIncremental(pdfBytes, formValues, comments, pdfReplies);
       } else if (annotations.isEmpty() && comments.isEmpty() && pdfReplies.isEmpty() && sourcePassword.isEmpty() && encryptionPassword.isEmpty() && !printCopy) {
@@ -498,7 +505,7 @@ public class DocuflexPdfServer {
         }
       }
       document.setAllSecurityToBeRemoved(true);
-      List<Integer> redactedPages = new ArrayList<>();
+      Map<Integer, List<AnnotationStroke>> redactedPages = new LinkedHashMap<>();
       List<AnnotationStroke> formFields = new ArrayList<>();
       List<AnnotationStroke> pageCrops = new ArrayList<>();
       Set<String> flattenedFieldNames = new java.util.HashSet<>();
@@ -558,11 +565,11 @@ public class DocuflexPdfServer {
         }
         if (!redactions.isEmpty()) {
           drawRedactionLayer(document, page, redactions);
-          redactedPages.add(pageIndex);
+          redactedPages.put(pageIndex, redactions);
         }
       }
       if (!redactedPages.isEmpty()) {
-        flattenRedactedPages(document, redactedPages);
+        redactPages(document, redactedPages);
       }
       if (!formFields.isEmpty()) {
         // A field baked into the page above must not be recreated as a new one.
@@ -675,29 +682,306 @@ public class DocuflexPdfServer {
     }
   }
 
-  private static void flattenRedactedPages(PDDocument document, List<Integer> pageIndexes) throws IOException {
+  /** Resolution redacted pages are re-rendered at. */
+  private static final float REDACTION_DPI = 220f;
+  /** Above this a re-rendered page is stored as JPEG instead of lossless. */
+  private static final int REDACTION_LOSSLESS_LIMIT = 1_500_000;
+  /** Page-dictionary entries that can carry copies of the old page content. */
+  private static final String[] REDACTED_PAGE_KEYS = {
+      "Thumb", "PieceInfo", "Metadata", "StructParents", "B", "AA", "SeparationInfo",
+      "PZ", "VP", "ID", "Group", "TrimBox", "BleedBox", "ArtBox", "BoxColorInfo"
+  };
+
+  /**
+   * One character of the page in display coordinates (points, top-left
+   * origin, after /Rotate): its baseline origin, advance and "up" vectors, and
+   * the bounding box of its full glyph cell (descender to ascender).
+   */
+  private record PageGlyph(
+      String text,
+      double originX, double originY,
+      double advanceX, double advanceY,
+      double upX, double upY,
+      double[] bounds) {}
+
+  /**
+   * Redaction that cannot be undone. Each redacted page is re-rendered to an
+   * image with the boxes painted into its pixels, so no text, vector or image
+   * data under a box survives, and the page's old content, resources and
+   * annotations are dropped. A box is widened to the full cell of every glyph
+   * it touches, so a box drawn a little too tight never leaves the tops or
+   * descenders of letters readable. Text that lies clearly outside every box
+   * is put back as an invisible layer (the way OCR'd scans work) so the rest of
+   * the page stays searchable. Document-level copies of page content (form
+   * values, the tag tree's ActualText/Alt, XFA data) go too.
+   */
+  private static void redactPages(PDDocument document, Map<Integer, List<AnnotationStroke>> redactionsByPage) throws IOException {
+    Map<Integer, List<PageGlyph>> glyphsByPage = new HashMap<>();
+    for (int pageIndex : redactionsByPage.keySet()) {
+      glyphsByPage.put(pageIndex, pageGlyphs(document, pageIndex, document.getPage(pageIndex)));
+    }
+
+    Set<COSBase> redactedWidgets = Collections.newSetFromMap(new IdentityHashMap<>());
     PDFRenderer renderer = new PDFRenderer(document);
     renderer.setSubsamplingAllowed(false);
-    for (int pageIndex : pageIndexes) {
-      BufferedImage rendered = renderer.renderImageWithDPI(pageIndex, 144f, ImageType.RGB);
+    for (Map.Entry<Integer, List<AnnotationStroke>> entry : redactionsByPage.entrySet()) {
+      int pageIndex = entry.getKey();
       PDPage page = document.getPage(pageIndex);
-      PDRectangle cropBox = page.getCropBox();
-      int rotation = ((page.getRotation() % 360) + 360) % 360;
-      float displayWidth = rotation == 90 || rotation == 270 ? cropBox.getHeight() : cropBox.getWidth();
-      float displayHeight = rotation == 90 || rotation == 270 ? cropBox.getWidth() : cropBox.getHeight();
-      PDImageXObject pageImage = LosslessFactory.createFromImage(document, rendered);
+      for (PDAnnotation annotation : page.getAnnotations()) {
+        if (annotation instanceof PDAnnotationWidget) redactedWidgets.add(annotation.getCOSObject());
+      }
+      float[] display = displaySize(page);
+      List<PageGlyph> glyphs = glyphsByPage.get(pageIndex);
+      // Boxes in display points: the drawn boxes plus every glyph cell they touch.
+      List<double[]> boxes = new ArrayList<>();
+      List<double[][]> polygons = new ArrayList<>();
+      List<Boolean> black = new ArrayList<>();
+      for (AnnotationStroke redaction : entry.getValue()) {
+        if (redaction.width <= 0 || redaction.height <= 0) continue;
+        double[][] corners = redactionCorners(page, redaction);
+        double[][] polygon = new double[4][];
+        double left = Double.MAX_VALUE, top = Double.MAX_VALUE, right = -Double.MAX_VALUE, bottom = -Double.MAX_VALUE;
+        for (int index = 0; index < 4; index += 1) {
+          polygon[index] = new double[] {corners[index][0] * display[0], corners[index][1] * display[1]};
+          left = Math.min(left, polygon[index][0]);
+          right = Math.max(right, polygon[index][0]);
+          top = Math.min(top, polygon[index][1]);
+          bottom = Math.max(bottom, polygon[index][1]);
+        }
+        double[] box = {left, top, right, bottom};
+        boxes.add(box);
+        polygons.add(polygon);
+        black.add("blackout".equals(redaction.type));
+        for (PageGlyph glyph : glyphs) {
+          double[] cell = glyph.bounds();
+          // Ignore absurd cells (e.g. a broken font matrix) instead of blacking out half the page.
+          if (cell[3] - cell[1] > display[1] * 0.25 || cell[2] - cell[0] > display[0] * 0.5) continue;
+          if (!intersects(cell, box)) continue;
+          double pad = Math.max(0.75, (cell[3] - cell[1]) * 0.06);
+          double[] widened = {cell[0] - pad, cell[1] - pad, cell[2] + pad, cell[3] + pad};
+          boxes.add(widened);
+          polygons.add(new double[][] {{widened[0], widened[1]}, {widened[2], widened[1]}, {widened[2], widened[3]}, {widened[0], widened[3]}});
+          black.add("blackout".equals(redaction.type));
+        }
+      }
 
+      BufferedImage rendered = renderer.renderImageWithDPI(pageIndex, REDACTION_DPI, ImageType.RGB);
+      paintRedactions(rendered, display, polygons, black);
+      PDImageXObject pageImage = LosslessFactory.createFromImage(document, rendered);
+      if (pageImage.getCOSObject().getLength() > REDACTION_LOSSLESS_LIMIT) {
+        pageImage = JPEGFactory.createFromImage(document, rendered, 0.9f);
+      }
+      rendered.flush();
+
+      List<PageGlyph> kept = new ArrayList<>();
+      for (PageGlyph glyph : glyphs) {
+        double[] cell = glyph.bounds();
+        // Painting and keeping use the same glyph geometry, so a small guard is enough.
+        double marginY = Math.max(0.75, (cell[3] - cell[1]) * 0.1);
+        double[] guarded = {cell[0] - 0.5, cell[1] - marginY, cell[2] + 0.5, cell[3] + marginY};
+        boolean clear = cell[0] >= -1 && cell[1] >= -1 && cell[2] <= display[0] + 1 && cell[3] <= display[1] + 1;
+        for (double[] box : boxes) {
+          if (!clear) break;
+          if (intersects(guarded, box)) clear = false;
+        }
+        if (clear) kept.add(glyph);
+      }
+
+      COSDictionary pageDictionary = page.getCOSObject();
+      for (String key : REDACTED_PAGE_KEYS) pageDictionary.removeItem(COSName.getPDFName(key));
       page.setRotation(0);
-      page.setMediaBox(new PDRectangle(displayWidth, displayHeight));
-      page.setCropBox(new PDRectangle(displayWidth, displayHeight));
+      page.setMediaBox(new PDRectangle(display[0], display[1]));
+      page.setCropBox(new PDRectangle(display[0], display[1]));
       page.setResources(new PDResources());
       page.setContents(new PDStream(document));
       page.setAnnotations(new ArrayList<>());
       try (PDPageContentStream content = new PDPageContentStream(
           document, page, PDPageContentStream.AppendMode.OVERWRITE, false, false)) {
-        content.drawImage(pageImage, 0, 0, displayWidth, displayHeight);
+        content.drawImage(pageImage, 0, 0, display[0], display[1]);
+        writeInvisibleText(document, content, display[1], kept);
       }
-      rendered.flush();
+    }
+
+    // The tag tree can hold ActualText/Alt copies of the removed text and
+    // points into content that no longer exists.
+    COSDictionary catalog = document.getDocumentCatalog().getCOSObject();
+    catalog.removeItem(COSName.STRUCT_TREE_ROOT);
+    catalog.removeItem(COSName.MARK_INFO);
+    removeRedactedFields(document, redactedWidgets);
+  }
+
+  private static boolean intersects(double[] first, double[] second) {
+    return first[0] < second[2] && first[2] > second[0] && first[1] < second[3] && first[3] > second[1];
+  }
+
+  private static float[] displaySize(PDPage page) {
+    PDRectangle box = page.getCropBox();
+    int rotation = ((page.getRotation() % 360) + 360) % 360;
+    boolean sideways = rotation == 90 || rotation == 270;
+    return new float[] {sideways ? box.getHeight() : box.getWidth(), sideways ? box.getWidth() : box.getHeight()};
+  }
+
+  /** The corners of a redaction box in display-normalized coordinates (0..1, top-left origin). */
+  private static double[][] redactionCorners(PDPage page, AnnotationStroke shape) {
+    float[] display = displaySize(page);
+    double centerX = shape.x + shape.width / 2;
+    double centerY = shape.y + shape.height / 2;
+    double radians = Math.toRadians(shape.rotation);
+    double cosine = Math.cos(radians);
+    double sine = Math.sin(radians);
+    double[][] corners = new double[4][];
+    double[][] local = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+    for (int index = 0; index < 4; index += 1) {
+      double deltaX = (shape.x + local[index][0] * shape.width - centerX) * display[0];
+      double deltaY = (shape.y + local[index][1] * shape.height - centerY) * display[1];
+      corners[index] = new double[] {
+          centerX + (deltaX * cosine - deltaY * sine) / display[0],
+          centerY + (deltaX * sine + deltaY * cosine) / display[1]
+      };
+    }
+    return corners;
+  }
+
+  /** Paints the boxes (display points) into the rendered pixels, slightly enlarged so anti-aliased edges are covered too. */
+  private static void paintRedactions(BufferedImage image, float[] display, List<double[][]> polygons, List<Boolean> black) {
+    java.awt.Graphics2D graphics = image.createGraphics();
+    try {
+      graphics.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING, java.awt.RenderingHints.VALUE_ANTIALIAS_OFF);
+      graphics.setStroke(new java.awt.BasicStroke(4f, java.awt.BasicStroke.CAP_SQUARE, java.awt.BasicStroke.JOIN_MITER));
+      double scaleX = image.getWidth() / (double) display[0];
+      double scaleY = image.getHeight() / (double) display[1];
+      for (int index = 0; index < polygons.size(); index += 1) {
+        java.awt.geom.Path2D.Double polygon = new java.awt.geom.Path2D.Double();
+        double[][] corners = polygons.get(index);
+        for (int corner = 0; corner < corners.length; corner += 1) {
+          if (corner == 0) polygon.moveTo(corners[corner][0] * scaleX, corners[corner][1] * scaleY);
+          else polygon.lineTo(corners[corner][0] * scaleX, corners[corner][1] * scaleY);
+        }
+        polygon.closePath();
+        graphics.setColor(black.get(index) ? java.awt.Color.BLACK : java.awt.Color.WHITE);
+        graphics.fill(polygon);
+        graphics.draw(polygon);
+      }
+    } finally {
+      graphics.dispose();
+    }
+  }
+
+  /**
+   * Every character on the page with its geometry in display coordinates,
+   * computed from the text rendering matrix so rotated pages, rotated text and
+   * offset crop boxes all map the same way the editor and the boxes do.
+   */
+  private static List<PageGlyph> pageGlyphs(PDDocument document, int pageIndex, PDPage page) throws IOException {
+    float[] display = displaySize(page);
+    PDRectangle cropBox = page.getCropBox();
+    int rotation = ((page.getRotation() % 360) + 360) % 360;
+    List<PageGlyph> glyphs = new ArrayList<>();
+    org.apache.pdfbox.text.PDFTextStripper stripper = new org.apache.pdfbox.text.PDFTextStripper() {
+      @Override
+      protected void processTextPosition(org.apache.pdfbox.text.TextPosition text) {
+        String unicode = text.getUnicode();
+        if (unicode == null || unicode.isEmpty()) return;
+        // The stripper reports the matrix relative to the crop box's lower-left corner.
+        Matrix matrix = text.getTextMatrix();
+        double advance = 0;
+        try {
+          for (int code : text.getCharacterCodes()) advance += text.getFont().getWidth(code) / 1000.0;
+        } catch (IOException | RuntimeException ignored) {
+          advance = 0;
+        }
+        if (!(advance > 0)) advance = 0.6;
+        double[][] local = {{0, 0}, {advance, 0}, {0, 1}, {0, -0.3}, {advance, -0.3}, {0, 1.05}, {advance, 1.05}};
+        double[][] points = new double[local.length][];
+        for (int index = 0; index < local.length; index += 1) {
+          double userX = matrix.getScaleX() * local[index][0] + matrix.getShearX() * local[index][1] + matrix.getTranslateX() + cropBox.getLowerLeftX();
+          double userY = matrix.getShearY() * local[index][0] + matrix.getScaleY() * local[index][1] + matrix.getTranslateY() + cropBox.getLowerLeftY();
+          NormalizedPoint point = pdfPointToNormalized(cropBox, rotation, userX, userY);
+          points[index] = new double[] {point.x() * display[0], point.y() * display[1]};
+        }
+        double left = Double.MAX_VALUE, top = Double.MAX_VALUE, right = -Double.MAX_VALUE, bottom = -Double.MAX_VALUE;
+        for (int index = 3; index < points.length; index += 1) {
+          left = Math.min(left, points[index][0]);
+          right = Math.max(right, points[index][0]);
+          top = Math.min(top, points[index][1]);
+          bottom = Math.max(bottom, points[index][1]);
+        }
+        if (!Double.isFinite(left) || !Double.isFinite(top) || !Double.isFinite(right) || !Double.isFinite(bottom)) return;
+        glyphs.add(new PageGlyph(unicode,
+            points[0][0], points[0][1],
+            points[1][0] - points[0][0], points[1][1] - points[0][1],
+            points[2][0] - points[0][0], points[2][1] - points[0][1],
+            new double[] {left, top, right, bottom}));
+      }
+    };
+    stripper.setStartPage(pageIndex + 1);
+    stripper.setEndPage(pageIndex + 1);
+    stripper.getText(document);
+    return glyphs;
+  }
+
+  /** Writes the kept characters as invisible text (render mode 3) with their original position, size and direction. */
+  private static void writeInvisibleText(
+      PDDocument document,
+      PDPageContentStream content,
+      float pageHeight,
+      List<PageGlyph> glyphs) throws IOException {
+    if (glyphs == null || glyphs.isEmpty()) return;
+    PDFont base = new PDType1Font(Standard14Fonts.FontName.HELVETICA);
+    content.beginText();
+    content.setRenderingMode(org.apache.pdfbox.pdmodel.graphics.state.RenderingMode.NEITHER);
+    for (PageGlyph glyph : glyphs) {
+      if (glyph.text().isBlank()) continue;
+      for (FontRun run : fontRuns(document, base, glyph.text())) {
+        double natural = run.font().getStringWidth(run.text()) / 1000.0;
+        if (!(natural > 0)) continue;
+        // Display coordinates have y pointing down; the new page's user space has it pointing up.
+        content.setFont(run.font(), 1);
+        content.setTextMatrix(new Matrix(
+            (float) (glyph.advanceX() / natural), (float) (-glyph.advanceY() / natural),
+            (float) glyph.upX(), (float) -glyph.upY(),
+            (float) glyph.originX(), (float) (pageHeight - glyph.originY())));
+        content.showText(run.text());
+        break;
+      }
+    }
+    content.endText();
+  }
+
+  /**
+   * Form fields whose widgets were all on redacted pages are removed (their
+   * values would otherwise survive in the form data); a field that also shows
+   * elsewhere only loses its redacted widgets. XFA data is a second copy of the
+   * values, so it is dropped as well.
+   */
+  private static void removeRedactedFields(PDDocument document, Set<COSBase> redactedWidgets) throws IOException {
+    PDAcroForm acroForm = document.getDocumentCatalog().getAcroForm(null);
+    if (acroForm == null) return;
+    acroForm.getCOSObject().removeItem(COSName.XFA);
+    if (redactedWidgets.isEmpty()) return;
+    List<PDField> terminals = new ArrayList<>();
+    for (PDField field : acroForm.getFieldTree()) {
+      if (field instanceof PDTerminalField) terminals.add(field);
+    }
+    for (PDField field : terminals) {
+      List<PDAnnotationWidget> widgets = ((PDTerminalField) field).getWidgets();
+      long redacted = widgets.stream().filter((widget) -> redactedWidgets.contains(widget.getCOSObject())).count();
+      if (redacted == 0) continue;
+      if (redacted == widgets.size()) {
+        COSDictionary dictionary = field.getCOSObject();
+        COSArray siblings = field.getParent() == null
+            ? acroForm.getCOSObject().getCOSArray(COSName.FIELDS)
+            : field.getParent().getCOSObject().getCOSArray(COSName.KIDS);
+        if (siblings != null) siblings.removeObject(dictionary);
+        dictionary.removeItem(COSName.V);
+        dictionary.removeItem(COSName.DV);
+      } else {
+        COSArray kids = field.getCOSObject().getCOSArray(COSName.KIDS);
+        if (kids == null) continue;
+        for (PDAnnotationWidget widget : widgets) {
+          if (redactedWidgets.contains(widget.getCOSObject())) kids.removeObject(widget.getCOSObject());
+        }
+      }
     }
   }
 
