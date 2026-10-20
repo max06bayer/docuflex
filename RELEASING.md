@@ -9,7 +9,7 @@ website's download button always serves the newest GitHub release
 | Platform | Built by | Ends up in the release via |
 | --- | --- | --- |
 | Windows x64 (`.exe`) | GitHub Actions, `windows-x64` job | the workflow's `release` job |
-| Linux x64 (`.AppImage`, `.deb`) | GitHub Actions, `linux-x64` job | the workflow's `release` job |
+| Linux x64 (`.AppImage`, `.deb`, the latter named `…_UNTESTED.deb`) | GitHub Actions, `linux-x64` job | the workflow's `release` job |
 | Arch / CachyOS (`.pkg.tar.zst`) | GitHub Actions, `arch-linux-x64` job | the workflow's `release` job |
 | macOS Apple Silicon (`.dmg`) | a Mac (`npm run build` in `desktop/`) | `gh release upload` from that Mac |
 
@@ -47,7 +47,9 @@ laptop connection stall.
    ```
    Then download the four CI files' checksums, or compute them with
    `shasum -a 256`, into `SHA256SUMS.txt`, and upload that too.
-6. **Write the release notes** (what changed, plus the download list) and publish:
+6. **Write the release notes** (what changed, plus the download list) and publish.
+   Only macOS, Windows and Arch/CachyOS are tested, so mark the Debian package
+   as untested in the download list:
    ```bash
    gh release edit v0.9.2 --notes-file notes.md --draft=false --latest
    ```

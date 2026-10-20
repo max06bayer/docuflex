@@ -336,6 +336,9 @@ jobs:
         run: |
           mkdir release
           find artifacts -type f \( -name '*.exe' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.pkg.tar.zst' \) -exec cp {} release/ \;
+          # Only macOS, Windows and Arch/CachyOS are tested before a release; the
+          # Debian package is published, but labelled as untested.
+          for deb in release/*.deb; do mv "$deb" "${deb%.deb}_UNTESTED.deb"; done
           ls -la release
           test "$(ls release | wc -l)" -eq 4
       - name: Create or update the draft release
@@ -347,7 +350,7 @@ jobs:
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
               --title "Docuflex $version" \
-              --notes "Docuflex $version. Release notes and the macOS DMG are added before publishing."
+              --notes "Docuflex $version. Release notes and the macOS DMG are added before publishing. Tested on macOS, Windows and Arch/CachyOS; the Debian package (.deb) is untested."
           fi
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber release/*
 
