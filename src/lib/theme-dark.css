@@ -113,6 +113,6 @@
 :root[data-theme="dark"] img[src="/toolbar/small/watermark.svg"],
 :root[data-theme="dark"] img[src="/toolbar/small/whiteout.svg"],
 :root[data-theme="dark"] img[src="/toolbar/small/zoom.svg"] {
-  filter: invert(1);
+  filter: brightness(0) invert(1) opacity(0.78);
 }
 
