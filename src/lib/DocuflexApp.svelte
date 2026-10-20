@@ -143,27 +143,6 @@
   let aiStatus = null;
   /** The agent keeps working while its panel is closed; the brain button shows it. */
   let aiBusy = false;
-  /** Drives the inactive (grey) look of the drawn macOS window buttons. */
-  let windowFocused = true;
-  /** Whether the macOS desktop app is showing its own traffic lights. */
-  let nativeWindowButtonsHidden = false;
-
-  /** The desktop shell handles these the same way as its native window buttons. */
-  /** @param {'close' | 'minimize' | 'fullscreen'} action */
-  function windowAction(action) {
-    window.location.assign(`/__docuflex/window/${action}`);
-  }
-
-  /** The redesigned window draws its own traffic lights on macOS, so the native ones step aside. */
-  /** @param {boolean} hidden @param {boolean} [force] */
-  function setNativeWindowButtonsHidden(hidden, force = false) {
-    if (typeof document === 'undefined' || document.documentElement.dataset.docuflexDesktop !== 'macos') return;
-    if (hidden === nativeWindowButtonsHidden && !force) return;
-    nativeWindowButtonsHidden = hidden;
-    window.location.assign(`/__docuflex/window/native-buttons-${hidden ? 'hide' : 'show'}`);
-  }
-
-
   /** The AI chat is still in testing: its button stays greyed out until this is true. */
   const AI_CHAT_ENABLED = true;
 
@@ -896,20 +875,6 @@
     window.addEventListener('scroll', hideQuickTooltip, true);
     window.addEventListener('resize', hideQuickTooltip);
     window.addEventListener('docuflex:error', /** @type {EventListener} */ (handleNativeError));
-    const handleWindowFocus = () => (windowFocused = true);
-    const handleWindowBlur = () => (windowFocused = false);
-    windowFocused = document.hasFocus();
-    window.addEventListener('focus', handleWindowFocus);
-    window.addEventListener('blur', handleWindowBlur);
-    /** @type {ReturnType<typeof setTimeout> | undefined} */
-    let nativeButtonsTimer;
-    // Leaving full screen can bring the native buttons back; hide them again once the window settles.
-    const handleWindowResize = () => {
-      clearTimeout(nativeButtonsTimer);
-      nativeButtonsTimer = setTimeout(() => setNativeWindowButtonsHidden(true, true), 350);
-    };
-    window.addEventListener('resize', handleWindowResize);
-    setNativeWindowButtonsHidden(true);
     void refreshMcpStatus().then(() => {
       if (mcpStatus?.available) connectMcpBridge();
     });
@@ -921,10 +886,6 @@
       window.removeEventListener('pointerdown', closeHomepageMenus);
       window.removeEventListener('keydown', handleQuickToolShortcut);
       window.removeEventListener('docuflex:error', /** @type {EventListener} */ (handleNativeError));
-      window.removeEventListener('focus', handleWindowFocus);
-      window.removeEventListener('blur', handleWindowBlur);
-      window.removeEventListener('resize', handleWindowResize);
-      clearTimeout(nativeButtonsTimer);
       window.removeEventListener('scroll', hideQuickTooltip, true);
       window.removeEventListener('resize', hideQuickTooltip);
     };
@@ -948,12 +909,6 @@
   <header class="topbar">
     <div class="window-head">
       <span class="window-head-texture" aria-hidden="true"></span>
-      <!-- Drawn from the Figma frame on the macOS desktop; the native buttons stay hidden. -->
-      <div class="window-controls" class:window-inactive={!windowFocused}>
-        <button class="window-control close" aria-label="Close window" onclick={() => windowAction('close')}></button>
-        <button class="window-control minimize" aria-label="Minimize window" onclick={() => windowAction('minimize')}></button>
-        <button class="window-control zoom" aria-label="Enter full screen" onclick={() => windowAction('fullscreen')}></button>
-      </div>
       <img class="sidebar-toggle" src="/redesign/sidebar-toggle.svg" alt="" />
       <nav class="history" aria-label="History navigation">
         <button class="history-button back" aria-label="Undo" title="Undo" onclick={() => pdfEditor?.undo()}>
@@ -2871,119 +2826,6 @@
     transform: scale(0.94);
   }
 
-  .window-controls {
-    position: absolute;
-    top: 0;
-    left: 0;
-    display: none;
-  }
-
-  :global(html[data-docuflex-desktop='macos']) .window-controls {
-    display: block;
-  }
-
-  /* Figma's Ellipse 89–91: vertical gradient, 0.5px white rim fading out, white 2px/4.9px drop shadow. */
-  .window-control {
-    position: absolute;
-    top: 18px;
-    box-sizing: border-box;
-    width: 20px;
-    height: 20px;
-    padding: 0;
-    border: 0.5px solid transparent;
-    border-radius: 50%;
-    background:
-      linear-gradient(180deg, var(--light-top), var(--light-bottom)) padding-box,
-      linear-gradient(180deg, #fff, rgba(255, 255, 255, 0)) border-box;
-    box-shadow: 0 2px 4.9px #fff;
-    cursor: default;
-  }
-
-  .window-control.close {
-    --light-top: #ff4d4e;
-    --light-bottom: #ff7e7f;
-    left: 19px;
-  }
-
-  .window-control.minimize {
-    --light-top: #ffb700;
-    --light-bottom: #ffcc49;
-    left: 51px;
-  }
-
-  .window-control.zoom {
-    --light-top: #00cc14;
-    --light-bottom: #52ff63;
-    left: 83px;
-  }
-
-  .window-controls.window-inactive:not(:hover) .window-control {
-    --light-top: #d9d9d9;
-    --light-bottom: #e4e4e4;
-  }
-
-  /* macOS shows the button glyphs while the pointer is over the group. */
-  .window-control::before,
-  .window-control::after {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    content: '';
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 90ms ease;
-  }
-
-  .window-controls:hover .window-control::before,
-  .window-controls:hover .window-control::after {
-    opacity: 1;
-  }
-
-  .window-control.close::before,
-  .window-control.close::after,
-  .window-control.minimize::before {
-    width: 10px;
-    height: 1.6px;
-    border-radius: 1px;
-    background: rgba(77, 0, 0, 0.72);
-    transform: translate(-50%, -50%) rotate(45deg);
-  }
-
-  .window-control.close::after {
-    transform: translate(-50%, -50%) rotate(-45deg);
-  }
-
-  .window-control.minimize::before {
-    width: 11px;
-    background: rgba(100, 55, 0, 0.72);
-    transform: translate(-50%, -50%);
-  }
-
-  .window-control.zoom::before,
-  .window-control.zoom::after {
-    width: 0;
-    height: 0;
-    border-style: solid;
-    border-color: transparent;
-  }
-
-  .window-control.zoom::before {
-    margin: -5px 0 0 -1px;
-    border-width: 6px 6px 0 0;
-    border-top-color: rgba(0, 70, 5, 0.72);
-    border-right-color: rgba(0, 70, 5, 0.72);
-    border-radius: 0 1px 0 0;
-    clip-path: polygon(0 0, 100% 0, 100% 100%);
-  }
-
-  .window-control.zoom::after {
-    margin: -1px 0 0 -5px;
-    border-width: 0 0 6px 6px;
-    border-bottom-color: rgba(0, 70, 5, 0.72);
-    border-left-color: rgba(0, 70, 5, 0.72);
-    clip-path: polygon(0 0, 0 100%, 100% 100%);
-  }
-
   .editor-shell .utilities {
     position: relative;
     z-index: 1;
@@ -3225,17 +3067,6 @@
       linear-gradient(90deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0) 54.345%); }
   :global(:root[data-theme="dark"]) .editor-shell .document-tab { border: 1px solid #343434; border-top: 0; background: linear-gradient(180deg, rgba(0, 0, 0, 0.09) 0%, rgba(255, 255, 255, 0.12) 100%); color: rgba(154, 63, 63, 0.75); }
   :global(:root[data-theme="dark"]) .editor-shell .document-tab.active { border-color: #2b2b2b; background: linear-gradient(180deg, #111111 0%, rgba(255, 255, 255, 0.05) 100%); color: rgba(255, 255, 255, 0.92); }
-  :global(:root[data-theme="dark"]) .window-control { border: 0.5px solid transparent; background: linear-gradient(180deg, var(--light-top), var(--light-bottom)) padding-box,
-      linear-gradient(180deg, rgba(22, 22, 22, 0.96), rgba(255, 255, 255, 0)) border-box; box-shadow: 0 2px 4.9px rgba(0, 0, 0, 0.5); }
-  :global(:root[data-theme="dark"]) .window-controls.window-inactive:not(:hover) .window-control { --light-top: rgba(255, 255, 255, 0.149); --light-bottom: #111111; }
-  :global(:root[data-theme="dark"]) .window-control.close::before,
-  :global(:root[data-theme="dark"]) .window-control.close::after,
-  :global(:root[data-theme="dark"]) .window-control.minimize::before { background: rgba(77, 0, 0, 0.72); }
-  :global(:root[data-theme="dark"]) .window-control.minimize::before { background: rgba(100, 55, 0, 0.72); }
-  :global(:root[data-theme="dark"]) .window-control.zoom::before,
-  :global(:root[data-theme="dark"]) .window-control.zoom::after { border-color: transparent; }
-  :global(:root[data-theme="dark"]) .window-control.zoom::before { border-top-color: rgba(185, 255, 190, 0.72); border-right-color: rgba(185, 255, 190, 0.72); }
-  :global(:root[data-theme="dark"]) .window-control.zoom::after { border-bottom-color: rgba(185, 255, 190, 0.72); border-left-color: rgba(185, 255, 190, 0.72); }
   :global(:root[data-theme="dark"]) .editor-shell .utilities { background: transparent; box-shadow: none; }
   :global(:root[data-theme="dark"]) .editor-shell .utility-button { border: 1px solid rgba(255, 255, 255, 0.04); background: rgba(255, 255, 255, 0.065); }
   :global(:root[data-theme="dark"]) .editor-shell .utility-button:hover { border-color: rgba(255, 255, 255, 0.056); background: rgba(255, 255, 255, 0.104); }
@@ -3252,7 +3083,9 @@
   /* dark theme: manual */
   /* Shell, after the Figma dark frame (Docuflex › Redesign): black glass top bar and sidebar. */
   :global(:root[data-theme="dark"]) .topbar-backdrop img { filter: invert(1) brightness(0.6) contrast(1.2); }
-  :global(:root[data-theme="dark"]) .window-head-texture::before { filter: invert(1) brightness(0.6) contrast(1.2); }
+  /* Dark window head: Figma's starry Rectangle 992 (node 801:1490) with its black fade, not the inverted marble. */
+  :global(:root[data-theme="dark"]) .window-head-texture { background: #000; }
+  :global(:root[data-theme="dark"]) .window-head-texture::before { background: url('/redesign/rectangle992-dark.png') center bottom / 100% 100% no-repeat; filter: none; }
   /* The marble runs under the whole bar, including the buttons on the right, and fades
      smoothly into black at both ends, like the light bar fades into white. */
   :global(:root[data-theme="dark"]) .topbar-backdrop { border-bottom-color: #222121; background: rgba(0, 0, 0, 0.2); box-shadow: 0 4px 42.5px rgba(0, 0, 0, 0.3); }
@@ -3261,7 +3094,7 @@
       linear-gradient(90deg, rgba(0, 0, 0, 0) 33.804%, rgba(0, 0, 0, 0.6) 100%),
       linear-gradient(90deg, rgba(0, 0, 0, 0.6) 0%, rgba(0, 0, 0, 0) 54.345%);
   }
-  :global(:root[data-theme="dark"]) .window-head-texture::after { background: linear-gradient(180deg, rgba(0, 0, 0, 0.2) 0%, rgba(27, 26, 26, 0.2) 100%); }
+  :global(:root[data-theme="dark"]) .window-head-texture::after { background: linear-gradient(180.54deg, rgba(0, 0, 0, 0) 2.67%, #000 97.32%); }
   :global(:root[data-theme="dark"]) .topbar { border-bottom-color: #222121; background: rgba(0, 0, 0, 0.35); }
   /* Home grid matches the editor canvas: about 5% lighter than the shell. */
   :global(:root[data-theme="dark"]) .workspace { background-color: #1a1a1a; }

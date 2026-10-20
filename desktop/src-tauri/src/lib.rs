@@ -465,8 +465,7 @@ fn choose_download_destination(suggested: &Path) -> Option<PathBuf> {
         .save_file()
 }
 
-/// The redesigned document view draws its own traffic lights, so the native
-/// ones are hidden while it is open and shown again for the home screen.
+/// Hides or shows the native traffic lights (the web view can still ask for this).
 #[cfg(target_os = "macos")]
 fn set_native_window_buttons_hidden(window: &tauri::WebviewWindow, hidden: bool) {
     let Ok(ns_window) = window.ns_window() else {
@@ -486,6 +485,7 @@ fn set_native_window_buttons_hidden(window: &tauri::WebviewWindow, hidden: bool)
                 button.setHidden(hidden);
             }
         }
+
     });
 }
 
@@ -596,7 +596,10 @@ pub fn run() {
             let window_builder = window_builder
                 .title_bar_style(TitleBarStyle::Overlay)
                 .hidden_title(true)
-                .traffic_light_position(LogicalPosition::new(24.0, 24.0));
+                // Centers the native close button on the redesign's close-button spot:
+                // 24.65 × 23.8 pt from the top-left (Figma's 29 × 28 at the 0.85 UI scale).
+                // Tauri places the 14 pt button's left edge at x and its center at y − 2.
+                .traffic_light_position(LogicalPosition::new(17.65, 25.8));
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             let window_builder = window_builder.decorations(false).shadow(true);
             #[cfg(any(target_os = "linux", target_os = "windows"))]
