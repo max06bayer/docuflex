@@ -3149,7 +3149,7 @@
   :global(:root[data-theme="dark"]) .utilities { background: rgba(22, 22, 22, 0.96); box-shadow: -12px 0 18px rgba(0, 0, 0, 0.5); }
   :global(:root[data-theme="dark"]) .utility-button { border: 1px solid #202020; background: #141414; }
   :global(:root[data-theme="dark"]) .utility-button:hover { border-color: #2a2a2a; background: #111111; }
-  :global(:root[data-theme="dark"]) .ai-button.ai-busy::after { border: 1.5px solid rgba(255, 255, 255, 0.08); }
+  :global(:root[data-theme="dark"]) .ai-button.ai-busy::after { border: 1.5px solid rgba(255, 255, 255, 0.08); background: #0878f9; }
   :global(:root[data-theme="dark"]) .ai-button.active.ai-busy::after { border-color: #ececec; }
   :global(:root[data-theme="dark"]) .utility-button.active,
   :global(:root[data-theme="dark"]) .utility-button.active:hover { border-color: #ececec; background: #ececec; }
@@ -3190,6 +3190,7 @@
   :global(:root[data-theme="dark"]) .sort-menu-item { color: rgba(255, 255, 255, 0.75); }
   :global(:root[data-theme="dark"]) .sort-menu-item.active { border-color: rgba(255, 255, 255, 0.064); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.92); }
   :global(:root[data-theme="dark"]) .sort-menu-item:hover { border-color: rgba(255, 255, 255, 0.064); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.92); }
+  :global(:root[data-theme="dark"]) .sort-check { color: #0073ff; }
   :global(:root[data-theme="dark"]) .sort-button:hover,
   :global(:root[data-theme="dark"]) .filter-button:hover { border-color: rgba(255, 255, 255, 0.144); }
   :global(:root[data-theme="dark"]) .recent-document { color: rgba(255, 255, 255, 0.5); }
@@ -3208,6 +3209,7 @@
   :global(:root[data-theme="dark"]) .recent-menu-item kbd { border: 1px solid rgba(255, 255, 255, 0.04); background: rgba(255, 255, 255, 0.033); color: rgba(255, 255, 255, 0.165); }
   :global(:root[data-theme="dark"]) .recent-menu-item:hover kbd,
   :global(:root[data-theme="dark"]) .recent-menu-item:focus-visible kbd { border-color: rgba(255, 255, 255, 0.04); background: rgba(255, 255, 255, 0.072); }
+  :global(:root[data-theme="dark"]) .recent-menu-item.delete-document { color: rgba(255, 0, 0, 0.85); }
   :global(:root[data-theme="dark"]) .editor-shell,
   :global(:root[data-theme="dark"]) .editor-shell.editor-mode { background: #0e0e0e; }
   :global(:root[data-theme="dark"]) .window-head-texture { background: #111111; }
@@ -3216,11 +3218,15 @@
   :global(:root[data-theme="dark"]) .topbar-backdrop { border-bottom: 1px solid #343434; background: rgba(24, 24, 24, 0.95); box-shadow: 0 4px 50px rgba(0, 0, 0, 0.3); }
   :global(:root[data-theme="dark"]) .topbar-backdrop::after { background: linear-gradient(90deg, rgba(255, 255, 255, 0) 33.804%, rgba(255, 255, 255, 0.05) 100%),
       linear-gradient(90deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0) 54.345%); }
-  :global(:root[data-theme="dark"]) .editor-shell .document-tab { border: 1px solid #343434; background: linear-gradient(180deg, rgba(0, 0, 0, 0.09) 0%, rgba(255, 255, 255, 0.12) 100%); }
+  :global(:root[data-theme="dark"]) .editor-shell .document-tab { border: 1px solid #343434; background: linear-gradient(180deg, rgba(0, 0, 0, 0.09) 0%, rgba(255, 255, 255, 0.12) 100%); color: rgba(154, 63, 63, 0.75); }
   :global(:root[data-theme="dark"]) .editor-shell .document-tab.active { border-color: #2b2b2b; background: linear-gradient(180deg, #111111 0%, rgba(255, 255, 255, 0.05) 100%); color: rgba(255, 255, 255, 0.92); }
   :global(:root[data-theme="dark"]) .window-control { background: linear-gradient(180deg, var(--light-top), var(--light-bottom)) padding-box,
       linear-gradient(180deg, rgba(22, 22, 22, 0.96), rgba(255, 255, 255, 0)) border-box; box-shadow: 0 2px 4.9px rgba(0, 0, 0, 0.5); }
   :global(:root[data-theme="dark"]) .window-controls.window-inactive:not(:hover) .window-control { --light-top: rgba(255, 255, 255, 0.149); --light-bottom: #111111; }
+  :global(:root[data-theme="dark"]) .window-control.close::before,
+  :global(:root[data-theme="dark"]) .window-control.close::after,
+  :global(:root[data-theme="dark"]) .window-control.minimize::before { background: rgba(77, 0, 0, 0.72); }
+  :global(:root[data-theme="dark"]) .window-control.minimize::before { background: rgba(100, 55, 0, 0.72); }
   :global(:root[data-theme="dark"]) .window-control.zoom::before { border-top-color: rgba(185, 255, 190, 0.72); border-right-color: rgba(185, 255, 190, 0.72); }
   :global(:root[data-theme="dark"]) .window-control.zoom::after { border-bottom-color: rgba(185, 255, 190, 0.72); border-left-color: rgba(185, 255, 190, 0.72); }
   :global(:root[data-theme="dark"]) .editor-shell .utility-button { border: 1px solid rgba(255, 255, 255, 0.04); background: rgba(255, 255, 255, 0.065); }

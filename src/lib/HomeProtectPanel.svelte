@@ -184,10 +184,13 @@
   :global(:root[data-theme="dark"]) .protect-fields { border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
   :global(:root[data-theme="dark"]) .password-field { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); }
   :global(:root[data-theme="dark"]) .password-field:focus-within { border-color: rgba(255, 255, 255, 0.144); }
+  :global(:root[data-theme="dark"]) .password-field.error { border-color: rgba(222, 53, 66, 0.6); }
   :global(:root[data-theme="dark"]) .password-field input { color: rgba(255, 255, 255, 0.75); }
   :global(:root[data-theme="dark"]) .password-field input::placeholder { color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .protection-error { color: #de3542; }
   :global(:root[data-theme="dark"]) .protect-warning { border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
   :global(:root[data-theme="dark"]) .protect-warning p { color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .protect-warning p span { color: #0073ff; }
   :global(:root[data-theme="dark"]) .protect-submit { border: 1px solid #ececec; background: #ececec; color: #111111; }
   :global(:root[data-theme="dark"]) .protect-submit img { filter: brightness(0); }
   /* dark theme: end generated */

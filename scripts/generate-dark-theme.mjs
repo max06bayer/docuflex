@@ -221,8 +221,9 @@ function generate(css) {
   ast.walkRules((rule) => {
     // Keyframes steps are not selectors.
     if (rule.parent?.type === 'atrule' && /keyframes$/.test(/** @type {any} */ (rule.parent).name)) return;
-    // Tooltips are already dark in light mode and stay exactly as they are.
-    if (/tooltip/i.test(rule.selector)) return;
+    // Tooltips and the on-page comment cards (pins, tethers, highlights) are
+    // already dark in light mode and stay exactly as they are.
+    if (/tooltip|comment-(card|pin|tether|quote-layer)/i.test(rule.selector)) return;
     /** @type {string[]} */
     const declarations = [];
     const floating = rule.some((node) => node.type === 'decl' && (/^(-webkit-)?backdrop-filter$/.test(node.prop) || (node.prop === 'box-shadow' && node.value !== 'none')));
@@ -258,7 +259,10 @@ function generate(css) {
       if (context.midGrey && !rule.some((other) => other.type === 'decl' && other.prop === 'color')) {
         declarations.push('color: rgba(255, 255, 255, 0.5);');
       }
-      if (mapped !== node.value) declarations.push(`${node.prop}: ${mapped}${node.important ? ' !important' : ''};`);
+      // Colors that stay the same are re-emitted too, so a more specific light rule
+      // (a red danger button, say) still beats the dark version of its base rule.
+      if (mapped !== node.value || colorPattern.test(node.value)) declarations.push(`${node.prop}: ${mapped}${node.important ? ' !important' : ''};`);
+      colorPattern.lastIndex = 0;
     });
     if (!declarations.length) return;
     let block = `${darkSelector(rule.selector)} { ${declarations.join(' ')} }`;

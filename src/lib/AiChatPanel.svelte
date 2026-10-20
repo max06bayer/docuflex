@@ -2106,23 +2106,30 @@
   :global(:root[data-theme="dark"]) .ai-markdown :global(h5),
   :global(:root[data-theme="dark"]) .ai-markdown :global(h6) { color: rgba(255, 255, 255, 0.92); }
   :global(:root[data-theme="dark"]) .ai-markdown :global(strong) { color: rgba(255, 255, 255, 0.92); }
+  :global(:root[data-theme="dark"]) .ai-markdown :global(.math.invalid code) { color: #c83e3e; }
   :global(:root[data-theme="dark"]) .ai-markdown :global(code) { background: rgba(255, 255, 255, 0.065); }
   :global(:root[data-theme="dark"]) .ai-markdown :global(pre) { background: rgba(255, 255, 255, 0.05); }
   :global(:root[data-theme="dark"]) .ai-markdown :global(blockquote) { border-left: 2px solid rgba(255, 255, 255, 0.112); }
+  :global(:root[data-theme="dark"]) .ai-markdown :global(a) { color: #1684f8; }
   :global(:root[data-theme="dark"]) .ai-markdown.streaming > :global(:last-child)::after { background: rgba(255, 255, 255, 0.2); }
   :global(:root[data-theme="dark"]) .ai-step-row:hover { background: rgba(255, 255, 255, 0.039); color: rgba(255, 255, 255, 0.8); }
   :global(:root[data-theme="dark"]) .ai-step-detail { color: rgba(255, 255, 255, 0.35); }
   :global(:root[data-theme="dark"]) .ai-step-status { color: rgba(255, 255, 255, 0.35); }
   :global(:root[data-theme="dark"]) .ai-step-chevron { color: rgba(255, 255, 255, 0.35); }
+  :global(:root[data-theme="dark"]) .ai-step[data-status='error'] .ai-step-status { color: #de3542; }
   :global(:root[data-theme="dark"]) .ai-spinner { border: 1.5px solid rgba(255, 255, 255, 0.112); border-top-color: rgba(255, 255, 255, 0.48); }
   :global(:root[data-theme="dark"]) .ai-step-helper { color: rgba(255, 255, 255, 0.7); }
+  :global(:root[data-theme="dark"]) .ai-step-helper[data-status='error'] span { color: #de3542; }
   :global(:root[data-theme="dark"]) .ai-approval { background: rgba(255, 255, 255, 0.05); }
   :global(:root[data-theme="dark"]) .ai-action { border: 1px solid #ececec; background: #ececec; color: #111111; }
   :global(:root[data-theme="dark"]) .ai-action.secondary { background: rgba(255, 255, 255, 0.05); }
   :global(:root[data-theme="dark"]) .ai-action.secondary:hover { background: rgba(255, 255, 255, 0.052); }
   :global(:root[data-theme="dark"]) .ai-step-details pre { background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.6); }
+  :global(:root[data-theme="dark"]) .ai-step-details pre.error { color: #de3542; }
+  :global(:root[data-theme="dark"]) .ai-error p { color: #de3542; }
   :global(:root[data-theme="dark"]) .ai-input { background: rgba(255, 255, 255, 0.05); }
   :global(:root[data-theme="dark"]) .ai-input:focus-within { border-color: rgba(255, 255, 255, 0.176); }
+  :global(:root[data-theme="dark"]) .ai-panel.dragging .ai-input { border-color: #1684f8; }
   :global(:root[data-theme="dark"]) .ai-input textarea::placeholder { color: rgba(255, 255, 255, 0.4); }
   :global(:root[data-theme="dark"]) .ai-chip { background: rgba(255, 255, 255, 0.052); }
   :global(:root[data-theme="dark"]) .ai-chip button { filter: brightness(0) invert(1) opacity(0.78); }

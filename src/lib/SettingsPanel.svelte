@@ -512,6 +512,7 @@
   :global(:root[data-theme="dark"]) .settings-link:hover,
   :global(:root[data-theme="dark"]) .settings-link:focus-visible { background: rgba(255, 255, 255, 0.07); }
   :global(:root[data-theme="dark"]) .settings-key-input.focused { border-color: rgba(255, 255, 255, 0.176); }
+  :global(:root[data-theme="dark"]) .settings-key-input.invalid { border-color: rgba(222, 53, 66, 0.55); }
   :global(:root[data-theme="dark"]) .settings-key-input input::placeholder { color: rgba(255, 255, 255, 0.5); }
   :global(:root[data-theme="dark"]) .settings-key-stars { filter: brightness(0) invert(1) opacity(0.78); }
   :global(:root[data-theme="dark"]) .settings-key-caret { background: rgba(255, 255, 255, 0.2); }
@@ -520,6 +521,7 @@
   :global(:root[data-theme="dark"]) .settings-action { border: 1px solid #ececec; background: #ececec; color: #111111; }
   :global(:root[data-theme="dark"]) .settings-action.secondary { border-color: rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.75); }
   :global(:root[data-theme="dark"]) .settings-action.secondary:not(:disabled):hover { background: rgba(255, 255, 255, 0.07); }
+  :global(:root[data-theme="dark"]) .settings-error { color: #de3542; }
   :global(:root[data-theme="dark"]) .panel-header { border-bottom: 1px solid #292929; background: #111111; }
   :global(:root[data-theme="dark"]) .panel-close span { color: rgba(255, 255, 255, 0.5); background: rgba(255, 255, 255, 0.14); }
   :global(:root[data-theme="dark"]) .panel-close:hover span { background: #ececec; }
@@ -530,9 +532,11 @@
   :global(:root[data-theme="dark"]) .legal-content p { color: rgba(255, 255, 255, 0.694); }
   :global(:root[data-theme="dark"]) .legal-content strong { color: rgba(255, 255, 255, 0.844); }
   :global(:root[data-theme="dark"]) .legal-content code { background: #101010; color: rgba(255, 255, 255, 0.867); }
+  :global(:root[data-theme="dark"]) .legal-content a { color: #0878f9; }
   :global(:root[data-theme="dark"]) .operator-notice { border: 1px solid #242424; background: #121212; }
   :global(:root[data-theme="dark"]) .legal-footer { border-top: 1px solid #272727; background: #131313; }
-  :global(:root[data-theme="dark"]) .legal-footer button { color: #111111; box-shadow: 0 5px 15px rgba(8, 120, 249, 0.6); }
+  :global(:root[data-theme="dark"]) .legal-footer button { background: #0878f9; color: #111111; box-shadow: 0 5px 15px rgba(8, 120, 249, 0.6); }
+  :global(:root[data-theme="dark"]) .legal-footer button:hover { background: #006ff0; }
   /* dark theme: end generated */
 
 </style>

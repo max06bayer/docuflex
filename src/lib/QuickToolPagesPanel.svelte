@@ -874,8 +874,10 @@
   :global(:root[data-theme="dark"]) .upload-file { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.5); }
   :global(:root[data-theme="dark"]) .upload-file:hover:not(:disabled),
   :global(:root[data-theme="dark"]) .upload-file.drop-target { border-color: rgba(255, 255, 255, 0.144); color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .upload-file.drop-target { border-color: #0073ff; }
   :global(:root[data-theme="dark"]) .text-field { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); }
   :global(:root[data-theme="dark"]) .text-field:focus-within { border-color: rgba(255, 255, 255, 0.144); }
+  :global(:root[data-theme="dark"]) .text-field.error { border-color: rgba(222, 53, 66, 0.6); }
   :global(:root[data-theme="dark"]) .text-field input { color: rgba(255, 255, 255, 0.75); }
   :global(:root[data-theme="dark"]) .text-field input::placeholder { color: rgba(255, 255, 255, 0.5); }
   :global(:root[data-theme="dark"]) .panel-close { filter: brightness(0) invert(1) opacity(0.78); }
@@ -888,9 +890,12 @@
   :global(:root[data-theme="dark"]) .quick-thumbnail-page.page-selected .page-pill { border-color: rgba(255, 255, 255, 0.136); }
   :global(:root[data-theme="dark"]) .page-pill { border: 1px solid rgba(255, 255, 255, 0.056); background: rgba(24, 24, 24, 0.95); box-shadow: 0 0 40.5px rgba(0, 0, 0, 0.354); color: rgba(255, 255, 255, 0.5); }
   :global(:root[data-theme="dark"]) .page-separator::before { background: rgba(255, 255, 255, 0.12); }
+  :global(:root[data-theme="dark"]) .page-separator::after { border: 1px solid #0073ff; background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M5 12h14M12 5v14' fill='none' stroke='white' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E") center / 24px 24px no-repeat, radial-gradient(circle 13px at center, #0053b9 0%, #0976fa 100%); }
+  :global(:root[data-theme="dark"]) .page-separator.pdf-drop-target::before { background: linear-gradient(90deg, #0073ff 0, #0073ff calc(50% - 13px), transparent calc(50% - 13px), transparent calc(50% + 12px), #0073ff calc(50% + 12px)); }
   :global(:root[data-theme="dark"]) .page-drag-ghost { background: rgba(22, 22, 22, 0.96); box-shadow: 0 0 0 1px rgba(187, 187, 187, 0.6), 0 24px 48px rgba(0, 0, 0, 0.6), 0 7px 16px rgba(0, 0, 0, 0.42); }
   :global(:root[data-theme="dark"]) .page-drag-count { background: rgba(255, 255, 255, 0.2); color: #111111; }
   :global(:root[data-theme="dark"]) .has-pages .panel-actions { border-top: 1px solid rgba(255, 255, 255, 0.08); }
+  :global(:root[data-theme="dark"]) .panel-error { color: #de3542; }
   :global(:root[data-theme="dark"]) .panel-action { border: 1px solid #ececec; background: #ececec; color: #111111; }
   :global(:root[data-theme="dark"]) .panel-action:disabled { border-color: #333333; color: rgba(255, 255, 255, 0.5); background: rgba(255, 255, 255, 0.105); }
   :global(:root[data-theme="dark"]) .page-context-menu { border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(24, 24, 24, 0.95); box-shadow: 0 0 100px rgba(0, 0, 0, 0.24); }
@@ -903,6 +908,7 @@
   :global(:root[data-theme="dark"]) .page-menu-item:hover:not(:disabled) kbd,
   :global(:root[data-theme="dark"]) .page-menu-item:focus-visible:not(:disabled) kbd { border-color: rgba(255, 255, 255, 0.04); background: rgba(255, 255, 255, 0.072); }
   :global(:root[data-theme="dark"]) .page-menu-item:disabled { color: rgba(255, 255, 255, 0.3); }
+  :global(:root[data-theme="dark"]) .page-menu-item.delete-page:not(:disabled) { color: rgba(255, 0, 0, 0.85); }
   /* dark theme: end generated */
 
   /* dark theme: manual */

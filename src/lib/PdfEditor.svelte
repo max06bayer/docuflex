@@ -10466,11 +10466,11 @@
   {#if commentMode && commentDraft}
     {@const thread = commentDraft.threadId !== null ? findComment(commentDraft.threadId, [comments, pdfComments]) : null}
     {@const isEditing = commentDraft.editingId !== null}
-    {@const isNew = !thread && !isEditing}
+    {@const isReply = Boolean(thread) && !isEditing}
+    {@const canEdit = Boolean(thread) && !thread?.comment.existing}
     {@const panelTitle = isEditing ? 'Edit Comment' : thread ? 'Comment' : 'New Comment'}
     <div
       class="protect-panel comment-panel"
-      class:editing={isEditing}
       role="dialog"
       aria-label={panelTitle}
       transition:fly={{ x: 18, duration: 240, easing: cubicOut }}
@@ -10483,60 +10483,52 @@
           <span></span>
         </button>
       </header>
-      <form class="comment-panel-content" onsubmit={(event) => { event.preventDefault(); saveCommentDraft(); }}>
-        <div class="comment-panel-body">
-          {#if thread && !isEditing}
-            <div class="comment-thread">
-              <article class="comment-thread-entry">
-                <header>
-                  <strong>{thread.comment.author || 'Unknown'}</strong>
-                  {#if thread.comment.createdAt}<time>{formatCommentDate(thread.comment.createdAt)}</time>{/if}
+      <form class="cmt" onsubmit={(event) => { event.preventDefault(); saveCommentDraft(); }}>
+        {#if isReply && thread}
+          <section class="cmt-section cmt-thread">
+            {#each [thread.comment, ...commentThreadReplies(thread.comment, thread.pageIndex, commentReplies)] as entry, entryIndex}
+              <article class="cmt-entry">
+                <header class="cmt-meta">
+                  <span class="cmt-author">{entry.author || 'Unknown'}</span>
+                  {#if entry.createdAt}<time>{formatCommentDate(entry.createdAt)}</time>{/if}
                 </header>
-                <p>{thread.comment.text}</p>
-                {#if thread.comment.quote}<p class="comment-quote">“{thread.comment.quote}”</p>{/if}
-                {#if !thread.comment.existing}
-                  <div class="comment-thread-tools">
-                    <button type="button" onclick={startEditingComment}>Edit</button>
-                    <button type="button" class="danger" onclick={deleteDraftComment}>Delete</button>
-                  </div>
-                {/if}
+                <p class="cmt-text">{entry.text}</p>
+                {#if entryIndex === 0 && thread.comment.quote}<p class="cmt-quote">{thread.comment.quote}</p>{/if}
               </article>
-              {#each commentThreadReplies(thread.comment, thread.pageIndex, commentReplies) as reply}
-                <article class="comment-thread-entry reply">
-                  <header>
-                    <strong>{reply.author || 'Unknown'}</strong>
-                    {#if reply.createdAt}<time>{formatCommentDate(reply.createdAt)}</time>{/if}
-                  </header>
-                  <p>{reply.text}</p>
-                </article>
-              {/each}
-            </div>
-          {:else if commentDraft.quote}
-            <p class="comment-quote">“{commentDraft.quote}”</p>
-          {:else if isNew}
-            <p class="comment-hint">Page {commentDraft.pageIndex + 1}. Select text to comment on it instead.</p>
-          {/if}
-          <textarea
-            bind:this={commentInput}
-            bind:value={commentDraft.text}
-            placeholder={thread && !isEditing ? 'Write a reply…' : 'Write a comment…'}
-            aria-label={thread && !isEditing ? 'Reply' : 'Comment'}
-            rows={thread && !isEditing ? 2 : 4}
-            onkeydown={handleCommentKeydown}
-          ></textarea>
-          <label class="comment-author-row">
-            <span>Name</span>
-            <input bind:value={commentAuthor} placeholder="Docuflex" aria-label="Comment author" autocomplete="name" onkeydown={handleCommentKeydown} />
-          </label>
-        </div>
-        <footer class="comment-actions">
+            {/each}
+          </section>
+        {:else if commentDraft.quote}
+          <section class="cmt-section">
+            <p class="cmt-quote">{commentDraft.quote}</p>
+          </section>
+        {/if}
+        <section class="cmt-section cmt-compose">
+          <div class="cmt-field cmt-field-text" class:reply={isReply}>
+            <textarea
+              bind:this={commentInput}
+              bind:value={commentDraft.text}
+              placeholder={isReply ? 'Reply' : 'Comment'}
+              aria-label={isReply ? 'Reply' : 'Comment'}
+              onkeydown={handleCommentKeydown}
+            ></textarea>
+          </div>
+          <div class="cmt-field">
+            <input bind:value={commentAuthor} placeholder="Name" aria-label="Your name" autocomplete="name" onkeydown={handleCommentKeydown} />
+          </div>
+        </section>
+        <footer class="cmt-actions">
           {#if isEditing}
-            <button class="signature-action secondary" type="button" onclick={() => { if (commentDraft) commentDraft = { ...commentDraft, editingId: null, text: '' }; }}>Cancel</button>
+            <button class="cmt-button" type="button" onclick={() => { if (commentDraft) commentDraft = { ...commentDraft, editingId: null, text: '' }; }}>Cancel</button>
+            <button class="cmt-button primary" type="submit" disabled={!commentDraft.text.trim()}>Save</button>
+          {:else if isReply}
+            {#if canEdit}
+              <button class="cmt-button" type="button" onclick={startEditingComment}>Edit</button>
+              <button class="cmt-button danger" type="button" onclick={deleteDraftComment}>Delete</button>
+            {/if}
+            <button class="cmt-button primary" type="submit" disabled={!commentDraft.text.trim()}>Reply</button>
+          {:else}
+            <button class="cmt-button primary" type="submit" disabled={!commentDraft.text.trim()}>Add Comment</button>
           {/if}
-          <button class="signature-action primary" type="submit" disabled={!commentDraft.text.trim()}>
-            <img src="/comments.svg" alt="" />
-            <span>{isEditing ? 'Save' : thread ? 'Reply' : 'Add Comment'}</span>
-          </button>
         </footer>
       </form>
     </div>
@@ -12498,160 +12490,215 @@
     font-weight: 400;
   }
 
+  /* Comment panel: the same sectioned layout as Password Protect — 19px text,
+     17px secondary text, 48px fields and buttons, thin dividers. */
   .protect-panel.comment-panel {
     height: auto;
-    max-height: calc(100% - 40px);
     grid-template-rows: 50px minmax(0, 1fr);
+    font-size: 19px;
+    letter-spacing: -0.19px;
   }
 
-  .comment-panel-content {
-    display: grid;
-    grid-template-rows: minmax(0, 1fr) auto;
+  .cmt {
+    display: flex;
+    flex-direction: column;
     min-height: 0;
-    background: #fafafa;
   }
 
-  .comment-panel-body {
+  .cmt-section {
     display: grid;
-    gap: 12px;
+    gap: 10px;
+    flex: 0 0 auto;
+    padding: 15px 11px 15px 12px;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+  }
+
+  .cmt-thread {
+    flex: 0 1 auto;
+    gap: 0;
     min-height: 0;
-    padding: 16px 18px;
+    max-height: 340px;
+    padding-block: 4px;
     overflow-y: auto;
-    border-bottom: 1px solid #cacaca;
+    scrollbar-width: none;
   }
 
-  .comment-quote,
-  .comment-hint {
-    margin: 0;
-    color: #7a7a7a;
-    font-size: 16px;
-    line-height: 1.38;
-    letter-spacing: -0.2px;
+  .cmt-thread::-webkit-scrollbar {
+    display: none;
   }
 
-  .comment-quote {
-    display: -webkit-box;
-    max-height: 120px;
-    padding: 9px 12px;
+  .cmt-entry {
+    display: grid;
+    gap: 4px;
+    padding: 11px 2px;
+  }
+
+  .cmt-entry + .cmt-entry {
+    border-top: 1px solid rgba(0, 0, 0, 0.06);
+  }
+
+  .cmt-meta {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .cmt-author {
     overflow: hidden;
-    border: 1px solid #d7d7d7;
-    border-left: 3px solid #ffd60a;
-    border-radius: 8px;
-    background: #f3f3f3;
-    color: #3f3f3f;
+    color: #000;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .cmt-meta time {
+    flex: none;
+    color: rgba(0, 0, 0, 0.5);
+    font-size: 17px;
+    letter-spacing: -0.17px;
+  }
+
+  .cmt-text {
+    margin: 0;
+    color: rgba(0, 0, 0, 0.75);
+    line-height: 1.32;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .cmt-quote {
+    display: -webkit-box;
+    margin: 4px 0 0;
+    padding-left: 10px;
+    overflow: hidden;
+    border-left: 2px solid #ffd60a;
+    color: rgba(0, 0, 0, 0.5);
+    font-size: 17px;
+    line-height: 1.35;
+    letter-spacing: -0.17px;
     -webkit-line-clamp: 4;
     line-clamp: 4;
     -webkit-box-orient: vertical;
   }
 
-  .comment-panel-body textarea {
+  .cmt-section > .cmt-quote {
+    margin: 0;
+  }
+
+  .cmt-field {
+    display: grid;
+    box-sizing: border-box;
+    min-height: 48px;
+    overflow: hidden;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 15px;
+    background: #fff;
+    transition: border-color 150ms ease;
+  }
+
+  .cmt-field:focus-within {
+    border-color: rgba(0, 0, 0, 0.18);
+  }
+
+  .cmt-field input,
+  .cmt-field textarea {
     box-sizing: border-box;
     width: 100%;
-    min-height: 64px;
-    padding: 10px 12px;
-    border: 1px solid #d7d7d7;
-    border-radius: 8px;
-    outline: none;
-    background: #f3f3f3;
-    color: #000;
+    min-width: 0;
+    margin: 0;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: rgba(0, 0, 0, 0.75);
     font: inherit;
-    font-size: 18px;
-    line-height: 1.35;
-    letter-spacing: -0.25px;
-    resize: vertical;
-    transition: border-color 160ms ease, background-color 160ms ease;
+    letter-spacing: inherit;
   }
 
-  .comment-thread {
+  .cmt-field input {
+    height: 46px;
+    padding: 0 13px;
+  }
+
+  .cmt-field textarea {
+    display: block;
+    height: 110px;
+    padding: 12px 13px;
+    line-height: 1.32;
+    resize: none;
+  }
+
+  .cmt-field-text.reply textarea {
+    height: 78px;
+  }
+
+  .cmt-field input::placeholder,
+  .cmt-field textarea::placeholder {
+    color: rgba(0, 0, 0, 0.5);
+    opacity: 1;
+  }
+
+  .cmt-actions {
     display: grid;
-    max-height: 320px;
-    overflow-y: auto;
-    border: 1px solid #d7d7d7;
-    border-radius: 8px;
-    background: #f3f3f3;
-    scrollbar-width: thin;
+    grid-auto-columns: minmax(0, 1fr);
+    grid-auto-flow: column;
+    gap: 10px;
+    flex: 0 0 auto;
+    padding: 15px 11px 15px 12px;
   }
 
-  .comment-thread-entry {
-    display: grid;
-    gap: 4px;
-    padding: 10px 12px 11px;
-  }
-
-  .comment-thread-entry + .comment-thread-entry {
-    border-top: 1px solid #dedede;
-  }
-
-  .comment-thread-entry.reply {
-    padding-left: 24px;
-  }
-
-  .comment-thread-entry header {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 8px;
-  }
-
-  .comment-thread-entry strong {
+  .cmt-button {
+    box-sizing: border-box;
+    min-width: 0;
+    height: 48px;
+    padding: 0 12px;
     overflow: hidden;
-    color: #000;
-    font-size: 16px;
-    font-weight: 400;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 15px;
+    background: #fff;
+    color: rgba(0, 0, 0, 0.75);
+    font: inherit;
+    letter-spacing: inherit;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .comment-thread-entry time {
-    flex: none;
-    color: #9a9a9a;
-    font-size: 13px;
-  }
-
-  .comment-thread-entry p {
-    margin: 0;
-    color: #4a4a4a;
-    font-size: 16px;
-    line-height: 1.35;
-    letter-spacing: -0.2px;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-  }
-
-  .comment-thread-entry .comment-quote {
-    margin-top: 4px;
-    font-size: 15px;
-  }
-
-  .comment-thread-tools {
-    display: flex;
-    gap: 6px;
-    margin-top: 4px;
-  }
-
-  .comment-thread-tools button {
-    height: 28px;
-    padding: 0 10px;
-    border: 1px solid #d7d7d7;
-    border-radius: 7px;
-    background: #fafafa;
-    color: #4a4a4a;
-    font: inherit;
-    font-size: 14px;
     cursor: pointer;
-    transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
+    transition: border-color 150ms ease, color 150ms ease, background-color 150ms ease, transform 160ms ease;
   }
 
-  .comment-thread-tools button:hover {
-    border-color: #c8c8c8;
-    background: #eeeeee;
+  .cmt-button:hover:not(:disabled) {
+    border-color: rgba(0, 0, 0, 0.18);
     color: #000;
   }
 
-  .comment-thread-tools button.danger:hover {
-    border-color: #e3b4b4;
-    background: #fbeaea;
-    color: #c83e3e;
+  .cmt-button.danger {
+    color: #de3542;
+  }
+
+  .cmt-button.danger:hover:not(:disabled) {
+    border-color: rgba(222, 53, 66, 0.4);
+    color: #de3542;
+  }
+
+  .cmt-button.primary {
+    border-color: #111;
+    background: #111;
+    color: #fff;
+  }
+
+  .cmt-button.primary:hover:not(:disabled) {
+    border-color: #000;
+    background: #000;
+    color: #fff;
+  }
+
+  .cmt-button.primary:disabled {
+    border-color: #b4b4b4;
+    background: #b4b4b4;
+    cursor: default;
+  }
+
+  .cmt-button:active:not(:disabled) {
+    transform: scale(0.97);
   }
 
   .comment-tether-layer {
@@ -12668,61 +12715,6 @@
   .comment-tether-layer line.hovered {
     stroke: #0878f9;
     stroke-dasharray: none;
-  }
-
-  .comment-author-row {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    align-items: center;
-    min-height: 39px;
-    overflow: hidden;
-    border: 1px solid #d7d7d7;
-    border-radius: 8px;
-    background: #f3f3f3;
-    font-size: 18px;
-  }
-
-  .comment-author-row span {
-    padding-left: 12px;
-    color: #7a7a7a;
-  }
-
-  .comment-author-row input {
-    min-width: 0;
-    height: 37px;
-    padding: 0 12px;
-    border: 0;
-    outline: 0;
-    background: transparent;
-    color: #111;
-    font: inherit;
-    text-align: right;
-  }
-
-  .comment-panel-body textarea::placeholder {
-    color: #8a8a8a;
-  }
-
-  .comment-panel-body textarea:focus {
-    border-color: #b8b8b8;
-    background: #f7f7f7;
-  }
-
-  .comment-actions {
-    display: grid;
-    grid-auto-flow: column;
-    grid-auto-columns: minmax(0, 1fr);
-    gap: 10px;
-    padding: 17px 18px;
-  }
-
-  .comment-panel.editing .comment-actions {
-    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.4fr);
-  }
-
-  .comment-actions .signature-action.primary:disabled {
-    cursor: default;
-    opacity: 0.45;
   }
 
   .raster-filter-defs {
@@ -14544,15 +14536,6 @@
     border-top-color: rgba(0, 0, 0, 0.1);
   }
 
-  .comment-panel-body textarea {
-    border: 1px solid rgba(0, 0, 0, 0.1);
-    border-radius: 15px;
-    background: #fff;
-    color: rgba(0, 0, 0, 0.75);
-    font-size: 21px;
-    letter-spacing: -0.21px;
-  }
-
   .figma-color-picker {
     right: 316px;
     border: 1px solid #cbcaca;
@@ -14877,6 +14860,9 @@
   :global(:root[data-theme="dark"]) .page-pill { border: 1px solid rgba(255, 255, 255, 0.056); background: rgba(24, 24, 24, 0.95); box-shadow: 0 0 40.5px rgba(0, 0, 0, 0.354); color: rgba(255, 255, 255, 0.5); }
   :global(:root[data-theme="dark"]) .thumbnail-page.page-selected .page-pill { border-color: rgba(255, 255, 255, 0.136); }
   :global(:root[data-theme="dark"]) .page-separator::before { background: rgba(255, 255, 255, 0.12); }
+  :global(:root[data-theme="dark"]) .page-separator::after { border: 1px solid #0073ff; background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M5 12h14M12 5v14' fill='none' stroke='white' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E") center / 24px 24px no-repeat,
+      radial-gradient(circle 13px at center, #0053b9 0%, #0976fa 100%); }
+  :global(:root[data-theme="dark"]) .page-separator.pdf-drop-target::before { background: linear-gradient(90deg, #0073ff 0, #0073ff calc(50% - 13px), transparent calc(50% - 13px), transparent calc(50% + 12px), #0073ff calc(50% + 12px)); }
   :global(:root[data-theme="dark"]) .page-context-menu { border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(24, 24, 24, 0.95); box-shadow: 0 0 100px rgba(0, 0, 0, 0.24); }
   :global(:root[data-theme="dark"]) .page-menu-item { color: rgba(255, 255, 255, 0.75); }
   :global(:root[data-theme="dark"]) .page-menu-item:hover:not(:disabled),
@@ -14887,6 +14873,7 @@
   :global(:root[data-theme="dark"]) .page-menu-item:hover:not(:disabled) kbd,
   :global(:root[data-theme="dark"]) .page-menu-item:focus-visible:not(:disabled) kbd { border-color: rgba(255, 255, 255, 0.04); background: rgba(255, 255, 255, 0.072); }
   :global(:root[data-theme="dark"]) .page-menu-item:disabled { color: rgba(255, 255, 255, 0.3); }
+  :global(:root[data-theme="dark"]) .page-menu-item.delete-page:not(:disabled) { color: rgba(255, 0, 0, 0.85); }
   :global(:root[data-theme="dark"]) .pdf-workspace { background: linear-gradient(90deg, rgba(255, 255, 255, 0.058) 1px, transparent 1px) 58px 122px / 140px 140px,
       linear-gradient(180deg, rgba(255, 255, 255, 0.058) 1px, transparent 1px) 58px 122px / 140px 140px,
       #0e0e0e; }
@@ -14908,7 +14895,7 @@
   :global(:root[data-theme="dark"]) .text-redaction-grid button { background: #121212; color: rgba(255, 255, 255, 0.859); }
   :global(:root[data-theme="dark"]) .selection-property-section { border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
   :global(:root[data-theme="dark"]) .inspector-field { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.5); }
-  :global(:root[data-theme="dark"]) .inspector-field:focus-within { background: rgba(22, 22, 22, 0.96); box-shadow: 0 0 0 1px rgba(22, 132, 248, 0.39); }
+  :global(:root[data-theme="dark"]) .inspector-field:focus-within { border-color: #1684f8; background: rgba(22, 22, 22, 0.96); box-shadow: 0 0 0 1px rgba(22, 132, 248, 0.39); }
   :global(:root[data-theme="dark"]) .inspector-field input { color: rgba(255, 255, 255, 0.75); }
   :global(:root[data-theme="dark"]) .inspector-field em { color: rgba(255, 255, 255, 0.5); }
   :global(:root[data-theme="dark"]) .rotation-field-value { color: rgba(255, 255, 255, 0.75); }
@@ -14958,51 +14945,40 @@
   :global(:root[data-theme="dark"]) .protect-fields { border-bottom: 1px solid #292929; background: #141414; }
   :global(:root[data-theme="dark"]) .password-field { border: 1px solid #232323; background: #121212; }
   :global(:root[data-theme="dark"]) .password-field:focus-within { border-color: #373737; background: #121212; box-shadow: 0 0 0 3px rgba(0, 117, 255, 0.27); }
-  :global(:root[data-theme="dark"]) .password-field.error { box-shadow: 0 0 0 3px rgba(225, 87, 87, 0.27); }
+  :global(:root[data-theme="dark"]) .password-field.error { border-color: #e15757; box-shadow: 0 0 0 3px rgba(225, 87, 87, 0.27); }
   :global(:root[data-theme="dark"]) .password-field input { color: rgba(255, 255, 255, 0.796); }
   :global(:root[data-theme="dark"]) .password-field input::placeholder { color: rgba(255, 255, 255, 0.522); }
   :global(:root[data-theme="dark"]) .password-visibility { border-left: 1px solid #232323; }
   :global(:root[data-theme="dark"]) .password-visibility:hover { background: rgba(255, 255, 255, 0.046); }
+  :global(:root[data-theme="dark"]) .protection-error { color: #c83e3e; }
   :global(:root[data-theme="dark"]) .protect-warning { border-bottom: 1px solid #292929; background: #141414; }
   :global(:root[data-theme="dark"]) .protect-warning h3 { color: rgba(255, 255, 255, 0.92); }
   :global(:root[data-theme="dark"]) .protect-warning p { color: rgba(255, 255, 255, 0.522); }
+  :global(:root[data-theme="dark"]) .protect-warning p span { color: #0878f9; }
   :global(:root[data-theme="dark"]) .protect-actions { background: #141414; }
   :global(:root[data-theme="dark"]) .protect-submit { background: #ececec; color: #111111; }
   :global(:root[data-theme="dark"]) .protect-submit:hover { box-shadow: 0 5px 16px rgba(0, 0, 0, 0.48); }
-  :global(:root[data-theme="dark"]) .protect-submit.encrypted { box-shadow: 0 5px 16px rgba(8, 120, 249, 0.6); }
+  :global(:root[data-theme="dark"]) .protect-submit.encrypted { background: #0878f9; box-shadow: 0 5px 16px rgba(8, 120, 249, 0.6); }
   :global(:root[data-theme="dark"]) .protect-submit img { filter: brightness(0); }
-  :global(:root[data-theme="dark"]) .comment-pin { border: 1px solid rgba(0, 0, 0, 0.096); background: #ececec; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.6); }
-  :global(:root[data-theme="dark"]) .comment-pin img { filter: brightness(0); }
-  :global(:root[data-theme="dark"]) .comment-card { border: 1px solid rgba(0, 0, 0, 0.064); background: #ececec; box-shadow: 0 10px 28px rgba(0, 0, 0, 0.6), 0 2px 7px rgba(0, 0, 0, 0.36); color: #111111; }
-  :global(:root[data-theme="dark"]) .comment-card::after { background: linear-gradient(to bottom, rgba(255, 255, 255, 0), #ececec 78%); }
-  :global(:root[data-theme="dark"]) .comment-card.hovered,
-  :global(:root[data-theme="dark"]) .comment-card:focus-visible { box-shadow: 0 14px 34px rgba(0, 0, 0, 0.6), 0 0 0 2px rgba(8, 120, 249, 0.6); }
-  :global(:root[data-theme="dark"]) .comment-card strong { color: #111111; }
-  :global(:root[data-theme="dark"]) .comment-card strong em { color: rgba(255, 255, 255, 0.51); }
-  :global(:root[data-theme="dark"]) .comment-card-text { color: rgba(255, 255, 255, 0.333); }
-  :global(:root[data-theme="dark"]) .comment-card-quote { color: rgba(255, 255, 255, 0.161); }
-  :global(:root[data-theme="dark"]) .comment-card-reply { border-top: 1px solid rgba(0, 0, 0, 0.064); color: rgba(255, 255, 255, 0.333); }
-  :global(:root[data-theme="dark"]) .comment-card-reply b { color: #111111; }
-  :global(:root[data-theme="dark"]) .comment-panel-content { background: #141414; }
-  :global(:root[data-theme="dark"]) .comment-panel-body { border-bottom: 1px solid #292929; }
-  :global(:root[data-theme="dark"]) .comment-quote,
-  :global(:root[data-theme="dark"]) .comment-hint { color: rgba(255, 255, 255, 0.522); }
-  :global(:root[data-theme="dark"]) .comment-quote { border: 1px solid #232323; background: #121212; color: rgba(255, 255, 255, 0.753); }
-  :global(:root[data-theme="dark"]) .comment-panel-body textarea { border: 1px solid #232323; background: #121212; color: rgba(255, 255, 255, 0.92); }
-  :global(:root[data-theme="dark"]) .comment-thread { border: 1px solid #232323; background: #121212; }
-  :global(:root[data-theme="dark"]) .comment-thread-entry + .comment-thread-entry { border-top: 1px solid #202020; }
-  :global(:root[data-theme="dark"]) .comment-thread-entry strong { color: rgba(255, 255, 255, 0.92); }
-  :global(:root[data-theme="dark"]) .comment-thread-entry time { color: rgba(255, 255, 255, 0.396); }
-  :global(:root[data-theme="dark"]) .comment-thread-entry p { color: rgba(255, 255, 255, 0.71); }
-  :global(:root[data-theme="dark"]) .comment-thread-tools button { border: 1px solid #232323; background: #141414; color: rgba(255, 255, 255, 0.71); }
-  :global(:root[data-theme="dark"]) .comment-thread-tools button:hover { border-color: #2a2a2a; background: #111111; color: rgba(255, 255, 255, 0.92); }
-  :global(:root[data-theme="dark"]) .comment-thread-tools button.danger:hover { background: #111111; }
-  :global(:root[data-theme="dark"]) .comment-tether-layer line { stroke: rgba(255, 255, 255, 0.39); }
-  :global(:root[data-theme="dark"]) .comment-author-row { border: 1px solid #232323; background: #121212; }
-  :global(:root[data-theme="dark"]) .comment-author-row span { color: rgba(255, 255, 255, 0.522); }
-  :global(:root[data-theme="dark"]) .comment-author-row input { color: rgba(255, 255, 255, 0.859); }
-  :global(:root[data-theme="dark"]) .comment-panel-body textarea::placeholder { color: rgba(255, 255, 255, 0.459); }
-  :global(:root[data-theme="dark"]) .comment-panel-body textarea:focus { border-color: #313131; background: #131313; }
+  :global(:root[data-theme="dark"]) .cmt-section { border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+  :global(:root[data-theme="dark"]) .cmt-entry + .cmt-entry { border-top: 1px solid rgba(255, 255, 255, 0.048); }
+  :global(:root[data-theme="dark"]) .cmt-author { color: rgba(255, 255, 255, 0.92); }
+  :global(:root[data-theme="dark"]) .cmt-meta time { color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .cmt-text { color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .cmt-quote { border-left: 2px solid #ffd60a; color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .cmt-field { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); }
+  :global(:root[data-theme="dark"]) .cmt-field:focus-within { border-color: rgba(255, 255, 255, 0.144); }
+  :global(:root[data-theme="dark"]) .cmt-field input,
+  :global(:root[data-theme="dark"]) .cmt-field textarea { color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .cmt-field input::placeholder,
+  :global(:root[data-theme="dark"]) .cmt-field textarea::placeholder { color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .cmt-button { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .cmt-button:hover:not(:disabled) { border-color: rgba(255, 255, 255, 0.144); color: rgba(255, 255, 255, 0.92); }
+  :global(:root[data-theme="dark"]) .cmt-button.danger { color: #de3542; }
+  :global(:root[data-theme="dark"]) .cmt-button.danger:hover:not(:disabled) { border-color: rgba(222, 53, 66, 0.4); color: #de3542; }
+  :global(:root[data-theme="dark"]) .cmt-button.primary { border-color: #ececec; background: #ececec; color: #111111; }
+  :global(:root[data-theme="dark"]) .cmt-button.primary:hover:not(:disabled) { border-color: #ececec; background: #ececec; color: #111111; }
+  :global(:root[data-theme="dark"]) .cmt-button.primary:disabled { border-color: #333333; color: rgba(255, 255, 255, 0.5); background: rgba(255, 255, 255, 0.105); }
   :global(:root[data-theme="dark"]) .raster-section { border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
   :global(:root[data-theme="dark"]) .raster-slider { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.5); }
   :global(:root[data-theme="dark"]) .raster-slider:hover { border-color: rgba(255, 255, 255, 0.128); }
@@ -15029,8 +15005,9 @@
   :global(:root[data-theme="dark"]) .signature-tabs button.active { color: #111111; }
   :global(:root[data-theme="dark"]) .signature-tab-content { border-bottom: 1px solid #292929; }
   :global(:root[data-theme="dark"]) .signature-tab-copy p { color: rgba(255, 255, 255, 0.522); }
-  :global(:root[data-theme="dark"]) .signature-action.primary { color: #111111; box-shadow: 0 5px 16px rgba(8, 120, 249, 0.54); }
-  :global(:root[data-theme="dark"]) .signature-action.primary:hover { box-shadow: 0 6px 18px rgba(8, 120, 249, 0.6); }
+  :global(:root[data-theme="dark"]) .signature-tab-copy .signature-processing-error { color: #c83e3e; }
+  :global(:root[data-theme="dark"]) .signature-action.primary { background: #0878f9; color: #111111; box-shadow: 0 5px 16px rgba(8, 120, 249, 0.54); }
+  :global(:root[data-theme="dark"]) .signature-action.primary:hover { background: #006ff0; box-shadow: 0 6px 18px rgba(8, 120, 249, 0.6); }
   :global(:root[data-theme="dark"]) .signature-action.primary img { filter: brightness(0); }
   :global(:root[data-theme="dark"]) .signature-action.secondary { border: 1px solid #232323; background: #121212; color: rgba(255, 255, 255, 0.522); }
   :global(:root[data-theme="dark"]) .signature-action.secondary:hover { border-color: #2a2a2a; background: #111111; }
@@ -15043,6 +15020,7 @@
   :global(:root[data-theme="dark"]) .signature-camera-close { border: 1px solid rgba(0, 0, 0, 0.304); background: rgba(255, 255, 255, 0.2); }
   :global(:root[data-theme="dark"]) .signature-camera-close span { background: rgba(255, 255, 255, 0.05); }
   :global(:root[data-theme="dark"]) .signature-camera-status { background: rgba(255, 255, 255, 0.2); color: #111111; }
+  :global(:root[data-theme="dark"]) .signature-camera-status.error { background: rgba(140, 23, 23, 0.76); }
   :global(:root[data-theme="dark"]) .html-editor-layer { background: linear-gradient(90deg, rgba(255, 255, 255, 0.058) 1px, transparent 1px) 58px 122px / 140px 140px,
       linear-gradient(180deg, rgba(255, 255, 255, 0.058) 1px, transparent 1px) 58px 122px / 140px 140px,
       #0e0e0e; }
@@ -15050,30 +15028,53 @@
   :global(:root[data-theme="dark"]) .preparation-dialog { border: 1px solid rgba(255, 255, 255, 0.096); background: rgba(22, 22, 22, 0.96); box-shadow: 0 10px 35px rgba(0, 0, 0, 0.24); }
   :global(:root[data-theme="dark"]) .preparation-text { background: linear-gradient(90deg, rgba(255, 255, 255, 0.14) 0%, rgba(255, 255, 255, 0.14) 31.877%, rgba(255, 255, 255, 0.14) 72.516%); }
   :global(:root[data-theme="dark"]) .pdf-page { background: rgba(22, 22, 22, 0.96); box-shadow: 0 0 0 1px rgba(186, 182, 182, 0.6), 3px 8px 16px rgba(0, 0, 0, 0.15); }
+  :global(:root[data-theme="dark"]) .search-highlight-layer rect { fill: #ffe43b; }
   :global(:root[data-theme="dark"]) .watermark-layer text { fill: rgba(255, 255, 255, 0.655); }
+  :global(:root[data-theme="dark"]) .marker-edge { stroke: #f4cd19; }
+  :global(:root[data-theme="dark"]) .marker-ink { stroke: #ffe43b; }
+  :global(:root[data-theme="dark"]) .text-highlight-layer .text-highlight { fill: #ffe43b; }
   :global(:root[data-theme="dark"]) .redaction-layer rect.blackout { fill: rgba(255, 255, 255, 0.92); }
   :global(:root[data-theme="dark"]) .redaction-layer rect.whiteout { fill: #111111; }
-  :global(:root[data-theme="dark"]) .native-selection-layer rect { stroke: rgba(0, 0, 0, 0.92); }
+  :global(:root[data-theme="dark"]) .native-selection-layer rect { fill: #1684f8; stroke: rgba(0, 0, 0, 0.92); }
   :global(:root[data-theme="dark"]) .crop-overlay-layer .crop-shade { fill: rgba(255, 255, 255, 0.665); }
+  :global(:root[data-theme="dark"]) .crop-edge { stroke: #0d99ff; }
   :global(:root[data-theme="dark"]) .crop-grid { stroke: rgba(0, 0, 0, 0.44); }
-  :global(:root[data-theme="dark"]) .crop-resize-handle { fill: #111111; }
+  :global(:root[data-theme="dark"]) .crop-resize-handle { fill: #111111; stroke: #0d99ff; }
   :global(:root[data-theme="dark"]) .pdf-input-field,
-  :global(:root[data-theme="dark"]) .pdf-checkbox-field { background: rgba(255, 255, 255, 0.058); color: rgba(255, 255, 255, 0.837); }
+  :global(:root[data-theme="dark"]) .pdf-checkbox-field { border: 1px solid rgba(45, 139, 205, 0.72); background: rgba(255, 255, 255, 0.058); color: rgba(255, 255, 255, 0.837); }
   :global(:root[data-theme="dark"]) .pdf-input-field:focus,
-  :global(:root[data-theme="dark"]) .pdf-checkbox-field:focus { background: rgba(255, 255, 255, 0.074); box-shadow: 0 0 0 2px rgba(8, 120, 249, 0.54); }
+  :global(:root[data-theme="dark"]) .pdf-checkbox-field:focus { border-color: #0878f9; background: rgba(255, 255, 255, 0.074); box-shadow: 0 0 0 2px rgba(8, 120, 249, 0.54); }
+  :global(:root[data-theme="dark"]) .pdf-checkbox-field:checked { border-color: #0878f9; background: #0878f9; }
   :global(:root[data-theme="dark"]) .pdf-checkbox-field:checked::after { border: solid rgba(255, 255, 255, 0.08); }
   :global(:root[data-theme="dark"]) .pdf-text-editor-overlay { color: rgba(255, 255, 255, 0.837); }
   :global(:root[data-theme="dark"]) .pdf-text-field-display text { fill: rgba(255, 255, 255, 0.837); }
   :global(:root[data-theme="dark"]) .pdf-text-field-display.placeholder text { fill: rgba(255, 255, 255, 0.463); }
+  :global(:root[data-theme="dark"]) .pdf-shape { fill: var(--shape-fill, #ff4d55); stroke: var(--shape-stroke, #de3542); }
+  :global(:root[data-theme="dark"]) .shape-symbol { stroke: var(--shape-stroke, #ff4d55); }
+  :global(:root[data-theme="dark"]) .shape-linear { stroke: var(--shape-stroke, #ff4d55); }
+  :global(:root[data-theme="dark"]) .shape-arrowhead { stroke: var(--shape-stroke, #ff4d55); }
+  :global(:root[data-theme="dark"]) .pdf-imported-image-stroke { stroke: var(--shape-stroke, #de3542); }
   :global(:root[data-theme="dark"]) .measure-halo { stroke: rgba(0, 0, 0, 0.92); }
-  :global(:root[data-theme="dark"]) .measure-endpoint { fill: #111111; }
+  :global(:root[data-theme="dark"]) .measure-rule,
+  :global(:root[data-theme="dark"]) .measure-tick { stroke: #1769e8; }
+  :global(:root[data-theme="dark"]) .measure-endpoint { fill: #111111; stroke: #1769e8; }
   :global(:root[data-theme="dark"]) .measure-badge { filter: drop-shadow(0 3px 7px rgba(15, 37, 70, 0.6)); }
   :global(:root[data-theme="dark"]) .measure-badge rect,
   :global(:root[data-theme="dark"]) .measure-badge-pointer { fill: #b3cdef; stroke: rgba(0, 0, 0, 0.22); }
   :global(:root[data-theme="dark"]) .measure-primary { fill: #111111; }
-  :global(:root[data-theme="dark"]) .linear-endpoint-handle { fill: #111111; }
-  :global(:root[data-theme="dark"]) .shape-resize-handle { fill: #111111; }
+  :global(:root[data-theme="dark"]) .measure-secondary { fill: #b9c9dc; }
+  :global(:root[data-theme="dark"]) .shape-marquee-layer rect { fill: rgba(13, 153, 255, 0.12); stroke: #0d99ff; }
+  :global(:root[data-theme="dark"]) .shape-hover-box,
+  :global(:root[data-theme="dark"]) .shape-hover-line { stroke: #0d99ff; }
+  :global(:root[data-theme="dark"]) .shape-selection-box,
+  :global(:root[data-theme="dark"]) .shape-guide { stroke: #0d99ff; }
+  :global(:root[data-theme="dark"]) .linear-selection-line { stroke: #0d99ff; }
+  :global(:root[data-theme="dark"]) .linear-endpoint-handle { fill: #111111; stroke: #0d99ff; }
+  :global(:root[data-theme="dark"]) .shape-resize-handle { fill: #111111; stroke: #0d99ff; }
+  :global(:root[data-theme="dark"]) .shape-size-badge rect { fill: #0d99ff; }
   :global(:root[data-theme="dark"]) .shape-size-badge text { fill: #111111; }
+  :global(:root[data-theme="dark"]) .pen-soft-edge { stroke: #8d0613; }
+  :global(:root[data-theme="dark"]) .pen-ink { stroke: #e21d32; }
   :global(:root[data-theme="dark"]) .brush-cursor { border: 1.5px solid rgba(255, 255, 255, 0.576); background: rgba(255, 255, 255, 0.019); box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.432), inset 0 0 0 1px rgba(0, 0, 0, 0.24); }
   :global(:root[data-theme="dark"]) .protect-fields,
   :global(:root[data-theme="dark"]) .protect-warning { border-bottom-color: rgba(255, 255, 255, 0.08); }
@@ -15086,7 +15087,6 @@
   :global(:root[data-theme="dark"]) .signature-action.secondary:hover { border-color: rgba(255, 255, 255, 0.144); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.75); }
   :global(:root[data-theme="dark"]) .search-direction { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); }
   :global(:root[data-theme="dark"]) .raster-actions { border-top-color: rgba(255, 255, 255, 0.08); }
-  :global(:root[data-theme="dark"]) .comment-panel-body textarea { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.75); }
   :global(:root[data-theme="dark"]) .figma-color-picker { border: 1px solid #282828; background: rgba(22, 22, 22, 0.96); box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15); }
   :global(:root[data-theme="dark"]) .drawing-color-row,
   :global(:root[data-theme="dark"]) .typography-color-row,
@@ -15126,6 +15126,9 @@
   /* dark theme: end generated */
 
   /* dark theme: manual */
+  /* Comment pins keep their light-mode white icon; the primary comment button brightens on hover. */
+  :global(:root[data-theme="dark"]) .comment-pin img { filter: brightness(0) invert(1); }
+  :global(:root[data-theme="dark"]) .cmt-button.primary:hover:not(:disabled) { border-color: #fff; background: #fff; }
   /* Page pills: black glass with a light edge, as in the Figma dark frame. */
   :global(:root[data-theme="dark"]) .page-pill { border-color: rgba(255, 255, 255, 0.17); background: rgba(0, 0, 0, 0.7); box-shadow: 0 0 40.5px rgba(0, 0, 0, 0.59); color: rgba(255, 255, 255, 0.5); backdrop-filter: blur(6.25px); -webkit-backdrop-filter: blur(6.25px); }
   :global(:root[data-theme="dark"]) .thumbnail-page.page-selected .page-pill { border-color: rgba(255, 255, 255, 0.3); color: rgba(255, 255, 255, 0.75); }
