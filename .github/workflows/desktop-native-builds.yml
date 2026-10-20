@@ -2,6 +2,11 @@ name: Desktop native builds
 
 on:
   workflow_dispatch:
+  # Pushing a version tag (v0.9.2, …) builds everything and creates the GitHub
+  # release as a draft with the Windows and Linux files. See RELEASING.md.
+  push:
+    tags:
+      - 'v*'
   pull_request:
     paths:
       - '.github/workflows/desktop-native-builds.yml'
@@ -311,3 +316,38 @@ jobs:
           path: |
             desktop/arch-package/*.pkg.tar.zst
             desktop/arch-package/docuflex-arch-ldd.txt
+
+  # Tag pushes only: attach the Windows and Linux files to a draft release, straight
+  # from the runners. The macOS DMG is built on a Mac and added before publishing
+  # (RELEASING.md); nothing is downloaded to and re-uploaded from a local machine.
+  release:
+    name: Draft GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows-x64, linux-x64, arch-linux-x64]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Collect release files
+        run: |
+          mkdir release
+          find artifacts -type f \( -name '*.exe' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.pkg.tar.zst' \) -exec cp {} release/ \;
+          ls -la release
+          test "$(ls release | wc -l)" -eq 4
+      - name: Create or update the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+              --title "Docuflex $version" \
+              --notes "Docuflex $version. Release notes and the macOS DMG are added before publishing."
+          fi
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber release/*
+
