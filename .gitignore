@@ -37,3 +37,8 @@ test-results/
 # Local design prototypes are intentionally not published
 prototype/
 backend/prototype/
+
+# Translation models installed at build time
+.translate-data/
+.translate-cache/
+.translate-config/

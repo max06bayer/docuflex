@@ -270,6 +270,13 @@ function generate(css) {
       declarations.push(`${node.prop}: ${mapped}${node.important ? ' !important' : ''};`);
     });
     if (!declarations.length) return;
+    // A background shorthand resets background-clip, which would turn gradient text
+    // (background-clip: text) into a filled box. Keep the light rule's clipping.
+    if (declarations.some((line) => /^background:/.test(line))) {
+      rule.each((node) => {
+        if (node.type === 'decl' && /^(-webkit-)?background-clip$/.test(node.prop)) declarations.push(`${node.prop}: ${node.value}${node.important ? ' !important' : ''};`);
+      });
+    }
     let block = `${darkSelector(rule.selector)} { ${declarations.join(' ')} }`;
     // Re-wrap in the same @media / @supports ancestors.
     for (let parent = rule.parent; parent && parent.type === 'atrule'; parent = parent.parent) {

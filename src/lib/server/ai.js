@@ -146,6 +146,51 @@ const asFunction = (tool) => ({ type: 'function', function: { name: tool.name, d
 export const AI_TOOLS = ALL_TOOLS.map(asFunction);
 const SUBAGENT_FUNCTIONS = MCP_TOOLS.filter((tool) => SUBAGENT_TOOLS.has(tool.name)).map(asFunction);
 
+/**
+ * The website (any non-local visitor) runs tools in the visitor's own browser.
+ * Tools that use a file path on this computer work on the visitor's files instead:
+ * open/insert ask them to pick a PDF, save/extract download the file.
+ */
+const WEB_PATH_TOOLS = {
+  open_document: 'Asks the person to pick a PDF from their computer and opens it in a new tab as the active document. Needs their approval (the pick happens on approval). path is ignored on the website.',
+  insert_pdf: 'Asks the person to pick a PDF from their computer and inserts its pages after the given page (or at the end). Needs their approval. path is ignored on the website.',
+  save_document: 'Downloads the active document with all edits to the person\'s computer. path is used as the file name only.',
+  extract_pages: 'Downloads the chosen pages as a new PDF to the person\'s computer. path is used as the file name only.'
+};
+/** @param {any} tool */
+function webTool(tool) {
+  const description = WEB_PATH_TOOLS[/** @type {keyof typeof WEB_PATH_TOOLS} */ (tool.name)];
+  if (!description) return tool;
+  const schema = structuredClone(tool.inputSchema);
+  if (Array.isArray(schema.required)) schema.required = schema.required.filter((/** @type {string} */ key) => key !== 'path');
+  return { ...tool, description, inputSchema: schema };
+}
+/** Tools that write files or replace work need approval in the chat; on the website, picking a file does too. */
+const WEB_APPROVAL_TOOLS = new Set([...AI_APPROVAL_TOOLS, 'open_document', 'insert_pdf']);
+const WEB_TOOLS = [...MCP_TOOLS.map(webTool), ...MEMORY_TOOLS, DELEGATE_TOOL];
+const WEB_FUNCTIONS = WEB_TOOLS.map(asFunction);
+export const AI_WEB_TOOL_INFO = WEB_TOOLS.map((tool) => ({
+  name: tool.name,
+  title: tool.title,
+  readOnly: Boolean(/** @type {any} */ (tool).annotations?.readOnlyHint),
+  needsApproval: WEB_APPROVAL_TOOLS.has(tool.name)
+}));
+
+/** An OpenRouter key sent by a website visitor: used for that one request, never stored. @param {unknown} value */
+export function visitorKey(value) {
+  const key = typeof value === 'string' ? value.trim() : '';
+  return /^\S{20,300}$/.test(key) ? key : null;
+}
+
+/** Notes a website visitor keeps in their own browser, cleaned before they go into the prompt. @param {unknown} value */
+export function visitorMemories(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((entry) => entry && typeof entry.text === 'string')
+    .slice(-30)
+    .map((entry) => ({ text: String(entry.text).slice(0, 500), at: typeof entry.at === 'string' ? entry.at.slice(0, 40) : '' }));
+}
+
 /** What the chat window needs to show tool calls. */
 export const AI_TOOL_INFO = ALL_TOOLS.map((tool) => ({
   name: tool.name,
@@ -277,12 +322,14 @@ export function subagentPrompt(scope, context) {
  * @param {any[]} messages @param {any} context @param {AbortSignal} signal
  * @param {{ page: number; region?: any } | null} [subagent] a helper's scope; helpers get fewer tools and their own prompt
  * @param {string} [model] one of AI_MODELS; anything else uses AI_MODEL
+ * @param {{ key: string; memories: { text: string; at: string }[] } | null} [web] a website visitor's own key and browser-kept notes
  */
-export async function streamCompletion(messages, context, signal, subagent = null, model = AI_MODEL) {
+export async function streamCompletion(messages, context, signal, subagent = null, model = AI_MODEL, web = null) {
   const chosen = AI_MODELS.some((candidate) => candidate.id === model) ? model : AI_MODEL;
-  const key = await openRouterKey();
-  if (!key) throw new Error('No OpenRouter key is configured on this computer.');
-  const system = subagent ? subagentPrompt(subagent, context) : systemPrompt(context, await documentMemories(context));
+  const key = web ? web.key : await openRouterKey();
+  if (!key) throw new Error(web ? 'Add your OpenRouter API key in Settings.' : 'No OpenRouter key is configured on this computer.');
+  const memories = web ? web.memories : await documentMemories(context);
+  const system = subagent ? subagentPrompt(subagent, context) : systemPrompt(context, memories);
   return fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     signal,
@@ -296,7 +343,7 @@ export async function streamCompletion(messages, context, signal, subagent = nul
       models: chosen === AI_FALLBACK_MODEL ? [chosen] : [chosen, AI_FALLBACK_MODEL],
       stream: true,
       messages: [{ role: 'system', content: system }, ...messages],
-      tools: subagent ? SUBAGENT_FUNCTIONS : AI_TOOLS,
+      tools: subagent ? SUBAGENT_FUNCTIONS : web ? WEB_FUNCTIONS : AI_TOOLS,
       tool_choice: 'auto',
       parallel_tool_calls: true,
       reasoning: { max_tokens: REASONING_TOKENS },
