@@ -58,6 +58,30 @@
   }
   /** @type {Record<string, string>} */
   let htmlFontNames = {};
+  /**
+   * The PDF's embedded fonts as /fonts reports them; matched to pdf2htmlEX's
+   * font classes once the HTML is there (assignHtmlFontClasses).
+   * @type {{ pdfJsName?: unknown; family?: unknown; baseName?: unknown; fallback?: unknown; installed?: unknown; characters?: unknown; sameDesign?: unknown }[]}
+   */
+  let embeddedFontList = [];
+  /**
+   * Bundled stand-in font per pdf2htmlEX font class (e.g. ff1 -> LiberationSans-Bold),
+   * chosen by the backend. Characters a subset font lacks are drawn with it, here
+   * and in the saved PDF alike.
+   * @type {Record<string, string>}
+   */
+  let htmlFontFallbacks = {};
+  /**
+   * PostScript name per pdf2htmlEX font class of the installed font (where the
+   * backend runs) that draws missing characters: the original font itself, or
+   * the closest installed match. It comes before the bundled stand-in.
+   * @type {Record<string, string>}
+   */
+  let htmlInstalledFonts = {};
+  /** Font classes whose stand-in is the same typeface: only missing letters use it. @type {string[]} */
+  let htmlSameDesignFonts = [];
+  /** Resolves once the embedded fonts (and their stand-ins) are known. */
+  let embeddedFontsLoading = Promise.resolve();
   /** @type {Record<string, { text: string; htmlText: string }>} */
   let convertedHtmlOriginalTexts = {};
   let detectedFont = '';
@@ -85,14 +109,18 @@
   /** @type {Range | null} */
   let savedHtmlSelection = null;
 
-  const scale = 1.45;
+  // The normal viewer's page scale (BASE_PAGE_SCALE), so a zoom level shows
+  // the page at the same size in both modes.
+  const scale = 1.55;
   const minZoom = 0.5;
   const maxZoom = 4;
   const clickZoomFactor = 1.25;
-  // Keep empty scrollable space beyond both page edges. The matching initial
-  // scroll offset makes this invisible until the user pans into it.
-  const horizontalPanGutter = 420;
-  const verticalPanGutter = 520;
+  // Pan room past the page edges, as in the normal viewer (panGutterFor): none
+  // at the opening zoom, enough when zoomed in that the point under the pointer
+  // can stay put, at most 600px. Nothing extra below the last page.
+  const MAX_HORIZONTAL_PAN_GUTTER = 600;
+  let horizontalPanGutter = 0;
+  const verticalPanGutter = 0;
   const backendUrl = '/api/pdf/edit';
   const fontUrl = '/api/pdf/fonts';
   const htmlConvertUrl = '/api/pdf/convert';
@@ -115,6 +143,9 @@
     embeddedFontStyle = '';
     embeddedFontFamilies = {};
     htmlFontNames = {};
+    htmlFontFallbacks = {};
+    htmlInstalledFonts = {};
+    embeddedFontList = [];
     convertedHtmlOriginalTexts = {};
     htmlOriginalFonts = {};
     detectedFont = '';
@@ -128,7 +159,8 @@
     fileName = file.name || 'document.pdf';
     pdfBytes = await file.arrayBuffer();
     status = `Preparing ${fileName} for text editing…`;
-    await Promise.all([loadEmbeddedFonts(pdfBytes), convertToHtmlLayer()]);
+    embeddedFontsLoading = loadEmbeddedFonts(pdfBytes);
+    await Promise.all([embeddedFontsLoading, convertToHtmlLayer()]);
   }
 
   /** @param {Event} event */
@@ -148,6 +180,9 @@
     embeddedFontStyle = '';
     embeddedFontFamilies = {};
     htmlFontNames = {};
+    htmlFontFallbacks = {};
+    htmlInstalledFonts = {};
+    embeddedFontList = [];
     convertedHtmlOriginalTexts = {};
     htmlOriginalFonts = {};
     detectedFont = '';
@@ -181,7 +216,8 @@
         height: 0
       }));
 
-      await loadEmbeddedFonts(bytes);
+      embeddedFontsLoading = loadEmbeddedFonts(bytes);
+      await embeddedFontsLoading;
       await tick();
       await renderPages(pdfjs);
       status = `${pdfDocument.numPages} page${pdfDocument.numPages === 1 ? '' : 's'} ready.`;
@@ -310,7 +346,7 @@
       if (!response.ok || result.error) {
         throw new Error(result.error || 'Could not extract embedded fonts.');
       }
-      /** @type {{ pdfJsName?: unknown; family?: unknown; baseName?: unknown }[]} */
+      /** @type {{ pdfJsName?: unknown; family?: unknown; baseName?: unknown; fallback?: unknown; installed?: unknown }[]} */
       const fonts = Array.isArray(result.fonts) ? result.fonts : [];
       embeddedFontStyle = typeof result.css === 'string' && result.css
         ? `<style data-docuflex-pdf-fonts>${result.css}</style>`
@@ -320,20 +356,84 @@
           .filter((font) => typeof font?.pdfJsName === 'string' && typeof font?.family === 'string')
           .map((font) => [font.pdfJsName, font.family])
       );
-      htmlFontNames = Object.fromEntries(
-        fonts.flatMap((font) => {
-          if (typeof font?.pdfJsName !== 'string' || typeof font?.baseName !== 'string') return [];
-          const match = font.pdfJsName.match(/f(\d+)$/);
-          const index = match ? Number(match[1]) : NaN;
-          return Number.isFinite(index) ? [[`ff${index.toString(16)}`, font.baseName]] : [];
-        })
-      );
+      embeddedFontList = fonts;
+      assignHtmlFontClasses('');
     } catch (error) {
       console.warn('Could not load embedded PDF fonts; using PDF.js fallbacks.', error);
       embeddedFontStyle = '';
       embeddedFontFamilies = {};
       htmlFontNames = {};
+      htmlFontFallbacks = {};
+      htmlInstalledFonts = {};
+      embeddedFontList = [];
     }
+  }
+
+  /**
+   * Matches pdf2htmlEX's font classes (ff1, ff2, …) to the PDF's fonts. They are
+   * numbered differently, so each class goes to the font that draws the same
+   * characters (what the backend reports per font, against the HTML's text).
+   * Without HTML, or for a class nothing matches, the numbering is used.
+   * @param {string} html
+   */
+  function assignHtmlFontClasses(html) {
+    /** @type {Map<string, Set<string>>} */
+    const classCharacters = new Map();
+    if (html) {
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+      for (let text = walker.nextNode(); text; text = walker.nextNode()) {
+        const parent = text.parentElement;
+        if (!parent?.closest('.t') || parent.closest('._')) continue;
+        const owner = parent.closest('[class*="ff"]');
+        const fontClass = Array.from(owner?.classList ?? []).find((item) => /^ff[0-9a-f]+$/i.test(item));
+        if (!fontClass) continue;
+        if (!classCharacters.has(fontClass)) classCharacters.set(fontClass, new Set());
+        for (const character of text.textContent ?? '') if (character.trim()) classCharacters.get(fontClass)?.add(character);
+      }
+    }
+    /** @type {Record<string, (typeof embeddedFontList)[number]>} */
+    const assigned = {};
+    const taken = new Set();
+    /** @type {{ fontClass: string; font: (typeof embeddedFontList)[number]; score: number }[]} */
+    const pairs = [];
+    classCharacters.forEach((characters, fontClass) => {
+      embeddedFontList.forEach((font) => {
+        if (typeof font?.characters !== 'string' || !font.characters) return;
+        const drawn = new Set(Array.from(font.characters).filter((character) => character.trim()));
+        let shared = 0;
+        characters.forEach((character) => { if (drawn.has(character)) shared += 1; });
+        const union = characters.size + drawn.size - shared;
+        if (shared) pairs.push({ fontClass, font, score: shared / union });
+      });
+    });
+    pairs.sort((left, right) => right.score - left.score);
+    pairs.forEach(({ fontClass, font, score }) => {
+      if (score < 0.5 || assigned[fontClass] || taken.has(font)) return;
+      assigned[fontClass] = font;
+      taken.add(font);
+    });
+    embeddedFontList.forEach((font) => {
+      if (taken.has(font) || typeof font?.pdfJsName !== 'string') return;
+      const match = font.pdfJsName.match(/f(\d+)$/);
+      const fontClass = match ? `ff${Number(match[1]).toString(16)}` : '';
+      if (fontClass && !assigned[fontClass]) assigned[fontClass] = font;
+    });
+
+    /** @type {Record<string, string>} */ const names = {};
+    /** @type {Record<string, string>} */ const fallbacks = {};
+    /** @type {Record<string, string>} */ const installed = {};
+    /** @type {string[]} */ const sameDesign = [];
+    Object.entries(assigned).forEach(([fontClass, font]) => {
+      if (font.sameDesign === true) sameDesign.push(fontClass);
+      if (typeof font.baseName === 'string') names[fontClass] = font.baseName;
+      if (typeof font.fallback === 'string' && /^[A-Za-z0-9]+-(Regular|Bold|Italic|BoldItalic)$/.test(font.fallback)) fallbacks[fontClass] = font.fallback;
+      if (typeof font.installed === 'string' && /^[A-Za-z0-9+_.,-]{1,128}$/.test(font.installed)) installed[fontClass] = font.installed;
+    });
+    htmlFontNames = names;
+    htmlFontFallbacks = fallbacks;
+    htmlInstalledFonts = installed;
+    htmlSameDesignFonts = sameDesign;
   }
 
   async function waitForFonts() {
@@ -385,6 +485,8 @@
       if (typeof result.htmlBase64 !== 'string') {
         throw new Error('Converter did not return HTML.');
       }
+      // The fallback font CSS needs the embedded-font list, which loads in parallel.
+      await embeddedFontsLoading;
       convertedHtml = makeConvertedHtmlEditable(base64ToUtf8(result.htmlBase64));
       htmlMode = true;
       status = `Loaded pdf2htmlEX HTML layer (${Math.round((result.bytes ?? convertedHtml.length) / 1024)} KB).`;
@@ -775,6 +877,7 @@
         underline: Boolean(edit.underline),
         strikethrough: Boolean(edit.strikethrough),
         letterSpacing: Number.isFinite(Number(edit.letterSpacing)) ? Number(edit.letterSpacing) : 0,
+        baseline: Number.isFinite(Number(edit.baseline)) ? Number(edit.baseline) : -1,
         moved,
         overlay,
         alignment: typeof edit.alignment === 'string' ? edit.alignment : '',
@@ -829,9 +932,27 @@
   /** @param {Element} node */
   function convertedVisibleText(node) {
     const clone = node.cloneNode(true);
-    if (!(clone instanceof Element)) return '';
-    clone.querySelectorAll('._').forEach((spacer) => spacer.remove());
+    // The node usually lives in the editor iframe, whose Element is not this window's.
+    if (clone.nodeType !== Node.ELEMENT_NODE) return '';
+    collapsePdf2HtmlSpacers(/** @type {Element} */ (clone));
     return clone.textContent ?? '';
+  }
+
+  /**
+   * pdf2htmlEX writes gaps as spacer spans. Most only nudge glyphs and are
+   * dropped, but some carry the word space itself (fonts without a space
+   * glyph, as in TeX documents), so those become a plain space. The editor
+   * frame measures which is which (data-docuflex-space); unmeasured spacers
+   * count as a space when they hold one.
+   * @param {Element} node
+   */
+  function collapsePdf2HtmlSpacers(node) {
+    node.querySelectorAll('._').forEach((spacer) => {
+      const measured = spacer.getAttribute('data-docuflex-space');
+      const word = measured ? measured === 'word' : /\s/.test(spacer.textContent ?? '');
+      if (word) spacer.replaceWith(spacer.ownerDocument.createTextNode(' '));
+      else spacer.remove();
+    });
   }
 
   /** @param {HTMLElement} element */
@@ -1413,6 +1534,7 @@
 
   /** @param {string} html */
   function makeConvertedHtmlEditable(html) {
+    assignHtmlFontClasses(html);
     const stamped = stampConvertedHtmlForEditing(html);
     html = stamped.html;
     convertedHtmlOriginalTexts = stamped.originals;
@@ -1430,6 +1552,12 @@
   const docuflexPage = (node) => {
     const page = node.closest('[data-page-no]');
     return Math.max(0, Number(page?.dataset?.pageNo || '1') - 1);
+  };
+  // Pages are scaled with CSS zoom: on-screen rects are zoomed, the boxes'
+  // CSS lengths are not. Measurements are divided by this before use.
+  const docuflexPageZoom = (page) => {
+    if (!(page instanceof HTMLElement) || !page.offsetWidth) return 1;
+    return page.getBoundingClientRect().width / page.offsetWidth || 1;
   };
   const docuflexRect = (node) => {
     const page = node.closest('.pf');
@@ -1470,8 +1598,8 @@
     const top = Number.parseFloat(box.style.top || '0') || 0;
     const originalLeft = Number.parseFloat(box.dataset.docuflexOriginalLeft || String(left)) || 0;
     const originalTop = Number.parseFloat(box.dataset.docuflexOriginalTop || String(top)) || 0;
-    const dx = (left - originalLeft) / pageRect.width;
-    const dy = (top - originalTop) / pageRect.height;
+    const dx = (left - originalLeft) / (page.offsetWidth || pageRect.width);
+    const dy = (top - originalTop) / (page.offsetHeight || pageRect.height);
     return [
       originalRect[0] + dx,
       originalRect[1] - dy,
@@ -1500,7 +1628,10 @@
     return Array.from(counts.entries()).sort((left, right) => right[1] - left[1])[0]?.[0] || '';
   };
   const docuflexExplicitWeight = (node) => {
-    const own = node.style?.fontWeight || node.dataset?.docuflexWeight || '';
+    // A row copies the line's computed weight (400 even for a bold PDF font);
+    // only a weight set while formatting counts as chosen.
+    const styled = node.dataset?.docuflexStyleDirty === 'true' ? node.style?.fontWeight : '';
+    const own = node.dataset?.docuflexWeight || styled || (node.matches?.('.docuflex-textbox-rich-line') ? '' : node.style?.fontWeight) || '';
     const ownNumber = Number.parseFloat(own);
     if (Number.isFinite(ownNumber)) return ownNumber;
     const weightedChild = node.querySelector('[data-docuflex-weight], [style*="font-weight"]');
@@ -1516,11 +1647,17 @@
       : [0, 0, 0];
     const explicitWeight = docuflexExplicitWeight(node);
     const computedWeight = Number.parseFloat(style.fontWeight || '400');
-    const familyLooksBold = /bold|black|heavy|semibold|demibold|medium/i.test(style.fontFamily);
+    // The fallback faces ('Docuflex …') only fill in missing characters; the
+    // text's font is still the PDF's own, also when a line shows the fallback.
+    const family = String(style.fontFamily || '').split(',').map((item) => item.trim())
+      .filter((item) => item && !/^["']?Docuflex /.test(item)).join(', ') || style.fontFamily || '';
+    // pdf2htmlEX draws every font at weight 400; a bold PDF font shows in its
+    // fallback's name ('Docuflex …-Bold'), so check the full list.
+    const familyLooksBold = /bold|black|heavy|semibold|demibold|medium/i.test(style.fontFamily || '');
     return {
       id: node.dataset.docuflexEditId || '',
       fontClass: docuflexDominantFontClass(node),
-      fontFamily: style.fontFamily || '',
+      fontFamily: family,
       fontSize: style.fontSize || '',
       fontWeight: style.fontWeight || '',
       fontStyle: style.fontStyle || '',
@@ -1531,7 +1668,7 @@
       strikethrough: /line-through/i.test(style.textDecorationLine || style.textDecoration || ''),
       color,
       bold: Number.isFinite(explicitWeight) ? explicitWeight >= 600 : computedWeight >= 600 || familyLooksBold,
-      italic: /italic|oblique/i.test(style.fontFamily) || /italic|oblique/i.test(style.fontStyle)
+      italic: /italic|oblique/i.test(family) || /italic|oblique/i.test(style.fontStyle)
     };
   };
   const docuflexSelectTextBox = (box) => {
@@ -1582,10 +1719,220 @@
     }, '*');
     return node;
   };
+  // pdf2htmlEX spacer spans: some carry the word space itself (fonts without a
+  // space glyph, as in TeX documents), others only nudge glyphs, sometimes with
+  // a near-zero "space" inside a word. Measured once, like a PDF text extractor
+  // would: a word gap is at least an eighth of the font size wide.
+  const docuflexMarkSpacers = (node) => {
+    if (!node?.isConnected || !docuflexSpacersMeasurable) return;
+    const fontSize = Number.parseFloat(getComputedStyle(node).fontSize || '0') || 0;
+    node.querySelectorAll('._:not([data-docuflex-space])').forEach((spacer) => {
+      const width = Number.parseFloat(getComputedStyle(spacer).width) || 0;
+      const word = /\\s/.test(spacer.textContent || '');
+      spacer.dataset.docuflexSpace = word && fontSize > 0 && width >= fontSize * 0.125 ? 'word' : 'gap';
+      if (word && fontSize > 0) spacer.dataset.docuflexGapEm = String(width / fontSize);
+      // Keep the gap pdf2htmlEX measured even when the font loses its space below.
+      if (word && !spacer.style.width) spacer.style.width = width + 'px';
+    });
+  };
+  // The characters the PDF draws with each font class. pdf2htmlEX's copy of a
+  // font can hold extra glyphs (a zero-width space, for one) that the PDF's own
+  // font lacks; the export draws those with the fallback, so the editor does too.
+  let docuflexSpacersMeasurable = false;
+  let docuflexFontsReady = false;
+  const docuflexFontCoverage = new Map();
+  const docuflexFontClassOf = (element) => {
+    const owner = element?.closest?.('[class*="ff"]');
+    return Array.from(owner?.classList || []).find((item) => /^ff[0-9a-f]+$/i.test(item)) || '';
+  };
+  const docuflexCodePointRanges = (codePoints) => {
+    const sorted = Array.from(codePoints).sort((left, right) => left - right);
+    const ranges = [];
+    sorted.forEach((codePoint) => {
+      const last = ranges[ranges.length - 1];
+      if (last && codePoint === last[1] + 1) last[1] = codePoint;
+      else ranges.push([codePoint, codePoint]);
+    });
+    return ranges.map(([start, end]) => 'U+' + start.toString(16) + (end > start ? '-' + end.toString(16) : '')).join(', ');
+  };
+  const docuflexPrepareFonts = async () => {
+    try {
+      await Promise.all(Array.from(document.fonts || []).filter((face) => /^["']?ff[0-9a-f]+["']?$/i.test(face.family)).map((face) => face.load().catch(() => null)));
+      docuflexSpacersMeasurable = true;
+      document.querySelectorAll('.t').forEach(docuflexMarkSpacers);
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      for (let text = walker.nextNode(); text; text = walker.nextNode()) {
+        const parent = text.parentElement;
+        if (!parent?.closest('.t') || parent.closest('._')) continue;
+        const fontClass = docuflexFontClassOf(parent);
+        if (!fontClass) continue;
+        if (!docuflexFontCoverage.has(fontClass)) docuflexFontCoverage.set(fontClass, new Set());
+        const set = docuflexFontCoverage.get(fontClass);
+        for (const character of text.data) set.add(character.codePointAt(0));
+      }
+      const faces = [];
+      Array.from(document.styleSheets).forEach((sheet) => {
+        let rules = [];
+        try { rules = Array.from(sheet.cssRules || []); } catch { return; }
+        for (let index = rules.length - 1; index >= 0; index -= 1) {
+          const rule = rules[index];
+          if (!(rule instanceof CSSFontFaceRule)) continue;
+          const family = (rule.style.getPropertyValue('font-family') || '').replace(/["']/g, '').trim();
+          const coverage = docuflexFontCoverage.get(family);
+          const src = rule.style.getPropertyValue('src');
+          if (!/^ff[0-9a-f]+$/i.test(family) || !coverage?.size || !src) continue;
+          faces.push(new FontFace(family, src, {
+            style: rule.style.getPropertyValue('font-style') || 'normal',
+            weight: rule.style.getPropertyValue('font-weight') || 'normal',
+            // The space stays in range even when the PDF font never draws one:
+            // the first font with a space sets a line's height and baseline.
+            unicodeRange: docuflexCodePointRanges(new Set([...coverage, 0x20]))
+          }));
+          sheet.deleteRule(index);
+        }
+      });
+      faces.forEach((face) => document.fonts.add(face));
+      await Promise.all(faces.map((face) => face.load().catch(() => null)));
+      docuflexSpaceGaps();
+    } catch (error) {
+      console.warn('Docuflex could not prepare the PDF fonts for editing.', error);
+    }
+    docuflexSpacersMeasurable = true;
+    docuflexFontsReady = true;
+    const texts = {};
+    document.querySelectorAll('.t').forEach((node) => {
+      node.dataset.docuflexOriginalText = docuflexVisibleText(node) || docuflexNormalizeText(node.textContent);
+      if (node.dataset.docuflexEditId) texts[node.dataset.docuflexEditId] = node.dataset.docuflexOriginalText;
+    });
+    // The parent's baseline came from the HTML alone; word gaps are known now.
+    parent.postMessage({ source: 'docuflex-html-editor', type: 'original-texts', texts }, '*');
+  };
+  // A typed space in a font without one (TeX fonts) is exported as a plain
+  // third-of-an-em gap, TeX's own word space; word-spacing makes the editor's
+  // space exactly that wide.
+  const docuflexSpaceGaps = () => {
+    const rules = [];
+    docuflexFontCoverage.forEach((coverage, fontClass) => {
+      const sample = Array.from(coverage).map((codePoint) => String.fromCodePoint(codePoint)).find((character) => /\\S/.test(character));
+      if (coverage.has(0x20) || !sample) return;
+      const probe = document.createElement('span');
+      probe.className = fontClass;
+      probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;font-size:100px;letter-spacing:0;word-spacing:0;';
+      document.body.append(probe);
+      probe.textContent = sample + sample;
+      const tight = probe.getBoundingClientRect().width;
+      probe.textContent = sample + ' ' + sample;
+      const spaced = probe.getBoundingClientRect().width;
+      probe.remove();
+      const space = (spaced - tight) / 100;
+      const extra = (1 / 3 - space).toFixed(4);
+      const own = ':not([data-docuflex-fallback~="' + fontClass + '"]):not([data-docuflex-font-chosen])';
+      rules.push('.docuflex-textbox-rich-line' + own + '.' + fontClass + ',.docuflex-textbox-rich-line' + own + ' .' + fontClass + '{word-spacing:' + extra + 'em !important;}');
+    });
+    let style = document.querySelector('style[data-docuflex-space-gaps]');
+    if (!style) {
+      style = document.createElement('style');
+      style.dataset.docuflexSpaceGaps = '';
+      document.head.append(style);
+    }
+    style.textContent = rules.join('\\n');
+  };
+  // A line that needs a character its PDF font lacks is drawn in the fallback
+  // as a whole (per font), not letter by letter; the export does the same.
+  // Fonts whose stand-in is the same typeface fill in missing letters only.
+  const docuflexSameDesign = {
+    has: (fontClass) => (document.querySelector('style[data-docuflex-font-fallbacks]')?.dataset.sameDesign || '').split(' ').includes(fontClass)
+  };
+  const docuflexMarkFallbackRuns = (root) => {
+    if (!(root instanceof HTMLElement)) return;
+    const rows = root.matches('.t, .docuflex-textbox-rich-line')
+      ? [root]
+      : Array.from(root.querySelectorAll('.t, .docuflex-textbox-rich-line'));
+    rows.forEach((row) => {
+      const missing = new Set();
+      const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+      for (let text = walker.nextNode(); text; text = walker.nextNode()) {
+        // Original word gaps keep their measured width; typed spaces count.
+        if (text.parentElement?.closest('._, .docuflex-gap')) continue;
+        const fontClass = docuflexFontClassOf(text.parentElement);
+        const coverage = docuflexFontCoverage.get(fontClass);
+        if (!coverage || missing.has(fontClass) || docuflexSameDesign.has(fontClass)) continue;
+        for (const character of text.data) {
+          // A space the font lacks is drawn as a plain gap (docuflexSpaceGaps),
+          // so it keeps the line in its own font. Editing inserts no-break spaces.
+          if (character === ' ' || character === '\u00a0') continue;
+          const codePoint = character.codePointAt(0);
+          if (!coverage.has(codePoint)) {
+            missing.add(fontClass);
+            break;
+          }
+        }
+      }
+      const value = Array.from(missing).sort().join(' ');
+      if (value === (row.dataset.docuflexFallback || '')) return;
+      if (value) row.dataset.docuflexFallback = value;
+      else delete row.dataset.docuflexFallback;
+      docuflexAlignRowBaseline(row);
+    });
+  };
+  // The fallback font has its own ascent, so switching a row to it moves the
+  // text up or down; keep it on the original line's baseline, as exported.
+  const docuflexBaseline = (element) => {
+    const marker = document.createElement('span');
+    marker.style.cssText = 'display:inline-block;width:0;height:0;vertical-align:baseline;';
+    element.append(marker);
+    const top = marker.getBoundingClientRect().top;
+    marker.remove();
+    return top;
+  };
+  const docuflexAlignRowBaseline = (row) => {
+    if (!row.matches('.docuflex-textbox-rich-line')) return;
+    const box = row.closest('.docuflex-textbox');
+    if (!(box instanceof HTMLElement) || docuflexTextBoxMoved(box)) return;
+    const rows = Array.from(box.querySelectorAll('.docuflex-textbox-rich-line'));
+    const line = docuflexTextBoxLines(box)[rows.indexOf(row)];
+    if (!(line instanceof HTMLElement)) return;
+    const current = Number.parseFloat((row.style.transform.match(/translateY\\(([-0-9.e]+)px\\)/) || [])[1] || '0') || 0;
+    const delta = (docuflexBaseline(line) - docuflexBaseline(row)) / docuflexPageZoom(box.closest('.pf'));
+    if (Math.abs(delta) > 0.05) row.style.transform = 'translateY(' + (current + delta) + 'px)';
+  };
+  // keepGaps: word gaps stay as spans of the exact original width until the
+  // line is edited (docuflexReleaseGaps), so untouched lines look unchanged.
+  const docuflexCollapseSpacers = (node, keepGaps = false) => {
+    node.querySelectorAll('._').forEach((spacer) => {
+      const word = spacer.dataset.docuflexSpace
+        ? spacer.dataset.docuflexSpace === 'word'
+        : /\\s/.test(spacer.textContent || '');
+      const em = Number.parseFloat(spacer.dataset.docuflexGapEm || '');
+      if (word && keepGaps && Number.isFinite(em)) {
+        const gap = document.createElement('span');
+        gap.className = 'docuflex-gap';
+        gap.style.width = em + 'em';
+        gap.textContent = ' ';
+        spacer.replaceWith(gap);
+      } else if (word) {
+        spacer.replaceWith(document.createTextNode(' '));
+      } else {
+        spacer.remove();
+      }
+    });
+  };
+  // An edited line is exported with plain spaces, so it shows plain spaces.
+  const docuflexReleaseGaps = (row) => {
+    if (!(row instanceof HTMLElement)) return;
+    const selection = getSelection();
+    row.querySelectorAll('.docuflex-gap').forEach((gap) => {
+      const text = document.createTextNode(gap.textContent || ' ');
+      const caret = selection && selection.rangeCount && gap.contains(selection.anchorNode) ? selection.anchorOffset : -1;
+      gap.replaceWith(text);
+      if (caret >= 0) selection.collapse(text, Math.min(caret, text.length));
+    });
+  };
   const docuflexVisibleText = (node) => {
     if (!node) return '';
+    docuflexMarkSpacers(node);
     const clone = node.cloneNode(true);
-    clone.querySelectorAll('._').forEach((spacer) => spacer.remove());
+    docuflexCollapseSpacers(clone);
     return docuflexNormalizeText(clone.textContent || '');
   };
   const docuflexPrepareForEditing = (node) => {
@@ -1683,7 +2030,7 @@
     return (number * scale) + unit;
   };
   const docuflexCleanRichClone = (node) => {
-    node.querySelectorAll('._').forEach((spacer) => spacer.remove());
+    docuflexCollapseSpacers(node, true);
     node.querySelectorAll('[contenteditable], [tabindex], [role]').forEach((item) => {
       item.removeAttribute('contenteditable');
       item.removeAttribute('tabindex');
@@ -1710,13 +2057,14 @@
       docuflexApplyTextClasses(line, row);
       const style = getComputedStyle(line);
       const rect = line.getBoundingClientRect();
+      const zoom = docuflexPageZoom(line.closest('.pf'));
       const scale = docuflexTransformScale(line);
       const sourceFontSize = Number.parseFloat(style.fontSize || '0') || 0;
-      const visualFontSize = sourceFontSize > 1 ? sourceFontSize * scale.y : rect.height * 0.96;
+      const visualFontSize = sourceFontSize > 1 ? sourceFontSize * scale.y : rect.height / zoom * 0.96;
       const current = layout[index] || {};
       const top = Number.isFinite(current.top) ? current.top : 0;
-      const visualLineHeight = Math.max(1, current.height || rect.height) + 'px';
-      const rowAdvance = Math.max(1, current.height || rect.height);
+      const visualLineHeight = Math.max(1, current.height || rect.height / zoom) + 'px';
+      const rowAdvance = Math.max(1, current.height || rect.height / zoom);
       const marginTop = index === 0 ? 0 : Math.max(0, top - previousTop - previousAdvance);
       previousTop = top;
       previousAdvance = rowAdvance;
@@ -1734,20 +2082,23 @@
       row.style.minHeight = visualLineHeight;
       row.style.height = visualLineHeight;
       row.style.lineHeight = visualLineHeight;
+      docuflexMarkSpacers(line);
       const clone = docuflexCleanRichClone(line.cloneNode(true));
       row.innerHTML = clone.innerHTML || docuflexVisibleText(line);
       if (/^\\s*[•\\-*]\\s+/.test(row.textContent || '')) row.dataset.docuflexBullet = 'true';
       editor.append(row);
     });
+    docuflexMarkFallbackRuns(editor);
   };
   const docuflexTextBoxStyleFromLine = (box, line, lineGap) => {
     const editor = box.querySelector('.docuflex-textbox-editor');
     if (!(editor instanceof HTMLElement) || !(line instanceof HTMLElement)) return;
     const style = getComputedStyle(line);
-    const rect = line.getBoundingClientRect();
+    const zoom = docuflexPageZoom(line.closest('.pf'));
+    const height = line.getBoundingClientRect().height / zoom;
     const scale = docuflexTransformScale(line);
     const sourceFontSize = Number.parseFloat(style.fontSize || '0') || 0;
-    const visualFontSize = sourceFontSize > 1 ? sourceFontSize * scale.y : rect.height * 0.96;
+    const visualFontSize = sourceFontSize > 1 ? sourceFontSize * scale.y : height * 0.96;
     editor.style.fontFamily = style.fontFamily;
     editor.style.fontSize = Math.max(1, visualFontSize) + 'px';
     editor.style.fontWeight = style.fontWeight;
@@ -1755,7 +2106,7 @@
     editor.style.color = style.color;
     editor.style.letterSpacing = docuflexScaledCssLength(style.letterSpacing, scale.x);
     editor.style.wordSpacing = docuflexScaledCssLength(style.wordSpacing, scale.x);
-    editor.style.lineHeight = Math.max(rect.height, lineGap || rect.height * 1.2) + 'px';
+    editor.style.lineHeight = Math.max(height, lineGap || height * 1.2) + 'px';
   };
   const docuflexOpenTextBoxEditor = (box, focusTarget) => {
     const editor = box?.querySelector?.('.docuflex-textbox-editor');
@@ -1835,10 +2186,10 @@
     if (!(box instanceof HTMLElement)) return;
     const page = box.closest('.pf');
     if (!(page instanceof HTMLElement)) return;
-    const pageWidth = page.getBoundingClientRect().width;
+    const pageWidth = page.offsetWidth;
     if (!pageWidth) return;
     const rightLimit = pageWidth * 0.97;
-    const width = Number.parseFloat(box.style.width || '0') || box.getBoundingClientRect().width || 24;
+    const width = Number.parseFloat(box.style.width || '0') || box.offsetWidth || 24;
     const left = Number.parseFloat(box.style.left || '0') || 0;
     const clampedLeft = Math.max(0, Math.min(left, Math.max(0, rightLimit - Math.min(width, rightLimit))));
     if (Math.abs(clampedLeft - left) > 0.05) box.style.left = clampedLeft + 'px';
@@ -1848,7 +2199,7 @@
   const docuflexGrowTextBoxToEditor = (box) => {
     const editor = box?.querySelector?.('.docuflex-textbox-editor');
     if (!(box instanceof HTMLElement) || !(editor instanceof HTMLElement)) return;
-    const currentHeight = Number.parseFloat(box.style.minHeight || '0') || box.getBoundingClientRect().height || 0;
+    const currentHeight = Number.parseFloat(box.style.minHeight || '0') || box.offsetHeight || 0;
     const neededHeight = Math.ceil(editor.scrollHeight);
     if (neededHeight > currentHeight) box.style.minHeight = neededHeight + 'px';
   };
@@ -1881,7 +2232,7 @@
     if (neededWidth <= currentWidth) return;
     const page = box.closest('.pf');
     if (!(page instanceof HTMLElement)) return;
-    const pageWidth = page.getBoundingClientRect().width || 0;
+    const pageWidth = page.offsetWidth || 0;
     const rightLimit = pageWidth > 0 ? pageWidth * 0.97 : 0;
     const left = Number.parseFloat(box.style.left || '0') || 0;
     const maxWidth = rightLimit > 0 ? Math.max(24, rightLimit - left) : neededWidth;
@@ -1906,46 +2257,50 @@
       const rowRect = row.getBoundingClientRect();
       const lineRect = line.getBoundingClientRect();
       if (!rowRect.height || !lineRect.height) return;
-      const deltaY = lineRect.top - rowRect.top;
+      // Baselines, not box tops: a row and its line can use different fonts
+      // (a fallback, or several in one line) with different ascents.
+      const deltaY = (docuflexBaseline(line) - docuflexBaseline(row)) / docuflexPageZoom(box.closest('.pf'));
       if (Math.abs(deltaY) > 0.05) row.style.transform = 'translateY(' + deltaY + 'px)';
     });
   };
-  const docuflexMeasureTextBoxLine = (box, text) => {
-    const editor = box.querySelector('.docuflex-textbox-editor');
-    if (!(editor instanceof HTMLElement)) return text.length * 8;
-    const canvas = docuflexMeasureTextBoxLine.canvas || (docuflexMeasureTextBoxLine.canvas = document.createElement('canvas'));
-    const context = canvas.getContext('2d');
-    const style = getComputedStyle(editor);
-    if (!context) return text.length * 8;
-    context.font = [style.fontStyle, style.fontWeight, style.fontSize, style.fontFamily].filter(Boolean).join(' ');
-    const letterSpacing = Number.parseFloat(style.letterSpacing || '0') || 0;
-    const wordSpacing = Number.parseFloat(style.wordSpacing || '0') || 0;
-    const slots = Math.max(0, Array.from(text).length - 1);
-    const spaces = (text.match(/ /g) || []).length;
-    return context.measureText(text).width + letterSpacing * slots + wordSpacing * spaces;
-  };
+  // The lines exactly as the editor shows them: each row, split where the
+  // browser wrapped it. Rows that fit keep their line breaks (a heading stays
+  // apart from the paragraph after it), so the export matches the editor.
   const docuflexWrappedTextBoxLines = (box) => {
     const original = docuflexTextBoxOriginalLines(box);
     const editor = box.querySelector('.docuflex-textbox-editor');
     if (!(editor instanceof HTMLElement)) return [];
-    const style = getComputedStyle(editor);
-    const horizontalPadding = (Number.parseFloat(style.paddingLeft || '0') || 0) + (Number.parseFloat(style.paddingRight || '0') || 0);
-    const width = Math.max(20, editor.getBoundingClientRect().width - horizontalPadding);
-    const words = docuflexNormalizeText(docuflexTextBoxEditorText(box)).split(' ').filter(Boolean);
-    const lines = [];
-    let current = '';
-    words.forEach((word) => {
-      const candidate = current ? current + ' ' + word : word;
-      if (current && docuflexMeasureTextBoxLine(box, candidate) > width) {
-        lines.push(current);
-        current = word;
-      } else {
-        current = candidate;
-      }
-    });
-    if (current) lines.push(current);
+    const rows = Array.from(editor.querySelectorAll('.docuflex-textbox-rich-line'));
+    const lines = rows.length
+      ? rows.flatMap((row) => docuflexVisualRowLines(row))
+      : [docuflexNormalizeText(docuflexTextBoxEditorText(box))];
     while (lines.length < original.length) lines.push('');
     return lines;
+  };
+  const docuflexVisualRowLines = (row) => {
+    const lines = [];
+    let lineTop = null;
+    let current = '';
+    const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+    for (let text = walker.nextNode(); text; text = walker.nextNode()) {
+      const pattern = /\\S+/g;
+      for (let match = pattern.exec(text.data); match; match = pattern.exec(text.data)) {
+        const range = document.createRange();
+        range.setStart(text, match.index);
+        range.setEnd(text, match.index + match[0].length);
+        const rect = range.getBoundingClientRect();
+        const glued = match.index === 0 && current && !/\\s$/.test(current) && !/^\\s/.test(text.data);
+        if (lineTop !== null && rect.height && rect.top > lineTop + rect.height * 0.5) {
+          lines.push(current.trim());
+          current = '';
+        }
+        if (lineTop === null || !current) lineTop = rect.top;
+        current += (current && !glued ? ' ' : '') + match[0];
+      }
+      if (/\\s$/.test(text.data) && current) current += ' ';
+    }
+    if (current.trim() || !lines.length) lines.push(docuflexNormalizeText(current));
+    return lines.map(docuflexNormalizeText);
   };
   const docuflexNormalizeAlignment = (value) => {
     const text = String(value || '').toLowerCase();
@@ -2062,6 +2417,13 @@
       underline: Boolean(exportFont.underline),
       strikethrough: Boolean(exportFont.strikethrough),
       letterSpacing: Number.parseFloat(exportFont.letterSpacing || '0') || 0,
+      // Where the row's baseline shows, as a fraction of the page from the top.
+      baseline: (() => {
+        const page = node.closest('.pf');
+        const pageRect = page instanceof HTMLElement ? page.getBoundingClientRect() : null;
+        if (!(row instanceof HTMLElement) || !pageRect?.height) return -1;
+        return (docuflexBaseline(row) - pageRect.top) / pageRect.height;
+      })(),
       color: exportFont.color,
       oldText,
       originalHtmlText: line.htmlText || oldText,
@@ -2084,7 +2446,9 @@
       const saved = savedStyles[index];
       if (!saved || typeof saved !== 'object') return;
       Object.entries(saved).forEach(([property, value]) => {
-        if (typeof value === 'string') row.style.setProperty(property, value);
+        if (typeof value !== 'string') return;
+        const chosen = property === 'font-family' && row.dataset.docuflexFontChosen === 'true';
+        row.style.setProperty(property, value, chosen ? 'important' : '');
       });
       row.dataset.docuflexStyleDirty = 'true';
     });
@@ -2128,10 +2492,11 @@
     if (!pageRect.width || !pageRect.height || !visualWidth || !visualHeight || !text.length) return null;
     const style = getComputedStyle(node);
     const bounds = [rect, contentRect].filter((candidate) => candidate.width > 0 && candidate.height > 0);
-    const left = Math.min(...bounds.map((candidate) => candidate.left)) - pageRect.left;
-    const top = Math.min(...bounds.map((candidate) => candidate.top)) - pageRect.top;
-    const right = Math.max(...bounds.map((candidate) => candidate.right)) - pageRect.left;
-    const bottom = Math.max(...bounds.map((candidate) => candidate.bottom)) - pageRect.top;
+    const zoom = docuflexPageZoom(page);
+    const left = (Math.min(...bounds.map((candidate) => candidate.left)) - pageRect.left) / zoom;
+    const top = (Math.min(...bounds.map((candidate) => candidate.top)) - pageRect.top) / zoom;
+    const right = (Math.max(...bounds.map((candidate) => candidate.right)) - pageRect.left) / zoom;
+    const bottom = (Math.max(...bounds.map((candidate) => candidate.bottom)) - pageRect.top) / zoom;
     return {
       node,
       page,
@@ -2142,9 +2507,9 @@
       top,
       right,
       bottom,
-      width: visualWidth,
-      height: visualHeight,
-      fontSize: visualHeight,
+      width: visualWidth / zoom,
+      height: visualHeight / zoom,
+      fontSize: visualHeight / zoom,
       className: docuflexDominantFontClass(node),
       family: style.fontFamily || '',
       weight: style.fontWeight || '',
@@ -2163,7 +2528,7 @@
     const gap = next.top - previous.top;
     const verticalWhitespace = next.top - previous.bottom;
     const expected = Math.max(previous.height, next.height);
-    const pageHeight = previous.page.getBoundingClientRect().height || 0;
+    const pageHeight = previous.page.offsetHeight || 0;
     const headerBoundary = pageHeight > 0
       && previous.top < pageHeight * 0.16
       && next.top > pageHeight * 0.22
@@ -2231,19 +2596,20 @@
       const text = docuflexVisibleText(node);
       if (!pageRect.width || !pageRect.height || !fallbackRect.width || !fallbackRect.height || !text) return null;
       const style = getComputedStyle(node);
+      const zoom = docuflexPageZoom(page);
       return docuflexCreateTextBox([{
         node,
         page,
         text,
         htmlText: node.dataset.docuflexOriginalHtmlText || node.textContent || text,
         id: node.dataset.docuflexEditId || '',
-        left: fallbackRect.left - pageRect.left,
-        top: fallbackRect.top - pageRect.top,
-        right: fallbackRect.right - pageRect.left,
-        bottom: fallbackRect.bottom - pageRect.top,
-        width: fallbackRect.width,
-        height: fallbackRect.height,
-        fontSize: fallbackRect.height,
+        left: (fallbackRect.left - pageRect.left) / zoom,
+        top: (fallbackRect.top - pageRect.top) / zoom,
+        right: (fallbackRect.right - pageRect.left) / zoom,
+        bottom: (fallbackRect.bottom - pageRect.top) / zoom,
+        width: fallbackRect.width / zoom,
+        height: fallbackRect.height / zoom,
+        fontSize: fallbackRect.height / zoom,
         className: docuflexDominantFontClass(node),
         family: style.fontFamily || '',
         weight: style.fontWeight || '',
@@ -2314,10 +2680,44 @@
     });
     return chunks;
   };
+  // The caret where the pointer is, as a click into text would put it.
+  const docuflexPlaceCaret = (editor, x, y) => {
+    const range = document.caretRangeFromPoint?.(x, y);
+    const selection = getSelection();
+    if (!selection) return;
+    if (range && editor.contains(range.startContainer)) {
+      selection.removeAllRanges();
+      selection.addRange(range);
+      return;
+    }
+    const end = document.createRange();
+    end.selectNodeContents(editor);
+    end.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(end);
+  };
+  const docuflexSelectWordAt = (editor, x, y) => {
+    const range = document.caretRangeFromPoint?.(x, y);
+    const node = range?.startContainer;
+    if (!node || node.nodeType !== Node.TEXT_NODE || !editor.contains(node)) return;
+    const text = node.data;
+    const inWord = (character) => /[\\p{L}\\p{N}_'’-]/u.test(character || '');
+    let start = range.startOffset;
+    let end = range.startOffset;
+    while (start > 0 && inWord(text[start - 1])) start -= 1;
+    while (end < text.length && inWord(text[end])) end += 1;
+    if (start === end) return;
+    const word = document.createRange();
+    word.setStart(node, start);
+    word.setEnd(node, end);
+    const selection = getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(word);
+  };
   const docuflexCreateTextBox = (lines, index) => {
     const page = lines[0]?.page;
     if (!(page instanceof HTMLElement) || lines.length < 1) return null;
-    const pageHeight = page.getBoundingClientRect().height || 0;
+    const pageHeight = page.offsetHeight || 0;
     if (pageHeight > 0) {
       const first = lines[0];
       const last = lines[lines.length - 1];
@@ -2355,7 +2755,7 @@
     // Keep the editable flow at the same width as the original PDF lines.
     // A large multi-line allowance changed wrapping as soon as the user typed.
     const contentSlack = Math.max(boxPad * 1.2, Math.min(28, (right - left) * 0.04));
-    const pageWidth = page.getBoundingClientRect().width || 0;
+    const pageWidth = page.offsetWidth || 0;
     const rightLimit = pageWidth > 0 ? pageWidth * 0.97 : 0;
     const boxLeft = Math.max(0, left - padLeft);
     const requestedWidth = Math.max(24, right - left + padLeft + padRight + contentSlack);
@@ -2420,48 +2820,78 @@
       docuflexFitTextBoxToOriginalRows(box);
       docuflexAlignTextBoxEditor(box, true);
     });
+    // Over a box that is not being typed in: a click puts the caret where it
+    // landed (a second click selects the word), a drag moves the box.
     let drag = null;
+    let lastClick = null;
+    const moveBoxBy = (start, event) => {
+      const dx = (event.clientX - start.x) / (start.scaleX || 1);
+      const dy = (event.clientY - start.y) / (start.scaleY || 1);
+      box.style.left = Math.max(0, start.left + dx) + 'px';
+      box.style.top = Math.max(0, start.top + dy) + 'px';
+      docuflexClampTextBoxToPage(box);
+      box.dataset.docuflexMoved = 'true';
+      docuflexBeginTextBoxVisualEditing(box, false);
+      parent.postMessage({ source: 'docuflex-html-editor', type: 'geometry' }, '*');
+    };
+    const dragStart = (event) => ({
+      x: event.clientX,
+      y: event.clientY,
+      left: Number.parseFloat(box.style.left || '0') || 0,
+      top: Number.parseFloat(box.style.top || '0') || 0,
+      scaleX: page.offsetWidth ? page.getBoundingClientRect().width / page.offsetWidth : 1,
+      scaleY: page.offsetHeight ? page.getBoundingClientRect().height / page.offsetHeight : 1,
+      moving: false
+    });
     handle.addEventListener('pointerdown', (event) => {
-      docuflexSelectTextBox(box);
-      drag = {
-        x: event.clientX,
-        y: event.clientY,
-        left: Number.parseFloat(box.style.left || '0') || 0,
-        top: Number.parseFloat(box.style.top || '0') || 0,
-        scaleX: page.offsetWidth ? page.getBoundingClientRect().width / page.offsetWidth : 1,
-        scaleY: page.offsetHeight ? page.getBoundingClientRect().height / page.offsetHeight : 1
-      };
+      if (event.button !== 0) return;
+      drag = dragStart(event);
       handle.setPointerCapture(event.pointerId);
       event.preventDefault();
       event.stopPropagation();
     });
     handle.addEventListener('pointermove', (event) => {
       if (!drag) return;
-      const dx = (event.clientX - drag.x) / (drag.scaleX || 1);
-      const dy = (event.clientY - drag.y) / (drag.scaleY || 1);
-      box.style.left = Math.max(0, drag.left + dx) + 'px';
-      box.style.top = Math.max(0, drag.top + dy) + 'px';
-      docuflexClampTextBoxToPage(box);
-      box.dataset.docuflexMoved = 'true';
-      docuflexBeginTextBoxVisualEditing(box, false);
-      parent.postMessage({ source: 'docuflex-html-editor', type: 'geometry' }, '*');
+      if (!drag.moving) {
+        if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < 4) return;
+        drag.moving = true;
+        getSelection()?.removeAllRanges();
+        docuflexSelectTextBox(box);
+        handle.classList.add('docuflex-dragging');
+      }
+      moveBoxBy(drag, event);
       event.preventDefault();
     });
     handle.addEventListener('pointerup', (event) => {
+      const clicked = drag && !drag.moving;
       drag = null;
-      handle.releasePointerCapture(event.pointerId);
-      parent.postMessage({ source: 'docuflex-html-editor', type: 'geometry' }, '*');
+      handle.classList.remove('docuflex-dragging');
+      if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+      if (!clicked) {
+        parent.postMessage({ source: 'docuflex-html-editor', type: 'geometry' }, '*');
+        return;
+      }
+      docuflexOpenTextBoxEditor(box, 'preserve');
+      docuflexPlaceCaret(editor, event.clientX, event.clientY);
+      lastClick = { time: event.timeStamp, x: event.clientX, y: event.clientY };
+    });
+    handle.addEventListener('pointercancel', () => {
+      drag = null;
+      handle.classList.remove('docuflex-dragging');
     });
     handle.addEventListener('click', (event) => {
-      docuflexSelectTextBox(box);
       event.preventDefault();
       event.stopPropagation();
     });
-    handle.addEventListener('dblclick', (event) => {
-      drag = null;
-      docuflexOpenTextBoxEditor(box, 'preserve');
-      event.preventDefault();
-      event.stopPropagation();
+    // The second click of a double click lands on the now open editor, which
+    // never saw the first one; select the word as a double click would.
+    editor.addEventListener('mouseup', (event) => {
+      const first = lastClick;
+      lastClick = null;
+      if (!first || event.timeStamp - first.time > 500 || Math.hypot(event.clientX - first.x, event.clientY - first.y) > 6) return;
+      const selection = getSelection();
+      if (selection && !selection.isCollapsed) return;
+      docuflexSelectWordAt(editor, event.clientX, event.clientY);
     });
     Array.from(box.querySelectorAll('.docuflex-selection-handle, .docuflex-selection-edge')).forEach((resizeHandle) => {
       if (!(resizeHandle instanceof HTMLElement)) return;
@@ -2485,6 +2915,13 @@
       });
       resizeHandle.addEventListener('pointermove', (event) => {
         if (!resizeDrag) return;
+        // The left and top border bands move the box; right, bottom and the
+        // corner handles resize it.
+        if (resizeHandle.classList.contains('docuflex-selection-edge') && /^[nw]$/.test(resizeDrag.direction)) {
+          moveBoxBy(resizeDrag, event);
+          event.preventDefault();
+          return;
+        }
         const dx = (event.clientX - resizeDrag.x) / (resizeDrag.scaleX || 1);
         const dy = (event.clientY - resizeDrag.y) / (resizeDrag.scaleY || 1);
         const west = resizeDrag.direction.includes('w');
@@ -2542,12 +2979,18 @@
     });
     editor.addEventListener('input', () => {
       docuflexBeginTextBoxVisualEditing(box);
+      const anchor = getSelection()?.anchorNode;
+      const row = (anchor instanceof Element ? anchor : anchor?.parentElement)?.closest?.('.docuflex-textbox-rich-line');
+      if (row) docuflexReleaseGaps(row);
+      docuflexMarkFallbackRuns(editor);
       docuflexGrowTextBoxToEditor(box);
       docuflexScheduleDirty(lines[0].node);
     });
     return box;
   };
   const docuflexBuildTextBoxes = (targetPage = null) => {
+    // Line geometry and word gaps depend on the PDF fonts (docuflexPrepareFonts).
+    if (!docuflexFontsReady) return;
     let boxIndex = document.querySelectorAll('.docuflex-textbox').length;
     const pages = targetPage instanceof HTMLElement ? [targetPage] : Array.from(document.querySelectorAll('.pf'));
     pages.forEach((page) => {
@@ -3024,6 +3467,23 @@
     });
     return [...textBoxEdits, ...lineEdits, ...docuflexCollectImageEdits()];
   };
+  // Moves an original line by page CSS pixels. Its container may be scaled,
+  // so the shift is measured once and corrected.
+  const docuflexShiftLine = (line, dx, dy) => {
+    if (!(line instanceof HTMLElement) || (!dx && !dy)) return;
+    const zoom = docuflexPageZoom(line.closest('.pf'));
+    const x = (Number.parseFloat(line.dataset.docuflexShiftX || '0') || 0) + dx;
+    const y = (Number.parseFloat(line.dataset.docuflexShiftY || '0') || 0) + dy;
+    line.style.translate = '';
+    const plain = line.getBoundingClientRect();
+    line.style.translate = '100px 100px';
+    const probe = line.getBoundingClientRect();
+    const scaleX = (probe.left - plain.left) / 100 / zoom || 1;
+    const scaleY = (probe.top - plain.top) / 100 / zoom || 1;
+    line.style.translate = (x / scaleX) + 'px ' + (y / scaleY) + 'px';
+    line.dataset.docuflexShiftX = String(x);
+    line.dataset.docuflexShiftY = String(y);
+  };
   const docuflexRebaseEdits = () => {
     const rebasedLines = new Map();
     document.querySelectorAll('.docuflex-textbox').forEach((box) => {
@@ -3045,6 +3505,13 @@
         return nextLine;
       });
       box.dataset.docuflexOriginalLines = JSON.stringify(nextOriginal);
+      if (docuflexTextBoxMoved(box)) {
+        // The saved PDF now has these lines where the box is; move the
+        // original lines there too, or later edits look for them in the old spot.
+        const dx = (Number.parseFloat(box.style.left || '0') || 0) - (Number.parseFloat(box.dataset.docuflexOriginalLeft || '0') || 0);
+        const dy = (Number.parseFloat(box.style.top || '0') || 0) - (Number.parseFloat(box.dataset.docuflexOriginalTop || '0') || 0);
+        docuflexTextBoxLines(box).forEach((line) => docuflexShiftLine(line, dx, dy));
+      }
       box.dataset.docuflexOriginalLeft = box.style.left || '0';
       box.dataset.docuflexOriginalTop = box.style.top || '0';
       delete box.dataset.docuflexMoved;
@@ -3065,6 +3532,7 @@
         } else {
           node.textContent = rebased.replacement;
         }
+        docuflexMarkFallbackRuns(node);
       }
       const current = rebased?.replacement || docuflexVisibleText(node) || docuflexNormalizeText(node.textContent || '');
       if (!current) return;
@@ -3117,6 +3585,8 @@
       font: docuflexFontInfo(document.activeElement?.closest?.('.t') || document.querySelector('.t'))
     }, '*');
   };
+  // A new font has its own ascent; keep edited rows on their line's baseline.
+  window.__docuflexRealignRows = (rows) => rows.forEach((row) => docuflexAlignRowBaseline(row));
   window.__docuflexSetBold = (bold) => {
     const weight = bold ? '700' : '400';
     const selection = document.getSelection();
@@ -3175,7 +3645,7 @@
         node.classList.add('docuflex-live-edit');
       });
     });
-    docuflexRunTextBoxBuildPasses();
+    docuflexPrepareFonts().finally(docuflexRunTextBoxBuildPasses);
     const textboxObserver = new MutationObserver((mutations) => {
       const pages = new Set();
       mutations.forEach((mutation) => {
@@ -3207,6 +3677,7 @@
         document.querySelectorAll('.docuflex-textbox.docuflex-active').forEach((box) => {
           box.classList.remove('docuflex-active', 'docuflex-editor-open');
         });
+        if (document.activeElement?.closest?.('.docuflex-textbox')) getSelection()?.removeAllRanges();
         parent.postMessage({ source: 'docuflex-html-editor', type: 'deactivate' }, '*');
       }
       const node = docuflexActivate(event.target);
@@ -3216,6 +3687,7 @@
       const node = docuflexActivate(event.target);
       if (!node) return;
       node.classList.add('docuflex-live-edit');
+      docuflexMarkFallbackRuns(node);
       docuflexScheduleBackdropCheck();
       docuflexScheduleDirty(node);
     }, true);
@@ -3232,6 +3704,7 @@
   });
 </scr` + `ipt>`;
     const injection = `
+<style data-docuflex-font-fallbacks data-same-design="${htmlSameDesignFonts.join(' ')}">${fallbackFontCss()}</style>
 <style>
   @font-face {
     font-family: 'Inter';
@@ -3292,10 +3765,11 @@
     right: auto !important;
     bottom: auto !important;
     left: 0 !important;
-    width: 100% !important;
+    /* As wide as the widest page plus the pan room on both sides, at least the view. */
+    width: max-content !important;
     min-width: 100%;
     margin: 0;
-    box-sizing: content-box;
+    box-sizing: border-box;
     padding: 0 var(--docuflex-horizontal-pan-gutter, 0px);
     display: flex !important;
     flex-direction: column;
@@ -3329,12 +3803,11 @@
     z-index: 4 !important;
     pointer-events: auto !important;
     cursor: text;
-    outline: 1px solid rgba(22, 132, 248, 0.22);
-    outline-offset: 1px;
+    outline: none;
   }
-  .t:hover { outline-color: rgba(22, 132, 248, 0.48); }
+  .t:hover { outline: 1px solid #0d99ff; }
   .t:focus, .t.docuflex-live-edit {
-    outline: 1.5px solid #1684f8;
+    outline: 2px solid #0d99ff;
     box-shadow: none;
   }
   .t:focus, .t.docuflex-live-edit {
@@ -3351,16 +3824,19 @@
   .t.docuflex-group-hidden * {
     visibility: hidden !important;
   }
+  /* Same selection look as the shape tools: nothing at rest, a 1px blue
+     outline on hover, a 2px border with white square corner handles when
+     selected. Sizes are divided by the page zoom (--docuflex-ui). */
   .docuflex-textbox,
   .docuflex-image-box {
+    --docuflex-px: calc(1px * var(--docuflex-ui, 1));
     position: absolute;
     z-index: 6 !important;
     box-sizing: border-box;
     min-width: 24px;
     min-height: 12px;
     pointer-events: none !important;
-    outline: 1px solid rgba(22, 132, 248, 0.2);
-    outline-offset: 1px;
+    outline: none;
     background: transparent;
   }
   .docuflex-image-box {
@@ -3370,12 +3846,12 @@
   }
   .docuflex-textbox:hover,
   .docuflex-image-box:hover {
-    outline-color: rgba(22, 132, 248, 0.48);
+    outline: var(--docuflex-px) solid #0d99ff;
+    outline-offset: 0;
   }
   .docuflex-textbox.docuflex-active,
-  .docuflex-textbox.docuflex-live-edit,
   .docuflex-image-box.docuflex-active {
-    outline: 2px solid #0d99ff;
+    outline: calc(2 * var(--docuflex-px)) solid #0d99ff;
     outline-offset: 0;
     box-shadow: none;
   }
@@ -3389,10 +3865,12 @@
     overflow-wrap: normal;
     word-break: normal;
     outline: none;
-    caret-color: #0d5aa7;
+    caret-color: #0d99ff;
+    cursor: text;
     pointer-events: auto !important;
     z-index: 1;
   }
+  .docuflex-textbox-editor ::selection { background: rgba(13, 153, 255, 0.28); }
   .docuflex-textbox-rich-line {
     display: block;
     margin: 0;
@@ -3415,14 +3893,16 @@
     -webkit-text-fill-color: transparent !important;
     text-shadow: none !important;
   }
+  /* Covers a box that is not being typed in: a click places the caret, a drag moves the box. */
   .docuflex-textbox-hit-area {
     position: absolute;
     z-index: 3;
     inset: 0;
-    cursor: move;
+    cursor: text;
     pointer-events: auto !important;
     background: transparent;
   }
+  .docuflex-textbox-hit-area.docuflex-dragging { cursor: move; }
   .docuflex-image-hit-area {
     position: absolute;
     z-index: 3;
@@ -3441,6 +3921,7 @@
     display: none;
     pointer-events: none !important;
   }
+  .docuflex-textbox:hover .docuflex-selection-controls,
   .docuflex-textbox.docuflex-active .docuflex-selection-controls,
   .docuflex-image-box.docuflex-active .docuflex-selection-controls {
     display: block;
@@ -3450,20 +3931,21 @@
     z-index: 5;
     display: none;
     box-sizing: border-box;
-    width: 8px;
-    height: 8px;
-    border: 2px solid #0d99ff;
+    width: calc(8 * var(--docuflex-px));
+    height: calc(8 * var(--docuflex-px));
+    border: calc(2 * var(--docuflex-px)) solid #0d99ff;
     border-radius: 0;
     background: #fff;
     transform: translate(-50%, -50%);
     pointer-events: none !important;
   }
-  .docuflex-textbox.docuflex-active > .docuflex-selection-handle,
   .docuflex-textbox.docuflex-active .docuflex-selection-handle,
   .docuflex-image-box.docuflex-active .docuflex-selection-handle {
     display: block;
     pointer-events: auto !important;
   }
+  /* The border band: on a text box it moves the box (the inside is for the
+     caret); on an image it resizes, like a shape's edge. */
   .docuflex-selection-edge {
     position: absolute;
     z-index: 4;
@@ -3471,19 +3953,22 @@
     background: transparent;
     pointer-events: none !important;
   }
+  .docuflex-textbox:hover .docuflex-selection-edge,
   .docuflex-textbox.docuflex-active .docuflex-selection-edge,
   .docuflex-image-box.docuflex-active .docuflex-selection-edge {
     display: block;
     pointer-events: auto !important;
   }
   .docuflex-selection-edge-n,
-  .docuflex-selection-edge-s { left: 0; right: 0; height: 14px; cursor: ns-resize; }
-  .docuflex-selection-edge-n { top: -7px; }
-  .docuflex-selection-edge-s { bottom: -7px; }
+  .docuflex-selection-edge-s { left: 0; right: 0; height: calc(10 * var(--docuflex-px)); cursor: ns-resize; }
+  .docuflex-selection-edge-n { top: calc(-7 * var(--docuflex-px)); }
+  .docuflex-selection-edge-s { bottom: calc(-7 * var(--docuflex-px)); }
   .docuflex-selection-edge-e,
-  .docuflex-selection-edge-w { top: 0; bottom: 0; width: 14px; cursor: ew-resize; }
-  .docuflex-selection-edge-e { right: -7px; }
-  .docuflex-selection-edge-w { left: -7px; }
+  .docuflex-selection-edge-w { top: 0; bottom: 0; width: calc(10 * var(--docuflex-px)); cursor: ew-resize; }
+  .docuflex-selection-edge-e { right: calc(-7 * var(--docuflex-px)); }
+  .docuflex-selection-edge-w { left: calc(-7 * var(--docuflex-px)); }
+  .docuflex-textbox .docuflex-selection-edge-n,
+  .docuflex-textbox .docuflex-selection-edge-w { cursor: move; }
   .docuflex-selection-handle-nw { left: 0; top: 0; }
   .docuflex-selection-handle-n { left: 50%; top: 0; }
   .docuflex-selection-handle-ne { left: 100%; top: 0; }
@@ -3507,6 +3992,14 @@
     caret-color: transparent;
     user-select: none;
   }
+  /* A fixed, top-aligned box: the space inside may come from a fallback font
+     with taller metrics, which must not stretch the line. */
+  .docuflex-gap {
+    display: inline-block;
+    height: 1em;
+    vertical-align: top;
+    overflow: hidden;
+  }
   .t.docuflex-bold-edit:focus, .t.docuflex-bold-edit.docuflex-live-edit {
     font-weight: 700 !important;
   }
@@ -3515,6 +4008,33 @@ ${setupScript}`;
     return html.includes('</body>')
       ? html.replace('</body>', `${injection}</body>`)
       : `${html}${injection}`;
+  }
+
+  /**
+   * Gives every pdf2htmlEX font class the same fallbacks the export uses for
+   * characters the embedded subset lacks: first the original font installed on
+   * this computer, then the bundled stand-in. One face per style, so the browser
+   * never fakes bold or italic.
+   */
+  function fallbackFontCss() {
+    const stems = new Set(Object.values(htmlFontFallbacks));
+    const faces = [...stems].map((stem) => `@font-face{font-family:'Docuflex ${stem}';src:url('/fonts/fallback/${stem}.woff2') format('woff2');font-style:normal;font-weight:normal;font-display:block;}`);
+    const installedFaces = Object.entries(htmlInstalledFonts).map(([fontClass, name]) => `@font-face{font-family:'Docuflex installed ${fontClass}';src:url('/api/pdf/installed-font?name=${encodeURIComponent(name)}') format('truetype');font-style:normal;font-weight:normal;font-display:block;}`);
+    const fontClasses = new Set([...Object.keys(htmlFontFallbacks), ...Object.keys(htmlInstalledFonts)]);
+    const rules = [...fontClasses].map((fontClass) => {
+      const families = [fontClass];
+      if (htmlInstalledFonts[fontClass]) families.push(`'Docuflex installed ${fontClass}'`);
+      if (htmlFontFallbacks[fontClass]) families.push(`'Docuflex ${htmlFontFallbacks[fontClass]}'`);
+      // The export draws each character with its plain advance width, so the
+      // editor must not kern or form ligatures either.
+      const rule = `.${fontClass}{font-family:${families.join(',')};font-kerning:none;font-variant-ligatures:none;}`;
+      // A line that needs characters this font lacks uses the fallback throughout,
+      // except for characters only the PDF font has (the export does the same).
+      const fallback = families.slice(1).join(',');
+      const whole = `[data-docuflex-fallback~="${fontClass}"]:not([data-docuflex-font-chosen]).${fontClass},[data-docuflex-fallback~="${fontClass}"]:not([data-docuflex-font-chosen]) .${fontClass}{font-family:${fallback},${fontClass} !important;}`;
+      return fallback && !htmlSameDesignFonts.includes(fontClass) ? rule + whole : rule;
+    });
+    return [...faces, ...installedFaces, ...rules].join('\n');
   }
 
   /** @param {string} html */
@@ -3567,8 +4087,10 @@ ${setupScript}`;
     policy.setAttribute('http-equiv', 'Content-Security-Policy');
     policy.setAttribute(
       'content',
+      // font-src 'self' lets the frame use Docuflex's own fonts (Inter, Geist and
+      // the stand-ins in /fonts/fallback); nothing else can be loaded from outside.
       "default-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; "
-        + "script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data: blob:; connect-src 'none'"
+        + "script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src 'self' data: blob:; connect-src 'none'"
     );
     doc.head.prepend(policy);
   }
@@ -3597,25 +4119,50 @@ ${setupScript}`;
     return htmlFrame?.contentDocument?.scrollingElement ?? htmlFrame?.contentDocument?.documentElement ?? null;
   }
 
+  /**
+   * How much smaller the frame's document viewport is than the frame. The
+   * desktop WebKit sizes it from the zoomed size and then zooms the content
+   * again, so the frame is widened by the inverse to fill the workspace.
+   */
+  function htmlFrameViewportRatio() {
+    const doc = htmlFrame?.contentDocument;
+    if (!htmlFrame || !doc?.documentElement.clientWidth || !htmlFrame.offsetWidth) return 1;
+    const ratio = doc.documentElement.clientWidth / htmlFrame.offsetWidth;
+    return ratio > 0.3 && ratio < 0.99 ? ratio : 1;
+  }
+
   function applyHtmlViewportStyles() {
     const doc = htmlFrame?.contentDocument;
     if (!doc || !htmlFrame) return;
+    // Pages appear exactly as large as in the normal viewer, whatever UI zoom
+    // the app shell applies and whether it reaches into the frame.
     const frameScale = scale * zoomLevel;
     // The viewport and its padding must never change with zoom. Scale only the
     // converted PDF pages so centering is based on one stable scroll viewport.
     htmlFrame.style.zoom = '';
-    htmlFrame.style.left = '50%';
-    htmlFrame.style.width = '100%';
-    htmlFrame.style.height = '100%';
-    htmlFrame.style.transform = 'translateX(-50%)';
+    // Measured at the current size (the ratio does not depend on it), so the
+    // frame never flips back to 100% and relays out on every zoom step.
+    const viewportRatio = htmlFrameViewportRatio();
+    htmlFrame.style.left = '0';
+    htmlFrame.style.width = `${100 / viewportRatio}%`;
+    htmlFrame.style.height = `${100 / viewportRatio}%`;
+    htmlFrame.style.transform = 'none';
     htmlFrame.style.transformOrigin = 'top center';
     doc.body.style.zoom = '';
     doc.body.style.width = '100%';
     doc.documentElement.style.setProperty('--docuflex-viewer-padding-top', '54px');
-    doc.documentElement.style.setProperty('--docuflex-viewer-padding-right', '48px');
+    // Like the normal viewer: no side padding, only the zoom-dependent pan room.
+    doc.documentElement.style.setProperty('--docuflex-viewer-padding-right', '0px');
     doc.documentElement.style.setProperty('--docuflex-viewer-padding-bottom', '80px');
     doc.documentElement.style.setProperty('--docuflex-page-margin', `${30 / scale}px`);
+    const basePageWidth = Math.max(0, ...[...doc.querySelectorAll('.pf')].map((page) => /** @type {HTMLElement} */ (page).offsetWidth || 0)) * frameScale / zoomLevel;
+    const viewWidth = doc.documentElement.clientWidth;
+    horizontalPanGutter = basePageWidth && viewWidth && zoomLevel > 1
+      ? Math.min(MAX_HORIZONTAL_PAN_GUTTER, Math.max(0, (zoomLevel * (viewWidth - basePageWidth)) / 2))
+      : 0;
     doc.documentElement.style.setProperty('--docuflex-horizontal-pan-gutter', `${horizontalPanGutter}px`);
+    // Selection borders and handles keep one on-screen size, like the shape tools.
+    doc.documentElement.style.setProperty('--docuflex-ui', String(1 / frameScale));
     doc.querySelectorAll('.pf').forEach((page) => {
       if (page.nodeType === 1) /** @type {HTMLElement} */ (page).style.zoom = String(frameScale);
     });
@@ -3924,6 +4471,20 @@ ${setupScript}`;
     return null;
   }
 
+  /**
+   * The part of the widened frame that lies outside the visible area. WebKit
+   * limits scrolling by the frame's size, not the visible one, so this much
+   * pan room is added at the right and bottom or it would be unreachable.
+   */
+  function htmlHiddenFrameExtent() {
+    const doc = htmlFrame?.contentDocument;
+    if (!doc || !htmlFrame || htmlFrameViewportRatio() === 1) return { width: 0, height: 0 };
+    return {
+      width: Math.max(0, htmlFrame.offsetWidth - doc.documentElement.clientWidth),
+      height: Math.max(0, htmlFrame.offsetHeight - doc.documentElement.clientHeight)
+    };
+  }
+
   function ensureHtmlScrollExtent() {
     const doc = htmlFrame?.contentDocument;
     if (!doc) return;
@@ -3936,6 +4497,8 @@ ${setupScript}`;
     // when a zoomed child is wider than its container. Pin an invisible extent
     // after the actual rightmost rendered page edge so both pan limits match.
     const containerRect = htmlPageContainer.getBoundingClientRect();
+    const scrollerView = { width: doc.documentElement.clientWidth, height: doc.documentElement.clientHeight };
+    const hidden = htmlHiddenFrameExtent();
     const rightmostPageEdge = [...htmlPageContainer.querySelectorAll('.pf')].reduce((right, page) => {
       if (page.nodeType !== 1) return right;
       return Math.max(right, /** @type {HTMLElement} */ (page).getBoundingClientRect().right);
@@ -3949,7 +4512,7 @@ ${setupScript}`;
     horizontalExtent.style.cssText = [
       'position:absolute',
       'top:0',
-      `left:${Math.ceil(rightmostPageEdge - containerRect.left + horizontalPanGutter)}px`,
+      `left:${Math.ceil(Math.max(rightmostPageEdge - containerRect.left + horizontalPanGutter, scrollerView.width - containerRect.left - doc.documentElement.scrollLeft) + hidden.width)}px`,
       'width:1px',
       'height:1px',
       'pointer-events:none',
@@ -3968,7 +4531,7 @@ ${setupScript}`;
     }
     verticalExtent.style.cssText = [
       'position:absolute',
-      `top:${Math.ceil(bottommostPageEdge - containerRect.top + verticalPanGutter)}px`,
+      `top:${Math.ceil(Math.max(bottommostPageEdge - containerRect.top + verticalPanGutter + (hidden.height ? Number.parseFloat(getComputedStyle(doc.body).paddingBottom) || 0 : 0), scrollerView.height - containerRect.top - doc.documentElement.scrollTop) + hidden.height)}px`,
       'left:0',
       'width:1px',
       'height:1px',
@@ -4031,21 +4594,26 @@ ${setupScript}`;
     }
     if (!anchorPage) return;
 
-    const before = anchorPage.getBoundingClientRect();
+    // The page in viewport pixels. Chrome reports a zoomed element's rect in
+    // those already; WebKit's legacy zoom divides it by the zoom. Scale by
+    // laid-out size over reported size so both agree.
+    const pageBox = () => {
+      const rect = anchorPage.getBoundingClientRect();
+      const page = /** @type {HTMLElement} */ (anchorPage);
+      const laidOut = page.offsetWidth * (Number.parseFloat(page.style.zoom || '1') || 1);
+      const k = rect.width ? laidOut / rect.width : 1;
+      return { left: rect.left * k, top: rect.top * k, width: rect.width * k, height: rect.height * k };
+    };
+    const before = pageBox();
     const anchorRatioX = before.width ? (clientX - before.left) / before.width : 0.5;
     const anchorRatioY = before.height ? (clientY - before.top) / before.height : 0.5;
     zoomLevel = nextZoom;
     applyHtmlViewportStyles();
-    const after = anchorPage.getBoundingClientRect();
-    const availableWidth = Math.max(0, frameWindow.innerWidth - 96);
-
-    if (after.width <= availableWidth + 0.5) {
-      // A fitting page must remain perfectly centered; cursor anchoring only
-      // begins after horizontal overflow exists.
-      scroller.scrollLeft = horizontalPanGutter;
-    } else {
-      scroller.scrollLeft += after.left + anchorRatioX * after.width - clientX;
-    }
+    ensureHtmlScrollExtent();
+    const after = pageBox();
+    // Keep the point under the pointer still; the scroll range clamps it, as
+    // in the normal viewer, so a page that fits stays centred.
+    scroller.scrollLeft += after.left + anchorRatioX * after.width - clientX;
     scroller.scrollTop += after.top + anchorRatioY * after.height - clientY;
   }
 
@@ -4059,8 +4627,27 @@ ${setupScript}`;
       : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? 100 : 1;
     // Native pinch deltas inside the converted-document iframe are smaller
     // than the same gesture on the main viewer, so compensate at this boundary.
-    const sensitivity = event.metaKey ? 0.002 : 0.015;
-    zoomHtmlAt(zoomLevel * Math.exp(-event.deltaY * deltaScale * sensitivity), event.clientX, event.clientY);
+    const sensitivity = event.metaKey ? 0.002 : 0.01;
+    // Lay out once per frame; fast wheel events build on the pending zoom.
+    const base = pendingHtmlZoom?.zoom ?? zoomLevel;
+    pendingHtmlZoom = { zoom: base * Math.exp(-event.deltaY * deltaScale * sensitivity), clientX: event.clientX, clientY: event.clientY };
+    if (!pendingHtmlZoomFrame) {
+      pendingHtmlZoomFrame = requestAnimationFrame(() => {
+        pendingHtmlZoomFrame = 0;
+        const request = pendingHtmlZoom;
+        pendingHtmlZoom = null;
+        if (request) zoomHtmlAt(request.zoom, request.clientX, request.clientY);
+      });
+    }
+  }
+  /** @type {{ zoom: number; clientX: number; clientY: number } | null} */
+  let pendingHtmlZoom = null;
+  let pendingHtmlZoomFrame = 0;
+
+  /** Pages centred, with equal pan room on both sides, as the normal viewer opens. */
+  function centerHtmlScroller() {
+    const scroller = htmlScroller();
+    if (scroller) scroller.scrollLeft = Math.max(0, (scroller.scrollWidth - htmlHiddenFrameExtent().width - scroller.clientWidth) / 2);
   }
 
   /** @param {PointerEvent} event */
@@ -4162,12 +4749,8 @@ ${setupScript}`;
       doc.body.spellcheck = false;
     }
     applyHtmlViewportStyles();
-    const scroller = htmlScroller();
-    if (scroller) scroller.scrollLeft = horizontalPanGutter;
-    requestAnimationFrame(() => {
-      const readyScroller = htmlScroller();
-      if (readyScroller) readyScroller.scrollLeft = horizontalPanGutter;
-    });
+    centerHtmlScroller();
+    requestAnimationFrame(centerHtmlScroller);
     updateHtmlToolMode();
     const frameWindow = htmlFrame?.contentWindow;
     frameWindow?.addEventListener('wheel', handleHtmlWheel, { passive: false, capture: true });
@@ -4432,7 +5015,8 @@ ${setupScript}`;
         if (!snapshot || typeof snapshot !== 'object') return;
         Object.entries(snapshot).forEach(([property, value]) => {
           if (typeof value !== 'string') return;
-          row.style.setProperty(property, value);
+          const chosen = property === 'font-family' && row.dataset.docuflexFontChosen === 'true';
+          row.style.setProperty(property, value, chosen ? 'important' : '');
           if (property === 'font-family') {
             row.querySelectorAll('*').forEach((child) => {
               if (isIframeHtmlElement(child)) child.style.setProperty('font-family', value, 'important');
@@ -4482,7 +5066,9 @@ ${setupScript}`;
       const editor = rows[0].closest('.docuflex-textbox-editor');
       if (isIframeHtmlElement(editor)) editor.style.setProperty(cssProperty, value);
       rows.forEach((row) => {
-        row.style.setProperty(cssProperty, value);
+        // A chosen font must beat the whole-line fallback rule (!important).
+        if (property === 'fontFamily') row.dataset.docuflexFontChosen = 'true';
+        row.style.setProperty(cssProperty, value, property === 'fontFamily' ? 'important' : '');
         if (property === 'fontFamily') {
           row.querySelectorAll('*').forEach((child) => {
             if (isIframeHtmlElement(child)) child.style.setProperty('font-family', value, 'important');
@@ -4490,6 +5076,10 @@ ${setupScript}`;
         }
       });
       notifyHtmlTextboxRowsChanged(rows);
+      if (property === 'fontFamily' || property === 'fontWeight' || property === 'fontStyle') {
+        const realign = /** @type {{ __docuflexRealignRows?: (rows: HTMLElement[]) => void }} */ (/** @type {unknown} */ (htmlFrame?.contentWindow))?.__docuflexRealignRows;
+        try { realign?.(rows); } catch { /* keep the row where it is */ }
+      }
       return;
     }
     const activeNode = doc.querySelector(`[data-docuflex-edit-id="${CSS.escape(activeHtmlTextId)}"]`);
@@ -4510,8 +5100,11 @@ ${setupScript}`;
 
   /** @param {string} value */
   function setHtmlFontFamily(value) {
+    // A bold PDF font draws at weight 400 in the editor; keep it bold in the new family.
+    const keepBold = htmlBoldActive;
     htmlFontFamily = value;
     updateHtmlTextStyle('fontFamily', value);
+    if (keepBold) setHtmlFontWeight(700);
   }
 
   /** @param {number} value */
@@ -4686,6 +5279,16 @@ ${setupScript}`;
     const data = event.data;
     if (!data || data.source !== 'docuflex-html-editor') return;
 
+    if (data.type === 'original-texts' && data.texts && typeof data.texts === 'object') {
+      /** @type {Record<string, { text: string; htmlText: string }>} */
+      const measured = { ...convertedHtmlOriginalTexts };
+      Object.entries(data.texts).forEach(([id, text]) => {
+        if (measured[id] && typeof text === 'string') measured[id] = { ...measured[id], text: normalizeLineText(text) };
+      });
+      convertedHtmlOriginalTexts = measured;
+      return;
+    }
+
     if ((data.type === 'activate' || data.type === 'dirty') && data.font) {
       const font = data.font;
       const nextTextId = typeof font.id === 'string' ? font.id : '';
@@ -4763,7 +5366,9 @@ ${setupScript}`;
   function syncHtmlFormattingFromFrameInfo(font) {
     htmlFontFamily = typeof font.fontFamily === 'string' ? font.fontFamily : '';
     htmlFontSize = Number.parseFloat(typeof font.fontSize === 'string' ? font.fontSize : '') || 16;
-    htmlFontWeight = Number.parseFloat(typeof font.fontWeight === 'string' ? font.fontWeight : '') || (font.bold ? 700 : 400);
+    const weight = Number.parseFloat(typeof font.fontWeight === 'string' ? font.fontWeight : '') || 400;
+    // pdf2htmlEX draws a bold PDF font at weight 400; show it as bold.
+    htmlFontWeight = font.bold && weight < 600 ? 700 : weight;
     htmlLetterSpacing = Number.parseFloat(typeof font.letterSpacing === 'string' ? font.letterSpacing : '') || 0;
     htmlLineHeight = Number.parseFloat(typeof font.lineHeight === 'string' ? font.lineHeight : '') || htmlFontSize * 1.2;
     htmlTextAlign = typeof font.textAlign === 'string' && ['left', 'center', 'right'].includes(font.textAlign)
@@ -5036,6 +5641,8 @@ ${setupScript}`;
   }
 
   .html-preview {
+    /* Same scheme as the page inside, or the browser paints the frame opaque (white in dark mode). */
+    color-scheme: light;
     position: absolute;
     z-index: 1;
     top: 0;
@@ -5090,9 +5697,7 @@ ${setupScript}`;
     position: absolute;
     z-index: 40;
     top: 20px;
-    /* The editor layer compensates for the app shell's UI zoom. Keep
-       this panel inside the portion of that enlarged layer that is visible. */
-    right: calc((1 - var(--ui-scale, 0.85)) * 100% + 18px);
+    right: 18px;
     display: grid;
     grid-template-rows: 50px 1fr;
     box-sizing: border-box;

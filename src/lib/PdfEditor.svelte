@@ -57,6 +57,32 @@
   let viewer;
   /** @type {HTMLElement | undefined} */
   let workspace;
+  /** @type {HTMLDivElement | undefined} */
+  let htmlEditorLayer;
+
+  /**
+   * The edit-mode layer must cover exactly the workspace on screen. Engines
+   * differ in how the app's UI zoom reaches it (Chrome vs the desktop WebKit),
+   * so its size is measured and corrected instead of assumed.
+   */
+  function fitHtmlEditorLayer() {
+    if (!workspace || !htmlEditorLayer) return;
+    htmlEditorLayer.style.setProperty('--html-layer-fit-x', '1');
+    htmlEditorLayer.style.setProperty('--html-layer-fit-y', '1');
+    const target = workspace.getBoundingClientRect();
+    const actual = htmlEditorLayer.getBoundingClientRect();
+    if (!actual.width || !actual.height) return;
+    htmlEditorLayer.style.setProperty('--html-layer-fit-x', String(target.width / actual.width));
+    htmlEditorLayer.style.setProperty('--html-layer-fit-y', String(target.height / actual.height));
+  }
+  /** @type {ResizeObserver | null} */
+  let htmlLayerObserver = null;
+  $: if (htmlEditorLayer && workspace) {
+    htmlLayerObserver?.disconnect();
+    htmlLayerObserver = new ResizeObserver(() => fitHtmlEditorLayer());
+    htmlLayerObserver.observe(workspace);
+    fitHtmlEditorLayer();
+  }
   /** @type {import('pdfjs-dist').PDFDocumentProxy | null} */
   let pdfDocument = null;
   /** @type {import('pdfjs-dist').PDFDocumentLoadingTask | null} */
@@ -683,9 +709,14 @@
         htmlEditorStarted = false;
         htmlTextEditBaseFile = null;
         htmlEditorReady = false;
+      } else if (htmlEditorStarted) {
+        // The editor rebased its text onto these applied edits, so later edits
+        // describe this PDF, not the one editing started from.
+        htmlTextEditBaseFile = new File([editedBytes], workingFile.name, {
+          type: 'application/pdf',
+          lastModified: Date.now()
+        });
       }
-      // Keep the iframe's changes cumulative against the clean baseline. This
-      // avoids stacking old font, size, and decoration overlays on each pass.
     } catch (error) {
       console.error(error);
       status = error instanceof Error ? error.message : 'Could not apply the edited PDF text.';
@@ -9141,7 +9172,7 @@
 
 <section class="pdf-workspace" class:editor-inactive={!active} inert={!active} aria-label={`PDF editor for ${workingFile.name}`} bind:this={workspace}>
   {#if htmlEditorStarted}
-    <div class:active={htmlViewportVisible} class="html-editor-layer">
+    <div class:active={htmlViewportVisible} class="html-editor-layer" bind:this={htmlEditorLayer}>
       <HtmlPdfEditor
         bind:this={htmlEditor}
         bind:zoomLevel
@@ -13586,8 +13617,10 @@
     z-index: 2;
     top: 0;
     left: 0;
-    width: calc(100% / var(--ui-scale, 0.85));
-    height: calc(100% / var(--ui-scale, 0.85));
+    /* Exactly the workspace, like the normal viewer; the edit frame matches
+       the page size on screen itself (applyHtmlViewportStyles). */
+    width: calc(100% * var(--html-layer-fit-x, 1));
+    height: calc(100% * var(--html-layer-fit-y, 1));
     overflow: hidden;
     background:
       linear-gradient(90deg, rgba(0, 0, 0, 0.045) 1px, transparent 1px) 58px 122px / 140px 140px,

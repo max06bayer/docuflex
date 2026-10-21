@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-docuflex-update-download"
+description = "Enables the docuflex_update_download command without any pre-configured scope."
+commands.allow = ["docuflex_update_download"]
+
+[[permission]]
+identifier = "deny-docuflex-update-download"
+description = "Denies the docuflex_update_download command without any pre-configured scope."
+commands.deny = ["docuflex_update_download"]

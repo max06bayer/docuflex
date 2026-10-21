@@ -18,6 +18,8 @@ use tauri::{webview::DownloadEvent, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri::{LogicalPosition, TitleBarStyle};
 use url::Url;
 
+mod updater;
+
 // The side-by-side build ("Docuflex Redesign") uses its own ports so it can run next to the regular app.
 #[cfg(not(feature = "side-by-side"))]
 const FRONTEND_PORT: u16 = 43_127;
@@ -536,11 +538,15 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .manage(Arc::clone(&pending_pdf))
+        .manage(updater::UpdateState::default())
         .invoke_handler(tauri::generate_handler![
             take_pending_pdf,
             start_window_drag,
             docuflex_save_prompt,
-            docuflex_save_overwrite
+            docuflex_save_overwrite,
+            updater::docuflex_update_check,
+            updater::docuflex_update_download,
+            updater::docuflex_update_install
         ])
         .plugin(tauri_plugin_single_instance::init(
             move |app, arguments, cwd| {

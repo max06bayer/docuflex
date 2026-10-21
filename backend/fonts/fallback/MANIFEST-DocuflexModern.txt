@@ -1,0 +1,27 @@
+Docuflex Modern Roman, Sans and Mono are derived from Latin Modern 2.004
+(Copyright 2003--2021 by B. Jackowski and J.M. Nowacki, on behalf of TeX Users
+Groups), released under the GUST Font License (GUST-FONT-LICENSE.txt).
+
+As that license requests, the derived fonts and files carry new names. Changes:
+the CFF outlines were converted to TrueType (quadratic) outlines, the layout
+tables (GPOS, GSUB, GDEF, kern) were removed, and the fonts were renamed.
+
+  lmroman10-regular.otf       -> DocuflexModernRoman-Regular.ttf / .woff2
+  lmroman10-bold.otf          -> DocuflexModernRoman-Bold.ttf / .woff2
+  lmroman10-italic.otf        -> DocuflexModernRoman-Italic.ttf / .woff2
+  lmroman10-bolditalic.otf    -> DocuflexModernRoman-BoldItalic.ttf / .woff2
+  lmsans10-regular.otf        -> DocuflexModernSans-Regular.ttf / .woff2
+  lmsans10-bold.otf           -> DocuflexModernSans-Bold.ttf / .woff2
+  lmsans10-oblique.otf        -> DocuflexModernSans-Italic.ttf / .woff2
+  lmsans10-boldoblique.otf    -> DocuflexModernSans-BoldItalic.ttf / .woff2
+  lmmono10-regular.otf        -> DocuflexModernMono-Regular.ttf / .woff2
+  lmmonolt10-bold.otf         -> DocuflexModernMono-Bold.ttf / .woff2
+  lmmono10-italic.otf         -> DocuflexModernMono-Italic.ttf / .woff2
+  lmmonolt10-boldoblique.otf  -> DocuflexModernMono-BoldItalic.ttf / .woff2
+  lmroman8-regular.otf        -> DocuflexModernRoman8-Regular.ttf / .woff2
+  lmroman8-italic.otf         -> DocuflexModernRoman8-Italic.ttf / .woff2
+  lmroman8-bold.otf           -> DocuflexModernRoman8-Bold.ttf / .woff2
+  lmroman12-regular.otf       -> DocuflexModernRoman12-Regular.ttf / .woff2
+  lmroman12-italic.otf        -> DocuflexModernRoman12-Italic.ttf / .woff2
+  lmroman12-bold.otf          -> DocuflexModernRoman12-Bold.ttf / .woff2
+  lmroman17-regular.otf       -> DocuflexModernRoman17-Regular.ttf / .woff2

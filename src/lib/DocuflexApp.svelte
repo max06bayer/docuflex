@@ -10,6 +10,7 @@
   import HomeProtectPanel from '$lib/HomeProtectPanel.svelte';
   import QuickToolPagesPanel from '$lib/QuickToolPagesPanel.svelte';
   import SettingsPanel from '$lib/SettingsPanel.svelte';
+  import { update, checkForUpdate, downloadUpdate, installUpdate, dismissUpdate, isDesktopApp } from '$lib/updater.js';
   import McpPanel from '$lib/McpPanel.svelte';
   import AiChatPanel from '$lib/AiChatPanel.svelte';
   import TranslateFilesPanel from '$lib/TranslateFilesPanel.svelte';
@@ -906,6 +907,8 @@
   }
 
   onMount(() => {
+    // The desktop app looks for a newer release on every start.
+    if (isDesktopApp()) void checkForUpdate();
     isWebsite = !document.documentElement.dataset.docuflexDesktop;
     const handleHistoryBack = () => {
       if (!isWebsite || !documentHistoryEntry) return;
@@ -953,7 +956,7 @@
 
 <svelte:head>
   <title>Docuflex Editor — Edit PDFs Online, Free</title>
-  <meta name="description" content="Edit, sign, merge, split, compress and convert PDFs online for free with Docuflex. Private, open source and hosted in the EU." />
+  <meta name="description" content="No account needed. Edit, sign, merge, split, compress and convert PDFs online for free with Docuflex. Private and open source." />
   <link rel="canonical" href="https://docuflex.eu/editor" />
 </svelte:head>
 
@@ -1410,6 +1413,58 @@
     {/key}
   {/if}
 
+  {#if $update.visible}
+    <div class="error-toast update-toast" role="status" transition:scale={{ duration: 150, easing: cubicOut, start: 0.96, opacity: 0 }}>
+      <div class="error-toast-body">
+        {#if $update.phase === 'checking'}
+          <strong>Checking for updates…</strong>
+          <span>Looking for a newer Docuflex on GitHub.</span>
+        {:else if $update.phase === 'current'}
+          <strong>Docuflex is up to date</strong>
+          <span>You have the newest version, {$update.info?.current}.</span>
+        {:else if $update.phase === 'available'}
+          <strong>Update available</strong>
+          <span>Docuflex {$update.info?.latest} is out. You have {$update.info?.current}. Download it now?</span>
+        {:else if $update.phase === 'downloading'}
+          <strong>Downloading Docuflex {$update.info?.latest}</strong>
+          <div class="update-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={$update.total ? Math.round(($update.received / $update.total) * 100) : 0}>
+            <span style:width={`${$update.total ? Math.min(100, ($update.received / $update.total) * 100) : 0}%`}></span>
+          </div>
+          <span>{$update.total ? `${($update.received / 1048576).toFixed(0)} of ${($update.total / 1048576).toFixed(0)} MB` : 'Starting…'}</span>
+        {:else if $update.phase === 'ready'}
+          <strong>Update ready</strong>
+          <span>Install restarts Docuflex with version {$update.info?.latest}.</span>
+        {:else if $update.phase === 'installing'}
+          <strong>Installing…</strong>
+          <span>Docuflex restarts in a moment.</span>
+        {:else if $update.phase === 'error'}
+          <strong>Update failed</strong>
+          <span>{$update.error}</span>
+        {/if}
+      </div>
+      {#if $update.phase === 'current'}
+        <div class="update-actions">
+          <button type="button" onclick={dismissUpdate}>OK</button>
+        </div>
+      {:else if $update.phase === 'available'}
+        <div class="update-actions">
+          <button type="button" class="secondary" onclick={dismissUpdate}>Later</button>
+          <button type="button" onclick={downloadUpdate}>Download</button>
+        </div>
+      {:else if $update.phase === 'ready'}
+        <div class="update-actions">
+          <button type="button" class="secondary" onclick={dismissUpdate}>Later</button>
+          <button type="button" onclick={installUpdate}>Install</button>
+        </div>
+      {:else if $update.phase === 'error'}
+        <div class="update-actions">
+          <button type="button" class="secondary" onclick={dismissUpdate}>Close</button>
+          <button type="button" onclick={() => checkForUpdate({ manual: true })}>Try again</button>
+        </div>
+      {/if}
+    </div>
+  {/if}
+
   <input bind:this={fileInput} class="file-input" type="file" accept="application/pdf,.pdf" onchange={handleFileSelection} />
 
 </main>
@@ -1804,6 +1859,56 @@
   .error-toast-body span {
     color: #aaaaaa;
   }
+
+  /* The update box is the error box with buttons and a progress bar. */
+  /* Half as far from the top right corner as the error box. */
+  .update-toast { z-index: 1399; top: 72px; right: 12px; }
+  .error-toast + .update-toast { top: 150px; }
+
+  .update-progress {
+    height: 6px;
+    margin: 6px 0 2px;
+    overflow: hidden;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.14);
+  }
+
+  .update-progress span {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: #ffffff;
+    transition: width 150ms linear;
+  }
+
+  .update-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 11px;
+  }
+
+  .update-actions button {
+    height: 30px;
+    padding: 0 13px;
+    border: 0;
+    border-radius: 7px;
+    background: #ffffff;
+    color: #111111;
+    font-family: Geist, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 15px;
+    letter-spacing: -0.15px;
+    cursor: pointer;
+    transition: transform 160ms ease, opacity 160ms ease;
+  }
+
+  .update-actions button.secondary {
+    background: rgba(255, 255, 255, 0.1);
+    color: #ffffff;
+  }
+
+  .update-actions button:hover { opacity: 0.88; }
+  .update-actions button:active { transform: scale(0.96); }
 
   @keyframes utility-tooltip-in {
     from { opacity: 0; transform: scale(0.96); }
@@ -3162,6 +3267,11 @@
   :global(:root[data-theme="dark"]) .error-toast-body { color: #111111; }
   :global(:root[data-theme="dark"]) .error-toast-body strong { color: #111111; }
   :global(:root[data-theme="dark"]) .error-toast-body span { color: rgba(255, 255, 255, 0.333); }
+  :global(:root[data-theme="dark"]) .update-toast .error-toast-body span { color: rgba(0, 0, 0, 0.55); }
+  :global(:root[data-theme="dark"]) .update-progress { background: rgba(0, 0, 0, 0.12); }
+  :global(:root[data-theme="dark"]) .update-progress span { background: #111111; }
+  :global(:root[data-theme="dark"]) .update-actions button { background: #111111; color: #ffffff; }
+  :global(:root[data-theme="dark"]) .update-actions button.secondary { background: rgba(0, 0, 0, 0.08); color: #111111; }
   :global(:root[data-theme="dark"]) .sidebar { background: #111111; border-right: 1px solid #2a2a2a; box-shadow: 0 0 98.6px rgba(0, 0, 0, 0.18); }
   :global(:root[data-theme="dark"]) .quick-tool { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.07); color: rgba(255, 255, 255, 0.75); }
   :global(:root[data-theme="dark"]) .quick-tool kbd { border: 1px solid rgba(255, 255, 255, 0.04); background: rgba(255, 255, 255, 0.033); color: rgba(255, 255, 255, 0.165); }
