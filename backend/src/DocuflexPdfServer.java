@@ -101,6 +101,7 @@ public class DocuflexPdfServer {
     server.createContext("/health", DocuflexPdfServer::handleHealth);
     server.createContext("/edit", DocuflexPdfServer::handleEdit);
     server.createContext("/fonts", DocuflexPdfServer::handleFonts);
+    server.createContext("/installed-font", DocuflexPdfServer::handleInstalledFont);
     server.createContext("/decrypt", DocuflexPdfServer::handleDecrypt);
     server.createContext("/uncrop", DocuflexPdfServer::handleUncrop);
     server.createContext("/pages", DocuflexPdfServer::handlePages);
@@ -158,6 +159,42 @@ public class DocuflexPdfServer {
       sendJson(exchange, 200, response);
     } catch (Exception error) {
       sendFailure(exchange, error, "Could not apply the requested PDF edits.");
+    }
+  }
+
+  /** GET /installed-font?name=ArialMT: the installed font as TrueType, or 404. */
+  private static void handleInstalledFont(HttpExchange exchange) throws IOException {
+    addCors(exchange);
+    if (!"GET".equals(exchange.getRequestMethod())) {
+      sendJson(exchange, 405, "{\"error\":\"GET required\"}");
+      return;
+    }
+    String query = exchange.getRequestURI().getRawQuery();
+    String name = "";
+    if (query != null) {
+      for (String part : query.split("&")) {
+        if (part.startsWith("name=")) name = java.net.URLDecoder.decode(part.substring(5), StandardCharsets.UTF_8);
+      }
+    }
+    if (!name.matches("[A-Za-z0-9+_.,-]{1,128}")) {
+      sendJson(exchange, 400, "{\"error\":\"Invalid font name.\"}");
+      return;
+    }
+    try {
+      byte[] font = installedFontFile(name);
+      if (font == null) {
+        sendJson(exchange, 404, "{\"error\":\"Font not installed.\"}");
+        return;
+      }
+      exchange.getResponseHeaders().set("Content-Type", "font/ttf");
+      exchange.getResponseHeaders().set("Cache-Control", "private, max-age=3600");
+      exchange.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
+      exchange.sendResponseHeaders(200, font.length);
+      try (OutputStream response = exchange.getResponseBody()) {
+        response.write(font);
+      }
+    } catch (Exception error) {
+      sendFailure(exchange, error, "Could not read the installed font.");
     }
   }
 
@@ -2593,6 +2630,13 @@ public class DocuflexPdfServer {
       for (int pageIndex = 0; pageIndex < document.getNumberOfPages(); pageIndex += 1) {
         collectEmbeddedFonts(document.getPage(pageIndex).getResources(), result, seenFonts, seenForms);
       }
+      // What each font draws lets the editor find it among pdf2htmlEX's font classes.
+      Map<COSBase, FontCodec> codecs = learnDocumentFontCodecs(document);
+      for (int index = 0; index < result.fonts.size(); index += 1) {
+        EmbeddedFont font = result.fonts.get(index);
+        FontCodec codec = codecs.get(font.cos());
+        result.fonts.set(index, font.withCharacters(codec == null ? "" : codec.characters()));
+      }
     }
 
     return result;
@@ -2664,7 +2708,7 @@ public class DocuflexPdfServer {
         + "');font-style:" + (descriptor.isItalic() ? "italic" : "normal")
         + ";font-weight:400"
         + ";font-display:block;}";
-    return new EmbeddedFont(pdfJsName, family, cleanName, css);
+    return new EmbeddedFont(pdfJsName, family, cleanName, css, fallbackFace(font).stem(), installedFallbackName(font), sameDesignFallback(font), font.getCOSObject(), "");
   }
 
   private static String cleanFontName(String value) {
@@ -2672,72 +2716,129 @@ public class DocuflexPdfServer {
     return subset >= 0 && subset + 1 < value.length() ? value.substring(subset + 1) : value;
   }
 
+  /**
+   * The document whose text is being rewritten. The token rewriting below only
+   * sees page resources, but stand-in fonts must be embedded into this document.
+   */
+  private static final ThreadLocal<PDDocument> EDIT_DOCUMENT = new ThreadLocal<>();
+
   private static EditResult applyEdits(
       byte[] pdfBytes,
       List<TextEdit> edits,
       List<ImageEdit> imageEdits) throws IOException {
-    EditResult result = new EditResult();
     try (PDDocument document = loadPdf(pdfBytes)) {
-      if (isEditRestricted(document)) {
-        throw new IllegalArgumentException("This PDF is edit protected. Remove the protection to edit its text.");
-      }
-      document.setAllSecurityToBeRemoved(true);
-      for (int editIndex = 0; editIndex < edits.size(); editIndex++) {
-        TextEdit edit = edits.get(editIndex);
-        if (edit.newText.equals(edit.oldText) && !edit.moved && !edit.overlay) {
-          continue;
-        }
-        if (edit.page < 0 || edit.page >= document.getNumberOfPages()) {
-          result.misses.add("Page " + (edit.page + 1) + " is outside the document.");
-          result.missedEditIndices.add(editIndex);
-          continue;
-        }
-        PDPage page = document.getPage(edit.page);
-        if (edit.overlay) {
-          if (overlayEditFallback(document, page, edit)) {
-            result.applied += 1;
-          } else {
-            result.misses.add("Could not place aligned text on page " + (edit.page + 1) + ": " + edit.oldText);
-            result.missedEditIndices.add(editIndex);
-          }
-          continue;
-        }
-        if (edit.moved) {
-          boolean textOnlyMove = edit.oldText.equals(edit.newText);
-          if ((textOnlyMove && movePageTextWithCandidates(document, page, edit))
-              || (!textOnlyMove && moveAndRewritePageText(document, page, edit))) {
-            result.applied += 1;
-          } else {
-            result.misses.add("Could not move text while preserving original styling on page " + (edit.page + 1) + ": " + edit.oldText);
-            result.missedEditIndices.add(editIndex);
-          }
-          continue;
-        }
-        TextEdit effectiveEdit = withoutLeadingListMarker(edit);
-        if (rewritePageWithCandidates(document, page, effectiveEdit)) {
-          result.applied += 1;
-        } else {
-          result.misses.add("Could not find editable text on page " + (edit.page + 1) + ": " + edit.oldText);
-          result.missedEditIndices.add(editIndex);
-        }
-      }
-      for (ImageEdit edit : imageEdits) {
-        if (edit.page < 0 || edit.page >= document.getNumberOfPages()) {
-          result.misses.add("Image page " + (edit.page + 1) + " is outside the document.");
-          continue;
-        }
-        if (rewritePageImage(document, document.getPage(edit.page), edit)) {
-          result.applied += 1;
-        } else {
-          result.misses.add("Could not match the moved image on page " + (edit.page + 1) + ".");
-        }
-      }
-
-      ByteArrayOutputStream output = new ByteArrayOutputStream();
-      document.save(output);
-      result.pdfBytes = output.toByteArray();
-      return result;
+      EDIT_DOCUMENT.set(document);
+      DOCUMENT_CODECS.set(learnDocumentFontCodecs(document));
+      return applyEdits(document, edits, imageEdits);
+    } finally {
+      EDIT_DOCUMENT.remove();
+      DOCUMENT_CODECS.remove();
     }
+  }
+
+  /**
+   * What each font draws anywhere in the original document, by font dictionary.
+   * A character counts as the PDF font's own only when the document draws it
+   * with that font somewhere; the editor learns the same set from the HTML, so
+   * both send every other character to the same fallback.
+   */
+  private static final ThreadLocal<Map<COSBase, FontCodec>> DOCUMENT_CODECS = new ThreadLocal<>();
+
+  private static Map<COSBase, FontCodec> learnDocumentFontCodecs(PDDocument document) {
+    Map<COSBase, FontCodec> learned = new HashMap<>();
+    Set<COSBase> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+    for (PDPage page : document.getPages()) {
+      try {
+        learnStreamFontCodecs(page.getResources(), new PDFStreamParser(page).parse(), learned, visited);
+      } catch (IOException | RuntimeException ignored) {
+        // A page that cannot be parsed simply teaches nothing.
+      }
+    }
+    return learned;
+  }
+
+  private static void learnStreamFontCodecs(
+      PDResources resources,
+      List<Object> tokens,
+      Map<COSBase, FontCodec> learned,
+      Set<COSBase> visited) throws IOException {
+    if (resources == null) return;
+    learnFontCodecs(resources, tokens, false).forEach((font, codec) ->
+        learned.computeIfAbsent(font.getCOSObject(), (key) -> new FontCodec(font)).learnFrom(codec));
+    for (int index = 1; index < tokens.size(); index += 1) {
+      if (!(tokens.get(index) instanceof Operator operator) || !"Do".equals(operator.getName())) continue;
+      if (!(tokens.get(index - 1) instanceof COSName name)) continue;
+      if (resources.getXObject(name) instanceof PDFormXObject form && visited.add(form.getCOSObject())) {
+        PDResources formResources = form.getResources() != null ? form.getResources() : resources;
+        learnStreamFontCodecs(formResources, new PDFStreamParser(form).parse(), learned, visited);
+      }
+    }
+  }
+
+  private static EditResult applyEdits(
+      PDDocument document,
+      List<TextEdit> edits,
+      List<ImageEdit> imageEdits) throws IOException {
+    EditResult result = new EditResult();
+    if (isEditRestricted(document)) {
+      throw new IllegalArgumentException("This PDF is edit protected. Remove the protection to edit its text.");
+    }
+    document.setAllSecurityToBeRemoved(true);
+    for (int editIndex = 0; editIndex < edits.size(); editIndex++) {
+      TextEdit edit = edits.get(editIndex);
+      if (edit.newText.equals(edit.oldText) && !edit.moved && !edit.overlay) {
+        continue;
+      }
+      if (edit.page < 0 || edit.page >= document.getNumberOfPages()) {
+        result.misses.add("Page " + (edit.page + 1) + " is outside the document.");
+        result.missedEditIndices.add(editIndex);
+        continue;
+      }
+      PDPage page = document.getPage(edit.page);
+      if (edit.overlay) {
+        if (overlayEditFallback(document, page, edit)) {
+          result.applied += 1;
+        } else {
+          result.misses.add("Could not place aligned text on page " + (edit.page + 1) + ": " + edit.oldText);
+          result.missedEditIndices.add(editIndex);
+        }
+        continue;
+      }
+      if (edit.moved) {
+        boolean textOnlyMove = edit.oldText.equals(edit.newText);
+        if ((textOnlyMove && movePageTextWithCandidates(document, page, edit))
+            || (!textOnlyMove && moveAndRewritePageText(document, page, edit))) {
+          result.applied += 1;
+        } else {
+          result.misses.add("Could not move text while preserving original styling on page " + (edit.page + 1) + ": " + edit.oldText);
+          result.missedEditIndices.add(editIndex);
+        }
+        continue;
+      }
+      TextEdit effectiveEdit = withoutLeadingListMarker(edit);
+      if (rewritePageWithCandidates(document, page, effectiveEdit)) {
+        result.applied += 1;
+      } else {
+        result.misses.add("Could not find editable text on page " + (edit.page + 1) + ": " + edit.oldText);
+        result.missedEditIndices.add(editIndex);
+      }
+    }
+    for (ImageEdit edit : imageEdits) {
+      if (edit.page < 0 || edit.page >= document.getNumberOfPages()) {
+        result.misses.add("Image page " + (edit.page + 1) + " is outside the document.");
+        continue;
+      }
+      if (rewritePageImage(document, document.getPage(edit.page), edit)) {
+        result.applied += 1;
+      } else {
+        result.misses.add("Could not match the moved image on page " + (edit.page + 1) + ".");
+      }
+    }
+
+    ByteArrayOutputStream output = new ByteArrayOutputStream();
+    document.save(output);
+    result.pdfBytes = output.toByteArray();
+    return result;
   }
 
   private static TextEdit withoutLeadingListMarker(TextEdit edit) {
@@ -2770,7 +2871,7 @@ public class DocuflexPdfServer {
         edit.italicChanged,
         edit.underline,
         edit.strikethrough,
-        edit.letterSpacing);
+        edit.letterSpacing, -1);
   }
 
   private static boolean rewritePageImage(
@@ -3145,7 +3246,7 @@ public class DocuflexPdfServer {
         false,
         false,
         false,
-        0));
+        0, -1));
     if (!removedOriginal) {
       return false;
     }
@@ -3159,22 +3260,35 @@ public class DocuflexPdfServer {
     float width = Math.max(1f, right - left);
     float height = Math.max(1f, top - bottom);
     float fontSize = overlayFontSize(edit, pageHeight, height);
-    String text = sanitizeWinAnsi(edit.newText);
-    if (text.isBlank()) {
-      text = " ";
-    }
+    String text = edit.newText.isBlank() ? " " : edit.newText;
 
     Standard14Fonts.FontName fontName = edit.bold
         ? (edit.italic ? Standard14Fonts.FontName.HELVETICA_BOLD_OBLIQUE : Standard14Fonts.FontName.HELVETICA_BOLD)
         : (edit.italic ? Standard14Fonts.FontName.HELVETICA_OBLIQUE : Standard14Fonts.FontName.HELVETICA);
-    PDFont font = !edit.fontChanged && originalStyle.font != null && canEncodeWithFont(text, originalStyle.font)
-        ? originalStyle.font
-        : findPageFont(page, edit.fontName, text, edit.bold, edit.italic);
-    if (font == null) {
-      font = overlayFont(document, edit, fontName);
+    List<FontRun> runs;
+    if (!edit.fontChanged && originalStyle.font != null) {
+      // Keep the original font and draw only the characters it lacks with the
+      // stand-in, exactly as the editor shows them.
+      runs = fallbackRuns(originalStyle.font, text);
+    } else {
+      PDFont pageFont = findPageFont(page, edit.fontName, text, edit.bold, edit.italic);
+      if (!edit.fontChanged && pageFont != null) {
+        // The same PDF font found by name: same fallbacks as above, never Helvetica.
+        runs = fallbackRuns(pageFont, text);
+      } else {
+        PDFont font = pageFont != null ? pageFont : overlayFont(document, edit, fontName);
+        String encodable = canEncodeWithFont(text, font) ? text : sanitizeWinAnsi(text);
+        runs = List.of(new FontRun(encodable, font));
+      }
     }
-    left = overlayAlignedLeft(edit, font, fontSize, pageWidth, left, right, text);
-    float baseline = bottom + Math.max(1f, (height - fontSize) * 0.5f);
+    PDFont font = runs.stream().map(FontRun::font).filter(java.util.Objects::nonNull).findFirst()
+        .orElse(originalStyle.font != null ? originalStyle.font : runs.get(0).font());
+    left = overlayAlignedLeft(edit, runsWidth(runs, fontSize), fontSize, pageWidth, left, right);
+    // The baseline the editor showed (a fraction of the page from the top),
+    // so the saved line sits exactly where it was edited.
+    float baseline = edit.baseline() >= 0 && edit.baseline() <= 1
+        ? (float) (pageHeight * (1 - edit.baseline()))
+        : bottom + Math.max(1f, (height - fontSize) * 0.5f);
     float characterSpacing = edit.pageSize.size() >= 2 && edit.pageSize.get(1) > 0
         ? (float) (edit.letterSpacing * pageHeight / edit.pageSize.get(1))
         : (float) edit.letterSpacing;
@@ -3185,17 +3299,31 @@ public class DocuflexPdfServer {
       setOverlayColor(stream, edit.color);
       stream.setFont(font, fontSize);
       stream.setCharacterSpacing(characterSpacing);
+      if (edit.bold && !fontTraits(font).bold()) {
+        // Bold on a regular font: thicken the same glyphs, as the editor's
+        // synthetic bold does, instead of switching to another typeface.
+        setOverlayStrokeColor(stream, edit.color);
+        stream.setRenderingMode(org.apache.pdfbox.pdmodel.graphics.state.RenderingMode.FILL_STROKE);
+        stream.setLineWidth(syntheticBoldStroke(fontSize));
+      }
       if (edit.italic && !fontIsItalic(font)) {
         stream.setTextMatrix(new Matrix(1, 0, 0.22f, 1, left, baseline));
       } else {
         stream.newLineAtOffset(left, baseline);
       }
-      stream.showText(text);
+      for (FontRun run : runs) {
+        if (run.font() == null) {
+          stream.showTextWithPositioning(new Object[] {-1000f * SPACE_GAP_EM * run.text().length()});
+          continue;
+        }
+        stream.setFont(run.font(), fontSize);
+        stream.showText(run.text());
+      }
       stream.endText();
       if (edit.underline || edit.strikethrough) {
         setOverlayStrokeColor(stream, edit.color);
         stream.setLineWidth(Math.max(0.6f, fontSize * 0.055f));
-        float textWidth = pdfTextWidth(font, text, fontSize)
+        float textWidth = runsWidth(runs, fontSize)
             + Math.max(0, text.length() - 1) * characterSpacing;
         if (edit.underline) {
           stream.moveTo(left, baseline - fontSize * 0.12f);
@@ -3212,14 +3340,139 @@ public class DocuflexPdfServer {
     return true;
   }
 
+  /** Splits text into runs of the original font and its stand-in for the characters it lacks. */
+  private static List<FontRun> fallbackRuns(PDFont original, String text) {
+    boolean whole = !sameDesignFallback(original) && needsWholeFallback(text, (glyph) -> ownGlyph(original, glyph));
+    if (!whole && canEncodeWithFont(text, original) && text.codePoints().allMatch((codePoint) -> ownGlyph(original, new String(Character.toChars(codePoint))))) {
+      return List.of(new FontRun(text, original));
+    }
+    List<FontRun> runs = new ArrayList<>();
+    StringBuilder current = new StringBuilder();
+    PDFont currentFont = null;
+    for (int offset = 0; offset < text.length();) {
+      int codePoint = text.codePointAt(offset);
+      offset += Character.charCount(codePoint);
+      String glyph = new String(Character.toChars(codePoint));
+      boolean own = ownGlyph(original, glyph) && canEncodeWithFont(glyph, original)
+          && (!whole || !drawnByFallback(original, glyph));
+      // A space the font lacks becomes a plain gap (a null-font run).
+      boolean gap = !own && !whole && isSpace(glyph);
+      PDFont font = own ? original : gap ? null : glyphFallbackFont(original, glyph);
+      String drawn = own ? glyph : gap ? " " : fallbackGlyph(glyph, font);
+      if (drawn.isEmpty()) continue;
+      if (current.length() > 0 && font != currentFont) {
+        runs.add(new FontRun(current.toString(), currentFont));
+        current.setLength(0);
+      }
+      current.append(drawn);
+      currentFont = font;
+    }
+    if (current.length() > 0) runs.add(new FontRun(current.toString(), currentFont));
+    return runs.isEmpty() ? List.of(new FontRun(" ", original)) : runs;
+  }
+
+  /**
+   * Whether the PDF draws this character with this font anywhere in the
+   * document (what the editor treats as the font's own); fonts the document
+   * never draws with fall back to whether the font can encode it.
+   */
+  private static boolean ownGlyph(PDFont font, String glyph) {
+    Map<COSBase, FontCodec> document = DOCUMENT_CODECS.get();
+    FontCodec learned = document == null || font == null ? null : document.get(font.getCOSObject());
+    return learned != null ? learned.encode(glyph) != null : canEncodeWithFont(glyph, font);
+  }
+
+  /** Whether the fallback for this font has the character (else the font's own glyph stays). */
+  private static boolean drawnByFallback(PDFont original, String glyph) {
+    return canEncodeWithFont(glyph, glyphFallbackFont(original, glyph));
+  }
+
+  /**
+   * A line that needs a character its font lacks is drawn in the fallback as a
+   * whole, so it reads as one typeface instead of a few odd letters. A space
+   * counts too (TeX fonts have none), exactly as in the editor.
+   */
+  /**
+   * Whether the stand-in is the same typeface: the font itself installed, or a
+   * bundled cut of its design (Latin Modern for TeX, metric twins). Then only
+   * the missing letters use it and every other letter keeps the PDF's glyph,
+   * like a browser does; a different typeface takes over the whole line.
+   */
+  private static boolean sameDesignFallback(PDFont font) {
+    if (font == null) return false;
+    return SAME_DESIGN.computeIfAbsent(font.getCOSObject(), (key) ->
+        installedTrueType(cleanFontName(fontPostScriptName(font))) != null || fontTraits(font).knownFamily() != null);
+  }
+
+  private static final Map<COSBase, Boolean> SAME_DESIGN = Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+  private static boolean needsWholeFallback(String text, java.util.function.Predicate<String> own) {
+    return text.codePoints()
+        .mapToObj((codePoint) -> new String(Character.toChars(codePoint)))
+        .anyMatch((glyph) -> !isSpace(glyph) && !own.test(glyph));
+  }
+
+  /**
+   * A space the font has no glyph for (TeX fonts have none) is drawn as a gap
+   * of a third of an em, TeX's own word space; the editor shows the same.
+   */
+  private static final float SPACE_GAP_EM = 1f / 3f;
+
+  private static boolean isSpace(String glyph) {
+    return " ".equals(glyph) || "\u00a0".equals(glyph);
+  }
+
+  private static List<Object> spaceGapTokens(int count) {
+    COSArray positioning = new COSArray();
+    positioning.add(new COSFloat(-1000f * SPACE_GAP_EM * count));
+    return List.of(positioning, Operator.getOperator("TJ"));
+  }
+
+  /**
+   * Text written straight into content-stream tokens bypasses setFont and
+   * showText, which normally queue a subset font for embedding and tell it
+   * which glyphs to keep. Without this the font would not be embedded at all.
+   */
+  private static void registerSubsetGlyphs(PDFont font, String text) {
+    if (!(font instanceof PDType0Font type0) || !type0.willBeSubset()) return;
+    PDDocument document = EDIT_DOCUMENT.get();
+    if (document != null) {
+      // setFont is the public way to queue a font for subsetting; this
+      // appearance stream is never attached to anything, so it is not saved.
+      PDAppearanceStream scratch = new PDAppearanceStream(document);
+      scratch.setResources(new PDResources());
+      try (PDPageContentStream queue = new PDPageContentStream(document, scratch)) {
+        queue.setFont(type0, 1);
+      } catch (IOException | RuntimeException ignored) {
+        // The font then stays unembedded; the text still exports.
+      }
+    }
+    text.codePoints().forEach(type0::addToSubset);
+  }
+
+  /** Chrome's (Skia's) fake-bold outline growth: 1/24 of the size at 9 and below, 1/32 from 36. */
+  private static float syntheticBoldStroke(float fontSize) {
+    float t = Math.max(0f, Math.min(1f, (fontSize - 9f) / 27f));
+    return fontSize * (1f / 24f + (1f / 32f - 1f / 24f) * t);
+  }
+
+  private static float runsWidth(List<FontRun> runs, float fontSize) {
+    float width = 0;
+    for (FontRun run : runs) {
+      width += run.font() == null
+          ? fontSize * SPACE_GAP_EM * run.text().length()
+          : pdfTextWidth(run.font(), run.text(), fontSize);
+    }
+    return width;
+  }
+
   private static float overlayAlignedLeft(
       TextEdit edit,
-      PDFont font,
+      float measuredWidth,
       float fontSize,
       float pageWidth,
       float fallbackLeft,
-      float fallbackRight,
-      String text) throws IOException {
+      float fallbackRight) throws IOException {
     String alignment = edit.alignment == null ? "" : edit.alignment.toLowerCase();
     if (!edit.overlay || edit.alignRect.size() < 4 || (!"center".equals(alignment) && !"right".equals(alignment))) {
       return fallbackLeft;
@@ -3237,7 +3490,7 @@ public class DocuflexPdfServer {
       return fallbackLeft;
     }
 
-    float textWidth = pdfTextWidth(font, text, fontSize);
+    float textWidth = measuredWidth;
     if (textWidth <= 0) {
       textWidth = Math.max(1f, fallbackRight - fallbackLeft);
     }
@@ -3336,6 +3589,15 @@ public class DocuflexPdfServer {
         return PDType0Font.load(document, fontFile);
       } catch (IOException | IllegalArgumentException ignored) {
         // Fall through to the built-in PDF font when the local font cannot be embedded.
+      }
+    }
+    // Any other family the user picked, as installed on this computer.
+    org.apache.fontbox.ttf.TrueTypeFont installed = installedTrueType(installedFamilyFont(edit.fontName, edit.bold, edit.italic));
+    if (installed != null) {
+      try {
+        return PDType0Font.load(document, installed, true);
+      } catch (IOException | IllegalArgumentException ignored) {
+        // Fall through to the built-in PDF font.
       }
     }
     return new PDType1Font(fallback);
@@ -3510,7 +3772,7 @@ public class DocuflexPdfServer {
           edit.italicChanged,
           edit.underline,
           edit.strikethrough,
-          edit.letterSpacing))) {
+          edit.letterSpacing, -1))) {
         return true;
       }
     }
@@ -3542,7 +3804,7 @@ public class DocuflexPdfServer {
         edit.italicChanged,
         edit.underline,
         edit.strikethrough,
-        edit.letterSpacing);
+        edit.letterSpacing, -1);
     if (!movePageTextWithCandidates(document, page, moveOnlyEdit)) {
       return false;
     }
@@ -3571,7 +3833,7 @@ public class DocuflexPdfServer {
         edit.italicChanged,
         edit.underline,
         edit.strikethrough,
-        edit.letterSpacing);
+        edit.letterSpacing, -1);
     return rewritePageWithCandidates(document, page, rewriteOnlyEdit);
   }
 
@@ -3607,7 +3869,7 @@ public class DocuflexPdfServer {
           edit.italicChanged,
           edit.underline,
           edit.strikethrough,
-          edit.letterSpacing))) {
+          edit.letterSpacing, -1))) {
         return true;
       }
     }
@@ -3682,25 +3944,81 @@ public class DocuflexPdfServer {
       }
     }
 
-    List<Integer> adjustedPositionOperators = new ArrayList<>();
+    // Shift each run of moved text on its own: "dx dy Td" after the operator
+    // that positions it and "-dx -dy Td" after it. Lines are often placed
+    // relative to the previous line (TeX does this), so changing the
+    // positioning operator itself would drag every following line along.
+    Collections.sort(operatorIndexes);
+    List<int[]> runs = new ArrayList<>();
     for (int operatorIndex : operatorIndexes) {
-      int positionOperator = findNearestTextPositionOperator(tokens, operatorIndex);
+      int[] last = runs.isEmpty() ? null : runs.get(runs.size() - 1);
+      if (last != null && onlyTextStateBetween(tokens, last[1], operatorIndex, operatorIndexes)) {
+        last[1] = operatorIndex;
+      } else {
+        runs.add(new int[] {operatorIndex, operatorIndex});
+      }
+    }
+    Map<Integer, List<Object>> insertions = new java.util.TreeMap<>(Collections.reverseOrder());
+    for (int[] run : runs) {
+      int positionOperator = findNearestTextPositionOperator(tokens, run[0], operatorIndexes);
       if (positionOperator < 0) {
         return false;
       }
-      if (!adjustedPositionOperators.contains(positionOperator)) {
-        adjustTextPositionOperator(tokens, positionOperator, dx, dy);
-        adjustedPositionOperators.add(positionOperator);
-      }
+      float[] scale = textMatrixScale(tokens, positionOperator);
+      float tdx = dx / scale[0];
+      float tdy = dy / scale[1];
+      insertions.computeIfAbsent(positionOperator + 1, (key) -> new ArrayList<>())
+          .addAll(List.of(new COSFloat(tdx), new COSFloat(tdy), Operator.getOperator("Td")));
+      insertions.computeIfAbsent(run[1] + 1, (key) -> new ArrayList<>())
+          .addAll(0, List.of(new COSFloat(-tdx), new COSFloat(-tdy), Operator.getOperator("Td")));
     }
-    promoteTextBlocksToFront(tokens, affected, edit);
-    return !adjustedPositionOperators.isEmpty();
+    List<Integer> shifted = new ArrayList<>();
+    for (TextUnit unit : affected) {
+      int offset = 0;
+      for (Map.Entry<Integer, List<Object>> insertion : insertions.entrySet()) {
+        if (insertion.getKey() <= unit.operatorIndex) offset += insertion.getValue().size();
+      }
+      shifted.add(unit.operatorIndex + offset);
+    }
+    insertions.forEach((index, inserted) -> tokens.addAll(index, inserted));
+    promoteTextBlocksToFront(tokens, affected, shifted, edit);
+    return !runs.isEmpty();
   }
 
-  private static void promoteTextBlocksToFront(List<Object> tokens, List<TextUnit> units, TextEdit edit) {
+  /** Whether only text-state operators (font, spacing, …) lie between two moved text operators. */
+  private static boolean onlyTextStateBetween(List<Object> tokens, int from, int to, List<Integer> movedOperators) {
+    for (int index = from + 1; index < to; index += 1) {
+      if (!(tokens.get(index) instanceof Operator operator)) continue;
+      String name = operator.getName();
+      boolean shows = "Tj".equals(name) || "TJ".equals(name);
+      if (shows && movedOperators.contains(index)) continue;
+      if (shows || "'".equals(name) || "\"".equals(name) || "T*".equals(name) || "Td".equals(name)
+          || "TD".equals(name) || "Tm".equals(name) || "BT".equals(name) || "ET".equals(name)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** The text matrix's horizontal and vertical scale at a positioning operator (Td moves in text space). */
+  private static float[] textMatrixScale(List<Object> tokens, int positionOperator) {
+    for (int index = positionOperator; index >= 0; index -= 1) {
+      if (!(tokens.get(index) instanceof Operator operator)) continue;
+      if ("BT".equals(operator.getName())) break;
+      if ("Tm".equals(operator.getName()) && index >= 6
+          && tokens.get(index - 6) instanceof COSNumber a && tokens.get(index - 3) instanceof COSNumber d
+          && Math.abs(a.floatValue()) > 1e-4f && Math.abs(d.floatValue()) > 1e-4f) {
+        return new float[] {a.floatValue(), d.floatValue()};
+      }
+    }
+    return new float[] {1f, 1f};
+  }
+
+  private static void promoteTextBlocksToFront(List<Object> tokens, List<TextUnit> units, List<Integer> operatorIndexes, TextEdit edit) {
     List<TextBlockMove> moves = new ArrayList<>();
-    for (TextUnit unit : units) {
-      TextBlockRange range = findTextBlockRange(tokens, unit.operatorIndex);
+    for (int unitIndex = 0; unitIndex < units.size(); unitIndex += 1) {
+      TextUnit unit = units.get(unitIndex);
+      TextBlockRange range = findTextBlockRange(tokens, operatorIndexes.get(unitIndex));
       if (range != null) {
         moves.add(new TextBlockMove(range, unit.fontName, unit.fontSize, unit.renderingMode));
       }
@@ -3925,7 +4243,12 @@ public class DocuflexPdfServer {
     tokens.add(Operator.getOperator("rg"));
   }
 
-  private static int findNearestTextPositionOperator(List<Object> tokens, int textOperatorIndex) {
+  /**
+   * The position operator that places a text operator. Runs of the moved text
+   * itself may sit in between (an edited line is drawn as one run per font),
+   * since they share that position; any other text stops the search.
+   */
+  private static int findNearestTextPositionOperator(List<Object> tokens, int textOperatorIndex, List<Integer> movedOperators) {
     for (int index = textOperatorIndex - 1; index >= 0; index -= 1) {
       Object token = tokens.get(index);
       if (!(token instanceof Operator operator)) {
@@ -3936,34 +4259,15 @@ public class DocuflexPdfServer {
       if ("Tm".equals(name) || "Td".equals(name) || "TD".equals(name)) {
         return index;
       }
-      if ("Tj".equals(name) || "TJ".equals(name) || "'".equals(name) || "\"".equals(name) || "BT".equals(name) || "ET".equals(name)) {
+      boolean shows = "Tj".equals(name) || "TJ".equals(name);
+      if (shows && movedOperators.contains(index)) {
+        continue;
+      }
+      if (shows || "'".equals(name) || "\"".equals(name) || "BT".equals(name) || "ET".equals(name)) {
         break;
       }
     }
     return -1;
-  }
-
-  private static void adjustTextPositionOperator(List<Object> tokens, int operatorIndex, float dx, float dy) {
-    Object token = tokens.get(operatorIndex);
-    if (!(token instanceof Operator operator)) {
-      return;
-    }
-
-    String name = operator.getName();
-    if ("Tm".equals(name) && operatorIndex >= 6) {
-      adjustNumberToken(tokens, operatorIndex - 2, dx);
-      adjustNumberToken(tokens, operatorIndex - 1, dy);
-    } else if (("Td".equals(name) || "TD".equals(name)) && operatorIndex >= 2) {
-      adjustNumberToken(tokens, operatorIndex - 2, dx);
-      adjustNumberToken(tokens, operatorIndex - 1, dy);
-    }
-  }
-
-  private static void adjustNumberToken(List<Object> tokens, int index, float delta) {
-    if (index < 0 || index >= tokens.size() || !(tokens.get(index) instanceof COSNumber number)) {
-      return;
-    }
-    tokens.set(index, new COSFloat(number.floatValue() + delta));
   }
 
   private static boolean rewritePage(PDDocument document, PDPage page, TextEdit edit) throws IOException {
@@ -4409,6 +4713,10 @@ public class DocuflexPdfServer {
   }
 
   private static Map<PDFont, FontCodec> learnFontCodecs(PDResources resources, List<Object> tokens) throws IOException {
+    return learnFontCodecs(resources, tokens, true);
+  }
+
+  private static Map<PDFont, FontCodec> learnFontCodecs(PDResources resources, List<Object> tokens, boolean wholeDocument) throws IOException {
     Map<PDFont, FontCodec> codecs = new IdentityHashMap<>();
     PDFont currentFont = null;
 
@@ -4444,6 +4752,13 @@ public class DocuflexPdfServer {
       }
     }
 
+    Map<COSBase, FontCodec> document = wholeDocument ? DOCUMENT_CODECS.get() : null;
+    if (document != null) {
+      codecs.forEach((font, codec) -> {
+        FontCodec learned = document.get(font.getCOSObject());
+        if (learned != null) codec.learnFrom(learned);
+      });
+    }
     return codecs;
   }
 
@@ -4644,7 +4959,7 @@ public class DocuflexPdfServer {
     if (!"Tj".equals(first.operatorName) && !"TJ".equals(first.operatorName)) {
       return false;
     }
-    List<Object> mixedTokens = mixedTextTokensForUnits(resources, replacement, affected, codecs, edit.bold);
+    List<Object> mixedTokens = mixedTextTokensForUnits(resources, replacement, affected, codecs);
     if (mixedTokens.isEmpty()) {
       return false;
     }
@@ -4677,7 +4992,7 @@ public class DocuflexPdfServer {
       return false;
     }
 
-    List<Object> mixedTokens = mixedTextTokens(resources, replacement, font, fontName, fontSize, codec, edit.bold);
+    List<Object> mixedTokens = mixedTextTokens(resources, replacement, font, fontName, fontSize, codec);
     if (mixedTokens.isEmpty()) {
       return false;
     }
@@ -4693,29 +5008,35 @@ public class DocuflexPdfServer {
       PDFont originalFont,
       COSName originalFontName,
       float originalFontSize,
-      FontCodec originalCodec,
-      boolean fallbackBold) {
+      FontCodec originalCodec) {
     if (resources == null || originalFont == null || originalFontName == null || originalFontSize <= 0) {
       return List.of();
     }
 
-    PDFont fallbackFont = standardFallbackFont(fontLooksBold(originalFont, fallbackBold));
-    COSName fallbackFontName = resources.add(fallbackFont);
-    List<TextRun> runs = mixedTextRuns(text, originalFont, originalCodec, fallbackFont);
-    if (runs.isEmpty()) {
-      return List.of();
-    }
-
+    Map<PDFont, COSName> fontNames = new IdentityHashMap<>();
+    fontNames.put(originalFont, originalFontName);
     List<Object> mixedTokens = new ArrayList<>();
     COSName activeFontName = null;
-    for (TextRun run : runs) {
-      COSName runFontName = run.fallback ? fallbackFontName : originalFontName;
-      PDFont runFont = run.fallback ? fallbackFont : originalFont;
-      FontCodec runCodec = run.fallback ? null : originalCodec;
-      EncodedText encoded = encodeString(run.text, runFont, runCodec);
+    boolean whole = !sameDesignFallback(originalFont) && needsWholeFallback(text, (glyph) -> encodeString(glyph, originalFont, originalCodec) != null);
+    for (int offset = 0; offset < text.length();) {
+      int codePoint = text.codePointAt(offset);
+      offset += Character.charCount(codePoint);
+      String glyph = new String(Character.toChars(codePoint));
+      boolean own = encodeString(glyph, originalFont, originalCodec) != null
+          && (!whole || !drawnByFallback(originalFont, glyph));
+      if (!own && !whole && isSpace(glyph)) {
+        mixedTokens.addAll(spaceGapTokens(1));
+        continue;
+      }
+      PDFont runFont = own ? originalFont : glyphFallbackFont(originalFont, glyph);
+      String runGlyph = own ? glyph : fallbackGlyph(glyph, runFont);
+      if (runGlyph.isEmpty()) continue;
+      EncodedText encoded = encodeString(runGlyph, runFont, own ? originalCodec : null);
       if (encoded == null) {
         return List.of();
       }
+      if (!own) registerSubsetGlyphs(runFont, runGlyph);
+      COSName runFontName = fontNames.computeIfAbsent(runFont, resources::add);
       if (!runFontName.equals(activeFontName)) {
         mixedTokens.add(runFontName);
         mixedTokens.add(new COSFloat(originalFontSize));
@@ -4737,17 +5058,28 @@ public class DocuflexPdfServer {
       PDResources resources,
       String text,
       List<TextUnit> styleUnits,
-      Map<PDFont, FontCodec> codecs,
-      boolean fallbackBold) {
+      Map<PDFont, FontCodec> codecs) {
     if (resources == null || styleUnits.isEmpty()) {
       return List.of();
     }
 
-    Map<Boolean, PDFont> fallbackFonts = new LinkedHashMap<>();
-    Map<Boolean, COSName> fallbackFontNames = new LinkedHashMap<>();
+    Map<PDFont, COSName> fallbackFontNames = new IdentityHashMap<>();
     List<Object> mixedTokens = new ArrayList<>();
     COSName activeFontName = null;
     float activeFontSize = -1f;
+
+    // Fonts that lack a character of this line draw all of their part of it.
+    Set<PDFont> wholeFallback = Collections.newSetFromMap(new IdentityHashMap<>());
+    for (int offset = 0; offset < text.length();) {
+      TextUnit styleUnit = styleUnitForOffset(styleUnits, offset);
+      int codePoint = text.codePointAt(offset);
+      offset += Character.charCount(codePoint);
+      if (styleUnit.font == null) continue;
+      String glyph = new String(Character.toChars(codePoint));
+      if (!isSpace(glyph) && !sameDesignFallback(styleUnit.font) && encodeString(glyph, styleUnit.font, codecs.get(styleUnit.font)) == null) {
+        wholeFallback.add(styleUnit.font);
+      }
+    }
 
     for (int offset = 0; offset < text.length();) {
       TextUnit styleUnit = styleUnitForOffset(styleUnits, offset);
@@ -4761,15 +5093,21 @@ public class DocuflexPdfServer {
       int codePoint = text.codePointAt(offset);
       String glyph = new String(Character.toChars(codePoint));
       FontCodec codec = codecs.get(styleUnit.font);
-      boolean useFallback = encodeString(glyph, styleUnit.font, codec) == null;
+      boolean missing = encodeString(glyph, styleUnit.font, codec) == null;
+      if (missing && isSpace(glyph) && !wholeFallback.contains(styleUnit.font)) {
+        mixedTokens.addAll(spaceGapTokens(1));
+        offset += Character.charCount(codePoint);
+        continue;
+      }
+      boolean useFallback = missing
+          || wholeFallback.contains(styleUnit.font) && drawnByFallback(styleUnit.font, glyph);
       PDFont runFont = styleUnit.font;
       COSName runFontName = styleUnit.fontName;
       FontCodec runCodec = codec;
       String runGlyph = glyph;
       if (useFallback) {
-        boolean bold = fontLooksBold(styleUnit.font, fallbackBold);
-        PDFont fallbackFont = fallbackFonts.computeIfAbsent(bold, DocuflexPdfServer::standardFallbackFont);
-        runFontName = fallbackFontNames.computeIfAbsent(bold, (key) -> resources.add(fallbackFont));
+        PDFont fallbackFont = glyphFallbackFont(styleUnit.font, glyph);
+        runFontName = fallbackFontNames.computeIfAbsent(fallbackFont, resources::add);
         runFont = fallbackFont;
         runCodec = null;
         runGlyph = fallbackGlyph(glyph, fallbackFont);
@@ -4783,6 +5121,7 @@ public class DocuflexPdfServer {
       if (encoded == null) {
         return List.of();
       }
+      if (useFallback) registerSubsetGlyphs(runFont, runGlyph);
       if (!runFontName.equals(activeFontName) || styleUnit.fontSize != activeFontSize) {
         mixedTokens.add(runFontName);
         mixedTokens.add(new COSFloat(styleUnit.fontSize));
@@ -4824,6 +5163,373 @@ public class DocuflexPdfServer {
         : Standard14Fonts.FontName.HELVETICA);
   }
 
+  /** A bundled stand-in font (backend/fonts/fallback) in one of its four styles. */
+  private record FallbackFace(String family, boolean bold, boolean italic) {
+    String stem() {
+      return family + "-" + (bold && italic ? "BoldItalic" : bold ? "Bold" : italic ? "Italic" : "Regular");
+    }
+  }
+
+  private enum FontKind { SERIF, SANS, MONO }
+
+  /**
+   * What a PDF font looks like: its kind, weight and slant, read from its name,
+   * its descriptor and its embedded file (OS/2 class and PANOSE), plus a bundled
+   * family of the same design when there is one (metric-compatible stand-ins,
+   * or Latin Modern for TeX's Computer Modern).
+   */
+  private record FontTraits(FontKind kind, boolean bold, boolean italic, String knownFamily) {}
+
+  /** TeX font names: cmr10, cmbx12, sfrm1095, ecti1000, cmunss, lmroman10-bold, … */
+  private static final java.util.regex.Pattern TEX_FONT = java.util.regex.Pattern.compile(
+      "^(?:cmun([a-z]*)|cm([a-z]{1,6})\\d{1,2}|(?:sf|ec|tc)([a-z]{2,4})\\d{3,4}|lm(roman|sans|mono|math)[a-z]*\\d*[a-z]*|latinmodern(roman|sans|mono|math)[a-z]*)$");
+
+  /**
+   * TeX fonts come in cuts drawn for one size (cmr8, sfbx2074 = 20.74 pt): small
+   * sizes wider and sturdier, large ones narrower. The closest bundled Latin
+   * Modern Roman cut for that style, as a family suffix ("" for the 10 pt one).
+   */
+  private static String texOpticalSize(String name, boolean bold, boolean italic) {
+    java.util.regex.Matcher digits = java.util.regex.Pattern.compile("(\\d+)").matcher(name);
+    if (!digits.find()) return "";
+    String number = digits.group(1);
+    double size = number.length() >= 3 ? Integer.parseInt(number) / 100.0 : Integer.parseInt(number);
+    int[] cuts = bold && italic ? new int[] {10} : bold || italic ? new int[] {8, 10, 12} : new int[] {8, 10, 12, 17};
+    int best = 10;
+    for (int cut : cuts) {
+      if (Math.abs(Math.log(size / cut)) < Math.abs(Math.log(size / best)) - 1e-9) best = cut;
+    }
+    return best == 10 ? "" : String.valueOf(best);
+  }
+
+  /**
+   * Only the font itself decides, not a line's bold flag: the editor picks the
+   * stand-in per font, and the export must pick the same one.
+   */
+  private static FontTraits fontTraits(PDFont font) {
+    PDFontDescriptor descriptor = font == null ? null : font.getFontDescriptor();
+    String name = normalizeFontName(fontPostScriptName(font));
+    boolean italic = fontIsItalic(font) || descriptor != null && Math.abs(descriptor.getItalicAngle()) > 1f;
+    boolean bold = fontLooksBold(font, false) || descriptor != null && descriptor.getFontWeight() >= 600;
+
+    // A line edited before carries our bundled cut; it stands in for itself.
+    java.util.regex.Matcher own = java.util.regex.Pattern
+        .compile("^docuflexmodern(roman|sans|mono)(\\d*)(regular|bold|italic|bolditalic)?$").matcher(name);
+    if (own.matches()) {
+      String style = own.group(3) == null ? "regular" : own.group(3);
+      FontKind kind = own.group(1).equals("mono") ? FontKind.MONO : own.group(1).equals("sans") ? FontKind.SANS : FontKind.SERIF;
+      String family = "DocuflexModern" + Character.toUpperCase(own.group(1).charAt(0)) + own.group(1).substring(1) + own.group(2);
+      return new FontTraits(kind, style.contains("bold"), style.contains("italic"), family);
+    }
+
+    java.util.regex.Matcher tex = TEX_FONT.matcher(name);
+    if (tex.matches()) {
+      String code = "";
+      for (int group = 1; group <= tex.groupCount(); group += 1) {
+        if (tex.group(group) != null) code = tex.group(group);
+      }
+      String styled = name.substring(Math.max(0, name.indexOf(code)));
+      FontKind kind = code.contains("tt") || code.equals("mono") ? FontKind.MONO
+          : code.contains("ss") || code.equals("sans") ? FontKind.SANS
+          : FontKind.SERIF;
+      bold = bold || code.contains("bx") || code.equals("b") || code.startsWith("mib") || code.startsWith("bsy") || styled.contains("bold") || code.contains("bi");
+      italic = italic || code.matches(".*(ti|it|sl|bi|mi|si).*") || styled.matches(".*(italic|oblique).*");
+      String family = kind == FontKind.MONO ? "DocuflexModernMono" : kind == FontKind.SANS ? "DocuflexModernSans" : "DocuflexModernRoman";
+      if (kind == FontKind.SERIF) family += texOpticalSize(name, bold, italic);
+      return new FontTraits(kind, bold, italic, family);
+    }
+
+    String known = null;
+    if (name.contains("calibri") || name.contains("carlito")) known = "Carlito";
+    else if (name.contains("cambria") || name.contains("caladea")) known = "Caladea";
+    else if (name.matches(".*(courier|cousine|liberationmono).*")) known = "LiberationMono";
+    else if (name.matches(".*(times|tinos|liberationserif).*")) known = "LiberationSerif";
+    else if (name.matches(".*(arial|helvetica|arimo|liberationsans).*")) known = "LiberationSans";
+
+    // The embedded file says more than the descriptor flags, which are often unset.
+    int familyClass = -1;
+    org.apache.pdfbox.pdmodel.font.PDPanoseClassification panose = null;
+    try {
+      org.apache.fontbox.ttf.TrueTypeFont ttf = font instanceof org.apache.pdfbox.pdmodel.font.PDTrueTypeFont trueType ? trueType.getTrueTypeFont()
+          : font instanceof PDType0Font type0 && type0.getDescendantFont() instanceof org.apache.pdfbox.pdmodel.font.PDCIDFontType2 cid ? cid.getTrueTypeFont()
+          : null;
+      org.apache.fontbox.ttf.OS2WindowsMetricsTable os2 = ttf == null ? null : ttf.getOS2Windows();
+      if (os2 != null) {
+        familyClass = os2.getFamilyClass() >> 8;
+        if (os2.getPanose() != null && os2.getPanose().length >= 10) panose = new org.apache.pdfbox.pdmodel.font.PDPanoseClassification(os2.getPanose());
+        bold = bold || os2.getWeightClass() >= 600;
+      }
+    } catch (IOException | RuntimeException ignored) {
+      // A damaged embedded file: decide from the name and descriptor.
+    }
+    if (panose == null && descriptor != null && descriptor.getPanose() != null) panose = descriptor.getPanose().getPanose();
+
+    FontKind kind;
+    if (name.matches(".*(mono|consolas|menlo|monaco|lucidaconsole|andale|typewriter|code).*")
+        || descriptor != null && descriptor.isFixedPitch()
+        || panose != null && panose.getFamilyKind() == 2 && panose.getProportion() == 9) {
+      kind = FontKind.MONO;
+    } else if (name.matches(".*(sans|grotesk|grotesque|gothic|arial|helvetica|verdana|tahoma|segoe|calibri|roboto|inter|geist|frutiger|futura|avenir|univers|myriad|opensans|lato|montserrat|source(sans)?pro).*")) {
+      kind = FontKind.SANS;
+    } else if (name.matches(".*(serif|times|georgia|garamond|palatino|bookantiqua|baskerville|minion|charter|didot|bodoni|caslon|century|constantia|cochin|hoefler|cambria|roman|antiqua|book|mincho|song|ming).*")) {
+      kind = FontKind.SERIF;
+    } else if (familyClass >= 1 && familyClass <= 7) {
+      kind = FontKind.SERIF;
+    } else if (familyClass == 8) {
+      kind = FontKind.SANS;
+    } else if (panose != null && panose.getFamilyKind() == 2 && panose.getSerifStyle() >= 2 && panose.getSerifStyle() <= 10) {
+      kind = FontKind.SERIF;
+    } else if (panose != null && panose.getFamilyKind() == 2 && panose.getSerifStyle() >= 11 && panose.getSerifStyle() <= 13) {
+      kind = FontKind.SANS;
+    } else if (descriptor != null && descriptor.isSerif()) {
+      kind = FontKind.SERIF;
+    } else {
+      kind = FontKind.SANS;
+    }
+    if (panose != null && panose.getFamilyKind() == 2 && panose.getWeight() >= 7) bold = true;
+    if (!bold && descriptor != null && descriptor.getFontWeight() <= 0 && descriptor.getStemV() >= 120f) bold = true;
+    return new FontTraits(kind, bold, italic, known);
+  }
+
+  /**
+   * The bundled font that stands in for characters a PDF font lacks (usually a
+   * subset) when neither the font itself nor a close match is installed. The
+   * editor gets the same choice through /fonts and draws with the same files.
+   */
+  private static FallbackFace fallbackFace(PDFont font) {
+    FontTraits traits = fontTraits(font);
+    String family = traits.knownFamily() != null ? traits.knownFamily()
+        : traits.kind() == FontKind.MONO ? "LiberationMono"
+        : traits.kind() == FontKind.SERIF ? "LiberationSerif"
+        : "LiberationSans";
+    return new FallbackFace(family, traits.bold(), traits.italic());
+  }
+
+  /**
+   * The font for a character the PDF's own (subset) font lacks: the same font
+   * installed on this computer when it has the character, otherwise the bundled
+   * stand-in. The editor resolves characters in the same order, so both match.
+   */
+  private static PDFont glyphFallbackFont(PDFont original, String glyph) {
+    PDFont installed = installedFontFor(original);
+    if (installed != null && canEncodeWithFont(glyph, installed)) return installed;
+    return matchingFallbackFont(original);
+  }
+
+  /** Whether an installed font may be embedded, per font name; checked once. */
+  private static final Map<String, Boolean> INSTALLED_EMBEDDABLE = new java.util.concurrent.ConcurrentHashMap<>();
+
+  /**
+   * The PDF font's own family installed on this computer (the desktop app runs
+   * on the user's computer), matched by its PostScript name. Substitutes are
+   * not accepted, and neither are fonts whose license forbids embedding.
+   */
+  private static org.apache.fontbox.ttf.TrueTypeFont installedTrueType(String postScriptName) {
+    String name = cleanFontName(postScriptName == null ? "" : postScriptName).trim();
+    if (name.isEmpty() || name.startsWith("DocuflexPdfFont")) return null;
+    try {
+      org.apache.pdfbox.pdmodel.font.FontMapping<org.apache.fontbox.ttf.TrueTypeFont> mapping =
+          org.apache.pdfbox.pdmodel.font.FontMappers.instance().getTrueTypeFont(name, null);
+      if (mapping == null || mapping.isFallback() || mapping.getFont() == null) return null;
+      org.apache.fontbox.ttf.TrueTypeFont ttf = mapping.getFont();
+      boolean embeddable = INSTALLED_EMBEDDABLE.computeIfAbsent(name, (key) -> {
+        try (PDDocument probe = new PDDocument()) {
+          PDType0Font.load(probe, ttf, true);
+          return true;
+        } catch (IOException | RuntimeException error) {
+          return false;
+        }
+      });
+      return embeddable ? ttf : null;
+    } catch (RuntimeException error) {
+      return null;
+    }
+  }
+
+  private static String fontPostScriptName(PDFont font) {
+    if (font == null) return "";
+    PDFontDescriptor descriptor = font.getFontDescriptor();
+    return descriptor != null && descriptor.getFontName() != null ? descriptor.getFontName() : font.getName() == null ? "" : font.getName();
+  }
+
+  /**
+   * The installed font that draws what a PDF font lacks: the same font when it
+   * is installed, otherwise (unless a bundled font has the very same design)
+   * the closest installed one, much as a browser asks the system for the best
+   * match. Null when there is none; the bundled stand-in is used then.
+   */
+  private static String installedFallbackName(PDFont original) {
+    String name = cleanFontName(fontPostScriptName(original));
+    if (installedTrueType(name) != null) return name;
+    FontTraits traits = fontTraits(original);
+    if (traits.knownFamily() != null) return null;
+    return closestInstalledFont(traits);
+  }
+
+  private static final Map<String, java.util.Optional<String>> CLOSEST_INSTALLED = new java.util.concurrent.ConcurrentHashMap<>();
+  private static final String LATIN_SAMPLE = "AZaz09&?äöüßÄÖÜéèçñ";
+
+  /** Familiar faces first among equally good matches, like a browser's defaults. */
+  private static final Map<FontKind, List<String>> PREFERRED_FAMILIES = Map.of(
+      FontKind.SERIF, List.of("timesnewroman", "times", "georgia", "liberationserif", "dejavuserif", "notoserif"),
+      FontKind.SANS, List.of("helvetica", "arial", "helveticaneue", "liberationsans", "dejavusans", "notosans"),
+      FontKind.MONO, List.of("couriernew", "menlo", "courier", "liberationmono", "dejavusansmono", "notosansmono"));
+
+  private static String closestInstalledFont(FontTraits traits) {
+    String key = traits.kind() + "/" + traits.bold() + "/" + traits.italic();
+    return CLOSEST_INSTALLED.computeIfAbsent(key, (ignored) -> java.util.Optional.ofNullable(searchInstalledFonts(traits))).orElse(null);
+  }
+
+  /** The installed face of a family by name ("Georgia", bold → Georgia-Bold), or null. */
+  private static String installedFamilyFont(String family, boolean bold, boolean italic) {
+    String wanted = normalizeFontName(family);
+    if (wanted.isEmpty()) return null;
+    List<? extends org.apache.pdfbox.pdmodel.font.FontInfo> fonts;
+    try {
+      org.apache.pdfbox.pdmodel.font.FontMapper mapper = org.apache.pdfbox.pdmodel.font.FontMappers.instance();
+      java.lang.reflect.Method provider = mapper.getClass().getMethod("getProvider");
+      provider.setAccessible(true);
+      fonts = ((org.apache.pdfbox.pdmodel.font.FontProvider) provider.invoke(mapper)).getFontInfo();
+    } catch (ReflectiveOperationException | RuntimeException error) {
+      return null;
+    }
+    String best = null;
+    double bestScore = Double.MAX_VALUE;
+    for (org.apache.pdfbox.pdmodel.font.FontInfo info : fonts) {
+      String name = info.getPostScriptName();
+      if (info.getFormat() != org.apache.pdfbox.pdmodel.font.FontFormat.TTF || name == null) continue;
+      String normalized = normalizeFontName(name);
+      if (!normalized.startsWith(wanted)) continue;
+      String rest = normalized.substring(wanted.length()).replaceFirst("^(ps|mt)", "");
+      int weight = info.getWeightClass() > 0 ? info.getWeightClass() : (info.getMacStyle() & 1) != 0 ? 700 : 400;
+      boolean faceItalic = (info.getMacStyle() & 2) != 0 || rest.matches(".*(italic|oblique).*");
+      double score = Math.abs(weight - (bold ? 700 : 400)) / 100.0 + (faceItalic == italic ? 0 : 20)
+          + (rest.matches("^(regular|bold|italic|bolditalic|mt|psmt)?(mt)?$") ? 0 : 5) + rest.length() * 0.01;
+      if (score < bestScore) {
+        bestScore = score;
+        best = name;
+      }
+    }
+    return best;
+  }
+
+  private static String searchInstalledFonts(FontTraits traits) {
+    List<? extends org.apache.pdfbox.pdmodel.font.FontInfo> fonts;
+    try {
+      // PDFBox indexes every installed font; its mapper keeps that index private.
+      org.apache.pdfbox.pdmodel.font.FontMapper mapper = org.apache.pdfbox.pdmodel.font.FontMappers.instance();
+      java.lang.reflect.Method provider = mapper.getClass().getMethod("getProvider");
+      provider.setAccessible(true);
+      fonts = ((org.apache.pdfbox.pdmodel.font.FontProvider) provider.invoke(mapper)).getFontInfo();
+    } catch (ReflectiveOperationException | RuntimeException error) {
+      return null;
+    }
+    record Candidate(String name, double score) {}
+    List<Candidate> candidates = new ArrayList<>();
+    for (org.apache.pdfbox.pdmodel.font.FontInfo info : fonts) {
+      String name = info.getPostScriptName();
+      if (info.getFormat() != org.apache.pdfbox.pdmodel.font.FontFormat.TTF || name == null || name.startsWith(".")) continue;
+      String normalized = normalizeFontName(name);
+      if (normalized.matches(".*(emoji|symbol|dingbat|webding|wingding|lastresort|ornament|icon|braille|music|math|fallback|bitmap).*")) continue;
+      int familyClass = info.getFamilyClass() > 255 ? info.getFamilyClass() >> 8 : info.getFamilyClass();
+      org.apache.pdfbox.pdmodel.font.PDPanoseClassification panose = info.getPanose();
+      int panoseKind = panose == null ? 0 : panose.getFamilyKind();
+      if (familyClass == 9 || familyClass == 10 || familyClass == 12 || panoseKind >= 3) continue;
+      if (info.getCodePageRange1() != 0 && (info.getCodePageRange1() & 1) == 0) continue;
+
+      FontKind kind = null;
+      if (normalized.matches(".*(mono|courier|menlo|consolas|monaco|typewriter|code).*") || panoseKind == 2 && panose.getProportion() == 9) kind = FontKind.MONO;
+      else if (familyClass == 8 || panoseKind == 2 && panose.getSerifStyle() >= 11 && panose.getSerifStyle() <= 13 || normalized.contains("sans")) kind = FontKind.SANS;
+      else if (familyClass >= 1 && familyClass <= 7 || panoseKind == 2 && panose.getSerifStyle() >= 2 && panose.getSerifStyle() <= 10 || normalized.contains("serif")) kind = FontKind.SERIF;
+
+      int weight = info.getWeightClass() > 0 ? info.getWeightClass() : (info.getMacStyle() & 1) != 0 ? 700 : 400;
+      boolean italic = (info.getMacStyle() & 2) != 0 || normalized.matches(".*(italic|oblique).*");
+      if (normalized.matches(".*(condensed|narrow|compressed|extended|expanded|hairline|thin|outline|inline|shadow|stencil|display|poster).*")) continue;
+      double score = kind == traits.kind() ? 0 : kind == null ? 35 : 100;
+      score += Math.abs(weight - (traits.bold() ? 700 : 400)) / 100.0 * 8;
+      score += italic == traits.italic() ? 0 : 40;
+      List<String> preferred = PREFERRED_FAMILIES.get(traits.kind());
+      for (int index = 0; index < preferred.size(); index += 1) {
+        if (normalized.startsWith(preferred.get(index))) {
+          score -= 6 - index * 0.5;
+          break;
+        }
+      }
+      candidates.add(new Candidate(name, score));
+    }
+    candidates.sort(java.util.Comparator.comparingDouble(Candidate::score).thenComparing(Candidate::name));
+    for (Candidate candidate : candidates.subList(0, Math.min(25, candidates.size()))) {
+      org.apache.fontbox.ttf.TrueTypeFont ttf = installedTrueType(candidate.name());
+      if (ttf == null) continue;
+      try {
+        synchronized (ttf) {
+          org.apache.fontbox.ttf.CmapLookup cmap = ttf.getUnicodeCmapLookup(false);
+          if (cmap != null && LATIN_SAMPLE.codePoints().allMatch((codePoint) -> cmap.getGlyphId(codePoint) != 0)) return candidate.name();
+        }
+      } catch (IOException | RuntimeException ignored) {
+        // Unreadable font: try the next candidate.
+      }
+    }
+    return null;
+  }
+
+  /** The installed fallback font, loaded once into the document being edited. */
+  private static PDFont installedFontFor(PDFont original) {
+    PDDocument document = EDIT_DOCUMENT.get();
+    String name = installedFallbackName(original);
+    if (document == null || name == null || name.isEmpty()) return null;
+    FontFallbacks cache = FONT_FALLBACKS.computeIfAbsent(document, ignored -> new FontFallbacks());
+    synchronized (cache) {
+      String key = "installed:" + name;
+      if (cache.files.containsKey(key)) return cache.files.get(key);
+      PDFont font = null;
+      org.apache.fontbox.ttf.TrueTypeFont ttf = installedTrueType(name);
+      if (ttf != null) {
+        try {
+          font = PDType0Font.load(document, ttf, true);
+        } catch (IOException | RuntimeException ignored) {
+          font = null;
+        }
+      }
+      cache.files.put(key, font);
+      return font;
+    }
+  }
+
+  /**
+   * A standalone TrueType copy of an installed font, for the editor to draw the
+   * same characters the export embeds. Null when the font is not installed.
+   */
+  private static byte[] installedFontFile(String postScriptName) throws IOException {
+    org.apache.fontbox.ttf.TrueTypeFont ttf = installedTrueType(postScriptName);
+    if (ttf == null) return null;
+    synchronized (ttf) {
+      org.apache.fontbox.ttf.CmapLookup cmap = ttf.getUnicodeCmapLookup(false);
+      if (cmap == null) return null;
+      Set<Integer> codePoints = new java.util.TreeSet<>();
+      for (int codePoint = 0x20; codePoint <= 0x2FFFF; codePoint += 1) {
+        if (cmap.getGlyphId(codePoint) != 0) codePoints.add(codePoint);
+      }
+      // Only the tables a browser needs to draw glyphs: layout tables (GSUB,
+      // GPOS, kern, hdmx, …) would still point at the old glyph numbering, which
+      // browsers reject, and the export does not use them either.
+      org.apache.fontbox.ttf.TTFSubsetter subsetter = new org.apache.fontbox.ttf.TTFSubsetter(ttf, List.of(
+          "head", "hhea", "loca", "maxp", "cvt ", "prep", "glyf", "hmtx", "fpgm", "gasp", "name", "OS/2", "post", "cmap"));
+      subsetter.addAll(codePoints);
+      ByteArrayOutputStream output = new ByteArrayOutputStream();
+      subsetter.writeToStream(output);
+      return output.toByteArray();
+    }
+  }
+
+  /** Loads the stand-in for this font into the document being edited, or plain Helvetica if it cannot be embedded. */
+  private static PDFont matchingFallbackFont(PDFont original) {
+    FallbackFace face = fallbackFace(original);
+    PDDocument document = EDIT_DOCUMENT.get();
+    PDFont font = document == null ? null : embeddedFontFile(document, "backend/fonts/fallback/" + face.stem() + ".ttf");
+    return font != null ? font : standardFallbackFont(face.bold());
+  }
+
   private static boolean fontLooksBold(PDFont font, boolean fallback) {
     if (font == null) {
       return fallback;
@@ -4849,46 +5555,13 @@ public class DocuflexPdfServer {
     return value != null && value.toLowerCase().matches(".*(bold|black|heavy|semibold|demibold|medium).*");
   }
 
-  private static List<TextRun> mixedTextRuns(
-      String text,
-      PDFont originalFont,
-      FontCodec originalCodec,
-      PDFont fallbackFont) {
-    List<TextRun> runs = new ArrayList<>();
-    StringBuilder current = new StringBuilder();
-    Boolean currentFallback = null;
-
-    for (int offset = 0; offset < text.length();) {
-      int codePoint = text.codePointAt(offset);
-      String glyph = new String(Character.toChars(codePoint));
-      boolean fallback = encodeString(glyph, originalFont, originalCodec) == null;
-      String runGlyph = fallback ? fallbackGlyph(glyph, fallbackFont) : glyph;
-      if (runGlyph.isEmpty()) {
-        offset += Character.charCount(codePoint);
-        continue;
-      }
-      if (currentFallback != null && currentFallback != fallback) {
-        runs.add(new TextRun(current.toString(), currentFallback));
-        current.setLength(0);
-      }
-      current.append(runGlyph);
-      currentFallback = fallback;
-      offset += Character.charCount(codePoint);
-    }
-
-    if (!current.isEmpty() && currentFallback != null) {
-      runs.add(new TextRun(current.toString(), currentFallback));
-    }
-    return runs;
-  }
-
   private static String fallbackGlyph(String glyph, PDFont fallbackFont) {
+    if (canEncodeWithFont(glyph, fallbackFont)) {
+      return glyph;
+    }
     String sanitized = sanitizeWinAnsi(glyph);
     if (canEncodeWithFont(sanitized, fallbackFont)) {
       return sanitized;
-    }
-    if (canEncodeWithFont(glyph, fallbackFont)) {
-      return glyph;
     }
     return canEncodeWithFont("?", fallbackFont) ? "?" : "";
   }
@@ -4972,6 +5645,21 @@ public class DocuflexPdfServer {
       } catch (IOException ignored) {
         // Some PDFs contain malformed text chunks; those chunks simply cannot teach us encodings.
       }
+    }
+
+    void learnFrom(FontCodec other) {
+      other.unicodeToBytes.forEach(unicodeToBytes::putIfAbsent);
+      other.unicodeToWidth.forEach(unicodeToWidth::putIfAbsent);
+    }
+
+    /** The single characters this font draws. */
+    String characters() {
+      StringBuilder characters = new StringBuilder();
+      unicodeToBytes.keySet().stream()
+          .filter((unicode) -> unicode.codePointCount(0, unicode.length()) == 1)
+          .sorted()
+          .forEach(characters::append);
+      return characters.toString();
     }
 
     EncodedText encode(String value) {
@@ -5103,7 +5791,8 @@ public class DocuflexPdfServer {
           optionalBoolean(edit.get("italicChanged")),
           optionalBoolean(edit.get("underline")),
           optionalBoolean(edit.get("strikethrough")),
-          optionalDouble(edit.get("letterSpacing"))));
+          optionalDouble(edit.get("letterSpacing")),
+          optionalDouble(edit.get("baseline"), -1)));
     }
     return edits;
   }
@@ -5239,6 +5928,10 @@ public class DocuflexPdfServer {
 
   private static double optionalDouble(Object value) {
     return value instanceof Number number ? number.doubleValue() : 0;
+  }
+
+  private static double optionalDouble(Object value, double fallback) {
+    return value instanceof Number number ? number.doubleValue() : fallback;
   }
 
   private static boolean optionalBoolean(Object value) {
@@ -5486,7 +6179,8 @@ public class DocuflexPdfServer {
       boolean italicChanged,
       boolean underline,
       boolean strikethrough,
-      double letterSpacing) {}
+      double letterSpacing,
+      double baseline) {}
 
   private record ImageEdit(
       int page,
@@ -5538,7 +6232,11 @@ public class DocuflexPdfServer {
 
   private record PdfTextSegment(String text, PdfTextStyle style) {}
 
-  private record EmbeddedFont(String pdfJsName, String family, String baseName, String css) {}
+  private record EmbeddedFont(String pdfJsName, String family, String baseName, String css, String fallback, String installed, boolean sameDesign, COSBase cos, String characters) {
+    EmbeddedFont withCharacters(String value) {
+      return new EmbeddedFont(pdfJsName, family, baseName, css, fallback, installed, sameDesign, cos, value);
+    }
+  }
 
   private record TextRange(int start, int end) {}
 
@@ -5556,7 +6254,6 @@ public class DocuflexPdfServer {
 
   private record UnitReplacement(TextUnit unit, EncodedText encoded) {}
 
-  private record TextRun(String text, boolean fallback) {}
 
   private static class MatchCounter {
     private final int target;
@@ -5657,7 +6354,11 @@ public class DocuflexPdfServer {
         fontsJson.append("{")
             .append("\"pdfJsName\":\"").append(escapeJson(font.pdfJsName)).append("\",")
             .append("\"family\":\"").append(escapeJson(font.family)).append("\",")
-            .append("\"baseName\":\"").append(escapeJson(font.baseName)).append("\"")
+            .append("\"baseName\":\"").append(escapeJson(font.baseName)).append("\",")
+            .append("\"fallback\":\"").append(escapeJson(font.fallback)).append("\",")
+            .append("\"characters\":\"").append(escapeJson(font.characters)).append("\",")
+            .append("\"sameDesign\":").append(font.sameDesign).append(",")
+            .append("\"installed\":").append(font.installed == null ? "null" : "\"" + escapeJson(font.installed) + "\"")
             .append("}");
       }
       fontsJson.append("]");

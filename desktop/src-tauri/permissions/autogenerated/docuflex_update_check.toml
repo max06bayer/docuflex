@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-docuflex-update-check"
+description = "Enables the docuflex_update_check command without any pre-configured scope."
+commands.allow = ["docuflex_update_check"]
+
+[[permission]]
+identifier = "deny-docuflex-update-check"
+description = "Denies the docuflex_update_check command without any pre-configured scope."
+commands.deny = ["docuflex_update_check"]

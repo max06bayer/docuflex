@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-docuflex-update-install"
+description = "Enables the docuflex_update_install command without any pre-configured scope."
+commands.allow = ["docuflex_update_install"]
+
+[[permission]]
+identifier = "deny-docuflex-update-install"
+description = "Denies the docuflex_update_install command without any pre-configured scope."
+commands.deny = ["docuflex_update_install"]

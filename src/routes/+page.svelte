@@ -55,10 +55,10 @@
 </script>
 
 <svelte:head>
-  <title>Docuflex — Free, Open-Source PDF Editor</title>
+  <title>Docuflex: Free PDF Editor Online & Desktop (Open Source)</title>
   <meta
     name="description"
-    content="Docuflex is a free, private, open-source PDF editor hosted in the EU. Edit text, sign, merge, split, compress, convert, OCR and translate PDFs in your browser or with the desktop app."
+    content="No account needed: a free, private, open-source PDF editor that runs locally or online. Edit text, sign, merge, compress, convert, OCR and translate PDFs."
   />
   <link rel="canonical" href="https://docuflex.eu/" />
   <link
@@ -73,10 +73,10 @@
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="Docuflex" />
   <meta property="og:url" content="https://docuflex.eu/" />
-  <meta property="og:title" content="Docuflex — Free, Open-Source PDF Editor" />
+  <meta property="og:title" content="Docuflex: Free PDF Editor Online &amp; Desktop (Open Source)" />
   <meta
     property="og:description"
-    content="Edit, sign, merge, compress, convert and translate PDFs. Free forever, private, open source, hosted in the EU."
+    content="No account needed. Edit, sign, merge, compress, convert and translate PDFs locally or online. Free forever, private, open source."
   />
   <meta property="og:image" content="https://docuflex.eu/landing-page/editor-rendering.webp" />
   <meta name="twitter:card" content="summary_large_image" />
@@ -95,7 +95,7 @@
         name: 'Docuflex',
         url: 'https://docuflex.eu/',
         description:
-          'Free, private, open-source PDF editor hosted in the EU, available as a web editor and desktop app.',
+          'Free, private, open-source PDF editor with no account needed, running locally as a desktop app or online in the browser.',
         applicationCategory: 'BusinessApplication',
         operatingSystem: 'Web, macOS, Windows',
         screenshot: 'https://docuflex.eu/landing-page/editor-rendering.webp',

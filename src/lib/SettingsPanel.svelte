@@ -4,6 +4,7 @@
   import { fade, fly, scale } from 'svelte/transition';
   import { applyTheme, currentTheme } from '$lib/theme.js';
   import { removeVisitorKey, saveVisitorKey } from '$lib/ai-web.js';
+  import { checkForUpdate, isDesktopApp } from '$lib/updater.js';
 
   /** @type {() => void} */
   export let onClose = () => {};
@@ -16,6 +17,7 @@
   /** @type {() => Promise<void> | void} */
   export let onAiKeyChange = () => {};
   let theme = currentTheme();
+  const desktop = isDesktopApp();
   /** @param {'light' | 'dark'} next */
   function chooseTheme(next) {
     theme = next;
@@ -177,6 +179,9 @@
       </div>
     </section>
     <section class="settings-section" aria-label="About">
+      {#if desktop}
+        <button class="settings-row settings-link" type="button" onclick={() => checkForUpdate({ manual: true })}>Update</button>
+      {/if}
       <a class="settings-row settings-link" href="https://github.com/max06bayer/docuflex" target="_blank" rel="noreferrer">GitHub</a>
       <a class="settings-row settings-link" href="/">Homepage</a>
       <button class="settings-row settings-link" type="button" onclick={() => (legalOpen = true)}>Legal &amp; Privacy</button>

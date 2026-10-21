@@ -7,6 +7,9 @@ fn main() {
                     "start_window_drag",
                     "docuflex_save_prompt",
                     "docuflex_save_overwrite",
+                    "docuflex_update_check",
+                    "docuflex_update_download",
+                    "docuflex_update_install",
                 ]),
         ),
     )

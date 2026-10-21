@@ -12,6 +12,9 @@
     "allow-take-pending-pdf",
     "allow-start-window-drag",
     "allow-docuflex-save-prompt",
-    "allow-docuflex-save-overwrite"
+    "allow-docuflex-save-overwrite",
+    "allow-docuflex-update-check",
+    "allow-docuflex-update-download",
+    "allow-docuflex-update-install"
   ]
 }
