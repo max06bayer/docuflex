@@ -294,7 +294,8 @@ const tectonicVersion = '0.17.0';
 const tectonicBuilds = {
   'darwin-arm64': { triple: 'aarch64-apple-darwin', extension: 'tar.gz', sha256: 'a3f1cac7c5678f01661a92212f58480ae3b0634115d880dbc59e2953ded45667' },
   'win32-x64': { triple: 'x86_64-pc-windows-msvc', extension: 'zip', sha256: 'f61ce51f0b0ade1015b7de7ef368541c5424e9756ecbd0d7af97d6d48030845f' },
-  'linux-x64': { triple: 'x86_64-unknown-linux-gnu', extension: 'tar.gz', sha256: '1a715688baf591e650c8aeb160ae934e181685eecbb38b317de30b269ac5d606' }
+  // Static musl build: the gnu one needs glibc 2.39, newer than the Ubuntu 22.04 build runner and many desktops.
+  'linux-x64': { triple: 'x86_64-unknown-linux-musl', extension: 'tar.gz', sha256: '8533d07f9ccbd7a65824b9e0459041bca34af1eb33daba48f59215593753a3b7' }
 };
 
 async function prepareTectonicRuntime() {
