@@ -106,6 +106,7 @@ public class DocuflexPdfServer {
     server.createContext("/uncrop", DocuflexPdfServer::handleUncrop);
     server.createContext("/pages", DocuflexPdfServer::handlePages);
     server.createContext("/export", DocuflexPdfServer::handleExport);
+    server.createContext("/ocr-layer", DocuflexPdfServer::handleOcrLayer);
     server.setExecutor(new ThreadPoolExecutor(
         2,
         4,
@@ -264,6 +265,305 @@ public class DocuflexPdfServer {
     } catch (Exception error) {
       sendFailure(exchange, error, "Could not export this PDF.");
     }
+  }
+
+  /**
+   * OCR support. "inspect" reports, per page, how much text the page already
+   * has and how much of it is covered by images, so the caller only
+   * recognizes scanned pages. "apply" lays the recognized words over the
+   * original pages as invisible text: the pages themselves are not touched,
+   * so the document looks exactly as before and stays as sharp and as small.
+   */
+  private static void handleOcrLayer(HttpExchange exchange) throws IOException {
+    addCors(exchange);
+    if ("OPTIONS".equals(exchange.getRequestMethod())) {
+      sendNoContent(exchange);
+      return;
+    }
+    if (!"POST".equals(exchange.getRequestMethod())) {
+      sendJson(exchange, 405, "{\"error\":\"POST required\"}");
+      return;
+    }
+
+    try {
+      String body = readRequestBody(exchange);
+      Map<String, Object> payload = asObject(new JsonParser(body).parse());
+      String action = asString(payload.get("action"));
+      byte[] pdfBytes = decodePdf(asString(payload.get("pdfBase64")));
+      try (PDDocument document = loadPdf(pdfBytes)) {
+        if ("inspect".equals(action)) {
+          sendJson(exchange, 200, inspectOcrPages(document));
+        } else if ("apply".equals(action)) {
+          assertEditable(document);
+          for (Object pageValue : asArray(payload.get("pages"))) {
+            Map<String, Object> pageData = asObject(pageValue);
+            int pageIndex = asInt(pageData.get("index"));
+            if (pageIndex < 0 || pageIndex >= document.getNumberOfPages()) {
+              throw new IllegalArgumentException("Invalid OCR page index.");
+            }
+            addOcrTextLayer(document, pageIndex, pageData);
+          }
+          ByteArrayOutputStream output = new ByteArrayOutputStream();
+          document.save(output);
+          sendPdf(exchange, output.toByteArray());
+        } else {
+          throw new IllegalArgumentException("Unknown OCR action.");
+        }
+      }
+    } catch (Exception error) {
+      sendFailure(exchange, error, "Could not add the recognized text.");
+    }
+  }
+
+  private static String inspectOcrPages(PDDocument document) throws IOException {
+    int pageCount = document.getNumberOfPages();
+    int[] characters = new int[pageCount];
+    org.apache.pdfbox.text.PDFTextStripper stripper = new org.apache.pdfbox.text.PDFTextStripper() {
+      @Override
+      protected void processTextPosition(org.apache.pdfbox.text.TextPosition text) {
+        String unicode = text.getUnicode();
+        if (unicode != null && !unicode.isBlank()) characters[getCurrentPageNo() - 1] += 1;
+      }
+    };
+    stripper.getText(document);
+    StringBuilder json = new StringBuilder("{\"pages\":[");
+    for (int index = 0; index < pageCount; index += 1) {
+      if (index > 0) json.append(',');
+      json.append("{\"characters\":").append(characters[index])
+          .append(",\"imageCoverage\":")
+          .append(String.format(Locale.ROOT, "%.3f", imageCoverage(document.getPage(index))))
+          .append('}');
+    }
+    return json.append("]}").toString();
+  }
+
+  /** The share of the crop box covered by images (0..1), counting overlapping images once per pixel row at most. */
+  private static double imageCoverage(PDPage page) throws IOException {
+    PDRectangle box = page.getCropBox();
+    double pageArea = Math.max(1, (double) box.getWidth() * box.getHeight());
+    double[] covered = {0};
+    org.apache.pdfbox.contentstream.PDFGraphicsStreamEngine engine = new org.apache.pdfbox.contentstream.PDFGraphicsStreamEngine(page) {
+      private final java.awt.geom.Point2D.Float current = new java.awt.geom.Point2D.Float();
+
+      @Override
+      public void drawImage(org.apache.pdfbox.pdmodel.graphics.image.PDImage image) {
+        Matrix ctm = getGraphicsState().getCurrentTransformationMatrix();
+        double left = Double.MAX_VALUE, bottom = Double.MAX_VALUE, right = -Double.MAX_VALUE, top = -Double.MAX_VALUE;
+        for (double[] corner : new double[][] {{0, 0}, {1, 0}, {0, 1}, {1, 1}}) {
+          double x = ctm.getScaleX() * corner[0] + ctm.getShearX() * corner[1] + ctm.getTranslateX();
+          double y = ctm.getShearY() * corner[0] + ctm.getScaleY() * corner[1] + ctm.getTranslateY();
+          left = Math.min(left, x);
+          right = Math.max(right, x);
+          bottom = Math.min(bottom, y);
+          top = Math.max(top, y);
+        }
+        double width = Math.min(right, box.getUpperRightX()) - Math.max(left, box.getLowerLeftX());
+        double height = Math.min(top, box.getUpperRightY()) - Math.max(bottom, box.getLowerLeftY());
+        if (width > 0 && height > 0) covered[0] += width * height;
+      }
+
+      @Override public void appendRectangle(java.awt.geom.Point2D p0, java.awt.geom.Point2D p1, java.awt.geom.Point2D p2, java.awt.geom.Point2D p3) {}
+      @Override public void clip(int windingRule) {}
+      @Override public void moveTo(float x, float y) { current.setLocation(x, y); }
+      @Override public void lineTo(float x, float y) { current.setLocation(x, y); }
+      @Override public void curveTo(float x1, float y1, float x2, float y2, float x3, float y3) { current.setLocation(x3, y3); }
+      @Override public java.awt.geom.Point2D getCurrentPoint() { return current; }
+      @Override public void closePath() {}
+      @Override public void endPath() {}
+      @Override public void strokePath() {}
+      @Override public void fillPath(int windingRule) {}
+      @Override public void fillAndStrokePath(int windingRule) {}
+      @Override public void shadingFill(COSName shadingName) {}
+    };
+    engine.processPage(page);
+    return Math.min(1, covered[0] / pageArea);
+  }
+
+  /**
+   * Adds one page's recognized words as invisible text. Each word arrives as
+   * [text, bottomLeftX, bottomLeftY, bottomRightX, bottomRightY, topLeftX,
+   * topLeftY, confidence] in the engine's coordinates (top-left origin over
+   * the displayed page of the given width and height), so sideways and
+   * tilted words keep their direction. Words lying on text the page already
+   * has are skipped, which keeps mixed pages and repeated OCR runs free of
+   * duplicates.
+   */
+  private static void addOcrTextLayer(PDDocument document, int pageIndex, Map<String, Object> pageData) throws IOException {
+    PDPage page = document.getPage(pageIndex);
+    float[] display = displaySize(page);
+    double scaleX = display[0] / Math.max(0.0001, asDouble(pageData.get("width")));
+    double scaleY = display[1] / Math.max(0.0001, asDouble(pageData.get("height")));
+    List<double[]> existing = new ArrayList<>();
+    for (PageGlyph glyph : pageGlyphs(document, pageIndex, page)) existing.add(glyph.bounds());
+
+    List<Object> words = asArray(pageData.get("words"));
+    List<String> texts = new ArrayList<>();
+    List<double[]> geometry = new ArrayList<>();
+    for (Object wordValue : words) {
+      List<Object> word = asArray(wordValue);
+      if (word.size() < 7) continue;
+      String text = asString(word.get(0)).strip();
+      if (text.isEmpty() || text.length() > 512) continue;
+      double[] points = new double[6];
+      for (int index = 0; index < 6; index += 1) {
+        points[index] = asDouble(word.get(index + 1)) * (index % 2 == 0 ? scaleX : scaleY);
+        if (!Double.isFinite(points[index])) throw new IllegalArgumentException("Invalid OCR word geometry.");
+      }
+      double[] bounds = {
+          Math.min(Math.min(points[0], points[2]), points[4]),
+          Math.min(Math.min(points[1], points[3]), points[5]),
+          Math.max(Math.max(points[0], points[2]), points[4]),
+          Math.max(Math.max(points[1], points[3]), points[5])};
+      if (coveredByExistingText(bounds, existing)) continue;
+      texts.add(text);
+      geometry.add(points);
+    }
+    if (texts.isEmpty()) return;
+
+    // The words are written in display space with y flipped (y up); this
+    // matrix maps that space onto the page's user space, crop box offset and
+    // /Rotate included.
+    PdfPoint origin = normalizedToPdfPoint(page, new NormalizedPoint(0, 1));
+    PdfPoint right = normalizedToPdfPoint(page, new NormalizedPoint(1, 1));
+    PdfPoint top = normalizedToPdfPoint(page, new NormalizedPoint(0, 0));
+    Matrix displayToUser = new Matrix(
+        (right.x - origin.x) / display[0], (right.y - origin.y) / display[0],
+        (top.x - origin.x) / display[1], (top.y - origin.y) / display[1],
+        origin.x, origin.y);
+
+    PDFont base = new PDType1Font(Standard14Fonts.FontName.HELVETICA);
+    try (PDPageContentStream content = new PDPageContentStream(
+        document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
+      content.transform(displayToUser);
+      content.beginText();
+      content.setRenderingMode(org.apache.pdfbox.pdmodel.graphics.state.RenderingMode.NEITHER);
+      // One font size per line, chosen so the line's words fill their boxes
+      // at their natural proportions: a size taken from the (padded) box
+      // height alone needs so much negative spacing that viewers split the
+      // words into single letters.
+      List<List<FontRun>> wordRuns = new ArrayList<>();
+      double[] naturals = new double[texts.size()];
+      for (int index = 0; index < texts.size(); index += 1) {
+        List<FontRun> runs = fontRuns(document, base, texts.get(index));
+        for (FontRun run : runs) naturals[index] += run.font().getStringWidth(run.text()) / 1000.0;
+        wordRuns.add(runs);
+      }
+      double[] lineSizes = new double[texts.size()];
+      for (int start = 0; start < texts.size();) {
+        int end = start + 1;
+        while (end < texts.size() && sameOcrLine(geometry.get(end - 1), geometry.get(end))) end += 1;
+        double widths = 0, natural = 0, lineHeight = 0;
+        for (int index = start; index < end; index += 1) {
+          double[] points = geometry.get(index);
+          widths += Math.hypot(points[2] - points[0], points[3] - points[1]);
+          natural += naturals[index];
+          lineHeight = Math.max(lineHeight, Math.abs(ocrWordHeight(points)));
+        }
+        double fit = natural > 0 ? widths / natural : lineHeight;
+        Arrays.fill(lineSizes, start, end, Math.max(lineHeight * 0.5, Math.min(lineHeight, fit)));
+        start = end;
+      }
+      for (int index = 0; index < texts.size(); index += 1) {
+        double[] points = geometry.get(index);
+        double width = Math.hypot(points[2] - points[0], points[3] - points[1]);
+        if (!(width > 0)) continue;
+        // Unit vectors along the baseline and up from it (perpendicular, in
+        // the y-down display space).
+        double alongX = (points[2] - points[0]) / width, alongY = (points[3] - points[1]) / width;
+        double upX = alongY, upY = -alongX;
+        double height = ocrWordHeight(points);
+        if (height < 0) {
+          upX = -upX;
+          upY = -upY;
+          height = -height;
+        }
+        if (!(height > 0)) continue;
+        String word = texts.get(index);
+        List<FontRun> runs = wordRuns.get(index);
+        double natural = naturals[index];
+        if (!(natural > 0)) continue;
+        boolean lineContinues = index + 1 < texts.size() && sameOcrLine(points, geometry.get(index + 1));
+        double[] next = lineContinues ? geometry.get(index + 1) : null;
+        double gap = next == null ? 0 : (next[0] - points[2]) * alongX + (next[1] - points[3]) * alongY;
+        // The glyphs keep their proportions (viewers such as pdf.js only
+        // follow rotated lines when text is not stretched) and character
+        // spacing between them makes the word as wide as its box.
+        double size = lineSizes[index];
+        // Viewers find word breaks from the gap after a word's last glyph; a
+        // word that ends right where the next begins would run into it.
+        if (next != null) width = Math.max(width * 0.5, Math.min(width, width + gap - size * 0.15));
+        int characters = word.codePointCount(0, word.length());
+        // Wider spacing than a fiftieth of the size reads as spaces inside the word.
+        double spacing = characters > 1 ? Math.min(size * 0.02, (width - natural * size) / (characters - 1)) : 0;
+        width = natural * size + spacing * Math.max(0, characters - 1);
+        // Helvetica sits about a fifth of its size below the baseline: lift the
+        // baseline so the glyph cells line up with the word's box.
+        double baseX = points[0] + upX * height * 0.2, baseY = points[1] + upY * height * 0.2;
+        content.setTextMatrix(new Matrix(
+            (float) alongX, (float) -alongY,
+            (float) upX, (float) -upY,
+            (float) baseX, (float) (display[1] - baseY)));
+        content.setCharacterSpacing((float) spacing);
+        for (int runIndex = 0; runIndex < runs.size(); runIndex += 1) {
+          FontRun run = runs.get(runIndex);
+          content.setFont(run.font(), (float) size);
+          if (runIndex + 1 < runs.size()) {
+            content.showText(run.text());
+            continue;
+          }
+          // No spacing after the last glyph: it would shift where the word ends.
+          int last = run.text().offsetByCodePoints(run.text().length(), -1);
+          if (last > 0) content.showText(run.text().substring(0, last));
+          content.setCharacterSpacing(0);
+          content.showText(run.text().substring(last));
+        }
+        // A space after each word (except at the end of a line) lets viewers
+        // copy and search the text with its word breaks. It reaches exactly to
+        // the next word, which viewers read as one gap.
+        if (next != null) {
+          content.setFont(base, (float) size);
+          content.setCharacterSpacing((float) (gap + (points[2] - points[0]) * alongX + (points[3] - points[1]) * alongY
+              - width - base.getStringWidth(" ") / 1000.0 * size));
+          content.showText(" ");
+        }
+      }
+      content.endText();
+    }
+  }
+
+  /** A word's height measured perpendicular to its baseline, signed by which side its top lies on. */
+  private static double ocrWordHeight(double[] points) {
+    double width = Math.hypot(points[2] - points[0], points[3] - points[1]);
+    if (!(width > 0)) return 0;
+    double upX = (points[3] - points[1]) / width, upY = -(points[2] - points[0]) / width;
+    return (points[4] - points[0]) * upX + (points[5] - points[1]) * upY;
+  }
+
+  /** True when the next word continues the same line: it starts near this word's end along the same baseline. */
+  private static boolean sameOcrLine(double[] word, double[] next) {
+    double advanceX = word[2] - word[0], advanceY = word[3] - word[1];
+    double length = Math.hypot(advanceX, advanceY);
+    double height = Math.hypot(word[4] - word[0], word[5] - word[1]);
+    if (!(length > 0) || !(height > 0)) return false;
+    double unitX = advanceX / length, unitY = advanceY / length;
+    double deltaX = next[0] - word[2], deltaY = next[1] - word[3];
+    double along = deltaX * unitX + deltaY * unitY;
+    double across = Math.abs(-deltaX * unitY + deltaY * unitX);
+    return along > -height && along < height * 4 && across < height * 0.6;
+  }
+
+  private static boolean coveredByExistingText(double[] bounds, List<double[]> existing) {
+    double area = (bounds[2] - bounds[0]) * (bounds[3] - bounds[1]);
+    if (!(area > 0) || existing.isEmpty()) return false;
+    double covered = 0;
+    for (double[] glyph : existing) {
+      if (!intersects(bounds, glyph)) continue;
+      double width = Math.min(bounds[2], glyph[2]) - Math.max(bounds[0], glyph[0]);
+      double height = Math.min(bounds[3], glyph[3]) - Math.max(bounds[1], glyph[1]);
+      covered += Math.max(0, width) * Math.max(0, height);
+      if (covered > area * 0.4) return true;
+    }
+    return false;
   }
 
   private static void handleDecrypt(HttpExchange exchange) throws IOException {
