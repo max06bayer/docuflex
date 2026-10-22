@@ -14,6 +14,7 @@
   import McpPanel from '$lib/McpPanel.svelte';
   import AiChatPanel from '$lib/AiChatPanel.svelte';
   import TranslateFilesPanel from '$lib/TranslateFilesPanel.svelte';
+  import LatexFilesPanel from '$lib/LatexFilesPanel.svelte';
   // @ts-ignore Fontsource exposes CSS through package exports without JS type declarations.
   import '@fontsource-variable/geist/wght.css';
   import '@fontsource-variable/geist-mono/wght.css';
@@ -30,6 +31,7 @@
   import translateIcon from '../../public/quicktools/translate.svg?raw';
   import flattenIcon from '../../public/quicktools/flatten.svg?raw';
   import ocrIcon from '../../public/quicktools/ocr.svg?raw';
+  import latexIcon from '../../public/quicktools/latex.svg?raw';
   import expandIcon from '../../public/expand.svg?raw';
   import bigPlusIcon from '../../public/bigplus.svg?raw';
 
@@ -50,7 +52,8 @@
     { name: 'Protect', shortcut: 'P', icon: protectIcon, description: 'Encrypt a PDF with a password.' },
     { name: 'Translate', shortcut: 'T', icon: translateIcon, description: 'Translate PDF text into another language.' },
     { name: 'Flatten', shortcut: 'F', icon: flattenIcon, description: 'Remove editable layers or rasterize the PDF.' },
-    { name: 'OCR', shortcut: 'O', icon: ocrIcon, description: 'Recognize text in scanned PDF pages.' }
+    { name: 'OCR', shortcut: 'O', icon: ocrIcon, description: 'Recognize text in scanned PDF pages.' },
+    { name: 'PDF Enhance', id: 'latex', shortcut: 'X', icon: latexIcon, description: 'Let AI rebuild a PDF or scan as a professionally typeset LaTeX document.' }
   ];
 
   /** @type {{ id: number; name: string; type: 'pdf'; file: File; protection: { enabled: boolean; password: string }; initialTool?: string; sourcePath?: string | null }[]} */
@@ -130,7 +133,7 @@
   $: sortModeText = sortMode === 'size' ? 'Size' : sortMode === 'name' ? 'Name' : 'Recent';
   /** @type {HTMLInputElement | undefined} */
   let fileInput;
-  /** @type {{ downloadPdf: () => Promise<void>; exportPdfForSave: () => Promise<{ blob: Blob; suggestedName: string }>; openSearchPanel: () => void; openRasterPanel: () => void; mcpCall: (name: string, args: Record<string, any>) => Promise<any>; aiContext: () => any; undo: () => Promise<void>; redo: () => Promise<void> } | undefined} */
+  /** @type {{ downloadPdf: () => Promise<void>; exportPdfForSave: () => Promise<{ blob: Blob; suggestedName: string }>; openSearchPanel: () => void; openRasterPanel: () => void; printDocument: () => Promise<void>; mcpCall: (name: string, args: Record<string, any>) => Promise<any>; aiContext: () => any; undo: () => Promise<void>; redo: () => Promise<void> } | undefined} */
   let pdfEditor;
   /** @type {Record<number, any>} */
   let editorRefs = {};
@@ -377,6 +380,7 @@
   let protectHomePanelOpen = false;
   let translatePanelOpen = false;
   let flattenPanelOpen = false;
+  let latexPanelOpen = false;
   let settingsPanelOpen = false;
   /** Opened from the AI button without a key: Settings focuses the key field. */
   let settingsKeyFocus = false;
@@ -433,9 +437,9 @@
     utilityTooltip = null;
   }
 
-  /** @param {{ name: string }} tool */
+  /** @param {{ name: string; id?: string }} tool */
   function openQuickTool(tool) {
-    const toolName = tool.name.toLowerCase();
+    const toolName = (tool.id ?? tool.name).toLowerCase();
     trackEvent('tool_open', { tool: toolName.replace(/[^a-z0-9-]/g, '').slice(0, 40) });
     if (toolName === 'merge' || toolName === 'split') {
       activePagesQuickTool = /** @type {'merge' | 'split'} */ (toolName);
@@ -444,6 +448,7 @@
       protectHomePanelOpen = false;
       translatePanelOpen = false;
       flattenPanelOpen = false;
+      latexPanelOpen = false;
     } else if (toolName === 'convert') {
       activePagesQuickTool = null;
       convertPanelOpen = true;
@@ -451,6 +456,7 @@
       protectHomePanelOpen = false;
       translatePanelOpen = false;
       flattenPanelOpen = false;
+      latexPanelOpen = false;
     } else if (toolName === 'compress') {
       activePagesQuickTool = null;
       convertPanelOpen = false;
@@ -458,6 +464,7 @@
       protectHomePanelOpen = false;
       translatePanelOpen = false;
       flattenPanelOpen = false;
+      latexPanelOpen = false;
     } else if (toolName === 'sign') {
       activePagesQuickTool = null;
       convertPanelOpen = false;
@@ -465,6 +472,7 @@
       protectHomePanelOpen = false;
       translatePanelOpen = false;
       flattenPanelOpen = false;
+      latexPanelOpen = false;
       openFilePicker('sign');
     } else if (toolName === 'protect') {
       activePagesQuickTool = null;
@@ -473,6 +481,7 @@
       protectHomePanelOpen = true;
       translatePanelOpen = false;
       flattenPanelOpen = false;
+      latexPanelOpen = false;
     } else if (toolName === 'translate') {
       activePagesQuickTool = null;
       convertPanelOpen = false;
@@ -480,6 +489,7 @@
       protectHomePanelOpen = false;
       translatePanelOpen = true;
       flattenPanelOpen = false;
+      latexPanelOpen = false;
     } else if (toolName === 'flatten') {
       activePagesQuickTool = null;
       convertPanelOpen = false;
@@ -487,6 +497,7 @@
       protectHomePanelOpen = false;
       translatePanelOpen = false;
       flattenPanelOpen = true;
+      latexPanelOpen = false;
     } else if (toolName === 'ocr') {
       activePagesQuickTool = null;
       convertPanelOpen = false;
@@ -494,7 +505,16 @@
       protectHomePanelOpen = false;
       translatePanelOpen = false;
       flattenPanelOpen = false;
+      latexPanelOpen = false;
       openFilePicker('ocr');
+    } else if (toolName === 'latex') {
+      activePagesQuickTool = null;
+      convertPanelOpen = false;
+      compressPanelOpen = false;
+      protectHomePanelOpen = false;
+      translatePanelOpen = false;
+      flattenPanelOpen = false;
+      latexPanelOpen = true;
     }
   }
 
@@ -890,6 +910,7 @@
       compressPanelOpen = false;
       protectHomePanelOpen = false;
       flattenPanelOpen = false;
+      latexPanelOpen = false;
       return;
     }
     const target = event.target;
@@ -1112,6 +1133,19 @@
         >
           <img src="/download.svg" alt="" />
         </button>
+        {@const printUtility = { label: 'Print', description: 'Print the document or save it as PDF.' }}
+        <button
+          class="utility-button"
+          aria-label={printUtility.label}
+          aria-describedby={utilityTooltip?.label === printUtility.label ? 'utility-tooltip' : undefined}
+          onmouseenter={(event) => scheduleUtilityTooltip(printUtility, event.currentTarget)}
+          onmouseleave={hideUtilityTooltip}
+          onfocus={(event) => scheduleUtilityTooltip(printUtility, event.currentTarget)}
+          onblur={hideUtilityTooltip}
+          onclick={() => { hideUtilityTooltip(); void pdfEditor?.printDocument(); }}
+        >
+          <img src="/printer.svg" alt="" />
+        </button>
       {/if}
       {#each [
         { id: 'home', icon: '/redesign/vector537.svg', label: 'Home', description: 'Return to the document overview.' },
@@ -1207,7 +1241,7 @@
           class="quick-tool"
           class:wide-icon={tool.wide}
           class:keyboard-active={activeShortcut === tool.shortcut}
-          data-tool={tool.name.toLowerCase()}
+          data-tool={(tool.id ?? tool.name).toLowerCase()}
           data-shortcut={tool.shortcut.toLowerCase()}
           aria-label={tool.name}
           aria-describedby={quickTooltip?.name === tool.name ? 'quick-tool-tooltip' : undefined}
@@ -1357,10 +1391,17 @@
       <HomeProtectPanel onClose={() => (protectHomePanelOpen = false)} />
     {/if}
     {#if translatePanelOpen}
-      <TranslateFilesPanel onClose={() => (translatePanelOpen = false)} onOpen={(file) => addFileTab(file)} />
+      <TranslateFilesPanel onClose={() => (translatePanelOpen = false)} onOpen={(file) => addFileTab(file)} onNeedKey={() => { translatePanelOpen = false; settingsKeyFocus = true; settingsPanelOpen = true; mcpPanelOpen = false; aiPanelOpen = false; }} />
     {/if}
     {#if flattenPanelOpen}
       <FlattenFilesPanel onClose={() => (flattenPanelOpen = false)} />
+    {/if}
+    {#if latexPanelOpen}
+      <LatexFilesPanel
+        onClose={() => (latexPanelOpen = false)}
+        onOpen={(file) => addFileTab(file)}
+        onNeedKey={() => { latexPanelOpen = false; settingsKeyFocus = true; settingsPanelOpen = true; mcpPanelOpen = false; aiPanelOpen = false; }}
+      />
     {/if}
   </section>
   {/if}
@@ -2060,12 +2101,14 @@
 
   .quick-tool[data-tool="translate"],
   .quick-tool[data-tool="flatten"],
-  .quick-tool[data-tool="ocr"] {
+  .quick-tool[data-tool="ocr"],
+  .quick-tool[data-tool="latex"] {
     padding-left: 12px;
   }
 
   .quick-tool[data-tool="flatten"] .quick-tool-icon,
-  .quick-tool[data-tool="ocr"] .quick-tool-icon {
+  .quick-tool[data-tool="ocr"] .quick-tool-icon,
+  .quick-tool[data-tool="latex"] .quick-tool-icon {
     flex-basis: 40px;
   }
 
@@ -3267,11 +3310,10 @@
   :global(:root[data-theme="dark"]) .error-toast-body { color: #111111; }
   :global(:root[data-theme="dark"]) .error-toast-body strong { color: #111111; }
   :global(:root[data-theme="dark"]) .error-toast-body span { color: rgba(255, 255, 255, 0.333); }
-  :global(:root[data-theme="dark"]) .update-toast .error-toast-body span { color: rgba(0, 0, 0, 0.55); }
-  :global(:root[data-theme="dark"]) .update-progress { background: rgba(0, 0, 0, 0.12); }
-  :global(:root[data-theme="dark"]) .update-progress span { background: #111111; }
-  :global(:root[data-theme="dark"]) .update-actions button { background: #111111; color: #ffffff; }
-  :global(:root[data-theme="dark"]) .update-actions button.secondary { background: rgba(0, 0, 0, 0.08); color: #111111; }
+  :global(:root[data-theme="dark"]) .update-progress { background: rgba(255, 255, 255, 0.017); }
+  :global(:root[data-theme="dark"]) .update-progress span { background: rgba(255, 255, 255, 0.05); }
+  :global(:root[data-theme="dark"]) .update-actions button { border: 0; background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.859); }
+  :global(:root[data-theme="dark"]) .update-actions button.secondary { background: rgba(255, 255, 255, 0.012); color: #111111; }
   :global(:root[data-theme="dark"]) .sidebar { background: #111111; border-right: 1px solid #2a2a2a; box-shadow: 0 0 98.6px rgba(0, 0, 0, 0.18); }
   :global(:root[data-theme="dark"]) .quick-tool { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.07); color: rgba(255, 255, 255, 0.75); }
   :global(:root[data-theme="dark"]) .quick-tool kbd { border: 1px solid rgba(255, 255, 255, 0.04); background: rgba(255, 255, 255, 0.033); color: rgba(255, 255, 255, 0.165); }

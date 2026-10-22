@@ -779,11 +779,13 @@ dependencies = [
 
 [[package]]
 name = "docuflex-desktop"
-version = "0.9.2"
+version = "0.9.3"
 dependencies = [
  "base64 0.22.1",
  "libc",
+ "objc2",
  "objc2-app-kit",
+ "objc2-foundation",
  "rfd",
  "serde",
  "serde_json",

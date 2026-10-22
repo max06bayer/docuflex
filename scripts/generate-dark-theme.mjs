@@ -32,7 +32,9 @@ const files = [
   'src/lib/HomeProtectPanel.svelte',
   'src/lib/CompressFilesPanel.svelte',
   'src/lib/ConvertFilesPanel.svelte',
-  'src/lib/FlattenFilesPanel.svelte'
+  'src/lib/FlattenFilesPanel.svelte',
+  'src/lib/Pdf3dAnnotation.svelte',
+  'src/lib/LatexFilesPanel.svelte'
 ];
 
 // Grey icons are drawn as one clean light tone, like the Figma dark frame's icons.

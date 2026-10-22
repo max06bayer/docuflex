@@ -83,6 +83,12 @@ try {
   });
   const ocrPdf = await readFile(`${ocrPdfBase}.pdf`);
   if (!ocrPdf.subarray(0, 5).equals(Buffer.from('%PDF-'))) throw new Error('Bundled OCR PDF smoke test failed.');
+  if (process.platform === 'darwin') {
+    const scanPdf = join(temporary, 'scan.pdf');
+    run(python, ['-c', `from PIL import Image; Image.open(${JSON.stringify(image)}).save(${JSON.stringify(scanPdf)}, resolution=150)`]);
+    const visionText = run(executable('ocr', 'docuflex-vision-ocr'), [scanPdf, '--languages', 'en-US'], { timeout: 60_000 });
+    if (!/docuflex/i.test(visionText)) throw new Error(`Vision OCR smoke test failed: ${visionText.trim()}`);
+  }
 
   const pdf = join(temporary, 'document.pdf');
   const html = join(temporary, 'document.html');
@@ -94,6 +100,10 @@ try {
   ], { timeout: 120_000 });
   const converted = await readFile(html, 'utf8');
   if (!/Docuflex/.test(converted)) throw new Error('Bundled pdf2htmlEX smoke test did not preserve text.');
+
+  // Compiling needs network for the TeX packages, so only the binary is checked here.
+  const tectonicVersion = run(join(resources, 'runtime', 'tectonic', `tectonic${windows ? '.exe' : ''}`), ['--version']);
+  if (!/Tectonic/i.test(tectonicVersion)) throw new Error('Bundled Tectonic did not start.');
 
   if (process.platform !== 'darwin') run(office, ['--headless', '--version'], { timeout: 60_000 });
   process.stdout.write(`Docuflex ${process.platform}-${process.arch} offline runtime smoke test passed.\n`);

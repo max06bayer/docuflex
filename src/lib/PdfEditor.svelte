@@ -6,8 +6,11 @@
   import EditorToolbar from '$lib/EditorToolbar.svelte';
   import HtmlPdfEditor from '$lib/HtmlPdfEditor.svelte';
   import TranslateFilesPanel from '$lib/TranslateFilesPanel.svelte';
+  import Pdf3dAnnotation from '$lib/Pdf3dAnnotation.svelte';
+  import { annotationRefFromId } from '$lib/pdf3d/load.js';
   import { showAppError, translatePdf } from '$lib/translate.js';
   import { renderLatex } from '$lib/math-render.js';
+  import { printPdf } from '$lib/print.js';
 
   /** @typedef {{ x: number; y: number; pressure: number }} StrokePoint */
   /** @typedef {{ id: number; group?: number; type: 'marker' | 'pen'; points: StrokePoint[]; rawPoints?: StrokePoint[]; color?: string; thickness?: number; opacity?: number; falloff?: number; smoothing?: number }} AnnotationStroke */
@@ -261,6 +264,7 @@
   const RASTER_BATCH_BYTES = 60 * 1024 * 1024;
   const rasterFilterId = `raster-preview-${Math.random().toString(36).slice(2, 9)}`;
   let rasterPanelOpen = false;
+  let printing = false;
   let rasterizing = false;
   let rasterAdjust = { ...RASTER_DEFAULTS };
   const COMMENT_AUTHOR_KEY = 'docuflex:comment-author';
@@ -277,6 +281,12 @@
   /** Comments already stored in the PDF (sticky notes, commented highlights …), read-only. */
   /** @type {Record<number, PageComment[]>} */
   let pdfComments = {};
+  /** 3D models (PRC/U3D annotations) per page, shown as live views on request. */
+  /** @type {Record<number, { ref: number; x: number; y: number; width: number; height: number }[]>} */
+  let pdf3dAnnotations = {};
+  /** The live 3D view, if one is open; only one runs at a time. */
+  /** @type {(import('$lib/pdf3d/load.js').Pdf3dSession & { ref: number; selected: number }) | null} */
+  let pdf3dSession = null;
   /** New replies to comments that are already in the PDF, per page, matched by the PDF object ref. */
   /** @type {Record<number, PdfCommentReply[]>} */
   let commentReplies = {};
@@ -755,27 +765,32 @@
     showSearchPanel();
   }
 
+  /** Index of the page closest to the middle of the viewer, if any. */
+  function pageIndexInView() {
+    /** @type {number | null} */
+    let current = null;
+    if (!viewer) return current;
+    const viewerRect = viewer.getBoundingClientRect();
+    const middle = viewerRect.top + viewerRect.height / 2;
+    let closest = Infinity;
+    viewer.querySelectorAll('.pdf-page').forEach((page, index) => {
+      const rect = page.getBoundingClientRect();
+      const distance = rect.top <= middle && rect.bottom >= middle ? 0 : Math.min(Math.abs(rect.top - middle), Math.abs(rect.bottom - middle));
+      if (distance < closest) {
+        closest = distance;
+        current = index;
+      }
+    });
+    return current;
+  }
+
   /** What the AI chat tells the model about this document: the page in view and the sidebar selection. */
   export function aiContext() {
-    /** @type {number | null} */
-    let currentPage = null;
-    if (viewer) {
-      const viewerRect = viewer.getBoundingClientRect();
-      const middle = viewerRect.top + viewerRect.height / 2;
-      let closest = Infinity;
-      viewer.querySelectorAll('.pdf-page').forEach((page, index) => {
-        const rect = page.getBoundingClientRect();
-        const distance = rect.top <= middle && rect.bottom >= middle ? 0 : Math.min(Math.abs(rect.top - middle), Math.abs(rect.bottom - middle));
-        if (distance < closest) {
-          closest = distance;
-          currentPage = index + 1;
-        }
-      });
-    }
+    const pageInView = pageIndexInView();
     return {
       name: workingFile.name,
       pageCount,
-      currentPage,
+      currentPage: pageInView === null ? null : pageInView + 1,
       selectedPages: selectedPageIndexes().map((index) => index + 1),
       editProtected: editLocked
     };
@@ -785,6 +800,32 @@
   function rasterPageIndexes() {
     const selected = selectedPageIndexes();
     return selected.length ? selected : Array.from({ length: pageCount }, (_, index) => index);
+  }
+
+  /** Opens the system print dialog with exactly what Save would write. */
+  export async function printDocument() {
+    if (printing) return;
+    if (editLocked && !editPrintAllowed) {
+      showAppError('Printing is not allowed', 'The owner of this PDF does not allow printing.');
+      return;
+    }
+    printing = true;
+    try {
+      let bytes;
+      if (editLocked) {
+        bytes = allowedEditLockedChanges()
+          ? await (await exportEditedPdfBlob()).arrayBuffer()
+          : await (await exportFlattenedBlob({ encrypt: false })).arrayBuffer();
+      } else {
+        bytes = await (await exportEditedPdfBlob({ encrypt: false })).arrayBuffer();
+      }
+      await printPdf(bytes, workingFile.name);
+    } catch (error) {
+      console.error(error);
+      if (!(error instanceof Error && error.message === 'EDIT_LOCKED')) showAppError('Could not print this PDF', error);
+    } finally {
+      printing = false;
+    }
   }
 
   export function openRasterPanel() {
@@ -1636,7 +1677,8 @@
       // WebKit blob resource that is valid for the initial render but gone by
       // the time OCR starts. Use the durable snapshot retained by loadPdf().
       const sourceBytes = workingPdfBytes?.slice(0) ?? await readWorkingPdf();
-      const languages = navigator.language.toLowerCase().startsWith('de') ? 'deu+eng' : 'eng';
+      // The reader's languages first, then English, which most documents contain.
+      const languages = [...new Set([...(navigator.languages ?? [navigator.language]), 'en'])].slice(0, 4).join(',');
       const response = await fetch('/api/pdf/ocr', {
         method: 'POST',
         headers: {
@@ -1650,6 +1692,16 @@
         throw new Error(error?.error ?? `OCR failed (${response.status}).`);
       }
 
+      const recognizedPages = Number(response.headers.get('X-OCR-Pages') ?? '1');
+      const recognizedWords = Number(response.headers.get('X-OCR-Words') ?? '1');
+      if (!recognizedPages || !recognizedWords) {
+        const message = recognizedPages
+          ? 'No text was found on the scanned pages.'
+          : 'Every page already has selectable text.';
+        if (mcpErrors) mcpErrors.push(message);
+        else showAppError('Nothing to recognize', message);
+        return;
+      }
       const searchableBytes = await response.arrayBuffer();
       workingFile = new File([searchableBytes], workingFile.name, {
         type: 'application/pdf',
@@ -6251,6 +6303,8 @@
       commentReplies = {};
     }
     pdfComments = {};
+    pdf3dSession?.close();
+    pdf3dAnnotations = {};
     selectedShape = null;
     editingTextShape = null;
     selectedShapeIds = new Set();
@@ -6374,6 +6428,8 @@
       const pageAnnotations = await page.getAnnotations({ intent: 'display' });
       const existingComments = readPdfComments(pageAnnotations, viewport);
       if (existingComments.length) pdfComments = { ...pdfComments, [index]: existingComments };
+      const models3d = read3dAnnotations(pageAnnotations, viewport);
+      if (models3d.length) pdf3dAnnotations = { ...pdf3dAnnotations, [index]: models3d };
       if (loadFormWidgets) {
         const formShapes = pageAnnotations.flatMap((/** @type {any} */ annotation) => {
           if (annotation.subtype !== 'Widget' || !Array.isArray(annotation.rect)) return [];
@@ -6443,6 +6499,29 @@
       }
       markCursorlessTextSpans(textLayerBuilder.div);
     }
+  }
+
+  /**
+   * @param {any[]} pageAnnotations
+   * @param {import('pdfjs-dist').PageViewport} viewport
+   */
+  function read3dAnnotations(pageAnnotations, viewport) {
+    return pageAnnotations.flatMap((/** @type {any} */ annotation) => {
+      if (annotation.subtype !== '3D' || annotation.rect?.length !== 4) return [];
+      const ref = annotationRefFromId(annotation.id);
+      if (ref === null) return [];
+      const [rectX0, rectY0, rectX1, rectY1] = annotation.rect;
+      const corners = [
+        ...viewport.convertToViewportPoint(rectX0, rectY0),
+        ...viewport.convertToViewportPoint(rectX1, rectY1)
+      ];
+      const x = Math.min(corners[0], corners[2]);
+      const y = Math.min(corners[1], corners[3]);
+      const width = Math.abs(corners[2] - corners[0]);
+      const height = Math.abs(corners[3] - corners[1]);
+      if (width < 8 || height < 8) return [];
+      return [{ ref, x, y, width, height }];
+    });
   }
 
   /**
@@ -7333,7 +7412,8 @@
     }));
   }
 
-  async function exportEditedPdfBlob() {
+  /** @param {{ encrypt?: boolean }} [options] encrypt: false skips the password, for printing */
+  async function exportEditedPdfBlob({ encrypt = true } = {}) {
     if (passwordUnlockOpen || unlockingPdf) {
       throw new Error('Unlock this password-protected PDF before downloading.');
     }
@@ -7377,7 +7457,7 @@
         annotations: exportableAnnotations(),
         comments: exportableComments(),
           commentReplies: exportableCommentReplies(),
-        encryptionPassword: encryptionEnabled ? protectionPassword : ''
+        encryptionPassword: encryptionEnabled && encrypt ? protectionPassword : ''
       })
     });
     if (!response.ok) {
@@ -7509,7 +7589,8 @@
    * on top exactly as in a normal export.
    */
   /** The print copy of an edit-protected file, with the editor's additions on top. */
-  async function exportFlattenedBlob() {
+  /** @param {{ encrypt?: boolean }} [options] */
+  async function exportFlattenedBlob({ encrypt = true } = {}) {
     let sourcePdf = await readWorkingPdf();
     if (htmlEditorStarted && htmlEditor?.applyTextEdits) sourcePdf = await htmlEditor.applyTextEdits(sourcePdf);
     const response = await fetch('/api/pdf/export', {
@@ -7520,7 +7601,7 @@
         annotations: exportableAnnotations(),
         comments: exportableComments(),
         commentReplies: exportableCommentReplies(),
-        encryptionPassword: encryptionEnabled ? protectionPassword : '',
+        encryptionPassword: encryptionEnabled && encrypt ? protectionPassword : '',
         printCopy: true
       })
     });
@@ -9225,6 +9306,21 @@
           : null}
         <div class="pdf-page" aria-label={`Page ${index + 1}`}>
           <canvas></canvas>
+          {#each (pdf3dAnnotations[index] ?? []) as model3d (model3d.ref)}
+            <Pdf3dAnnotation
+              rect={model3d}
+              annotationRef={model3d.ref}
+              getPdfBytes={() => workingPdfBytes}
+              onSession={(session) => {
+                if (!session) {
+                  if (pdf3dSession?.ref === model3d.ref) pdf3dSession = null;
+                  return;
+                }
+                if (pdf3dSession && pdf3dSession.ref !== model3d.ref) pdf3dSession.close();
+                pdf3dSession = { ...session, ref: model3d.ref, selected: -1 };
+              }}
+            />
+          {/each}
           {#if appliedWatermarkText && pageSizes[index]}
             <svg
               class="annotation-layer watermark-layer"
@@ -10119,6 +10215,28 @@
             </button>
           </div>
         </footer>
+      </div>
+    </div>
+  {/if}
+  {#if pdf3dSession && activeTool === 'select' && !rasterPanelOpen}
+    {@const session = pdf3dSession}
+    <div class="protect-panel selection-properties-panel drawing-properties-panel" role="dialog" aria-label="3D view" transition:fly={{ x: 18, duration: 240, easing: cubicOut }}>
+      <header class="protect-panel-header">
+        <img src="/toolbar/small/cube.svg" alt="" />
+        <h2>3D View</h2>
+        <button class="protect-panel-close" type="button" aria-label="Close the 3D view" onclick={() => session.close()}><span></span><span></span></button>
+      </header>
+      <div class="selection-properties-scroll">
+        <section class="selection-property-section drawing-property-section" aria-label="Views">
+          {#each [-1, ...session.views.map((_, index) => index)] as viewIndex (viewIndex)}
+            <button
+              class:active={session.selected === viewIndex}
+              class="drawing-toggle"
+              type="button"
+              onclick={() => { session.selectView(viewIndex); pdf3dSession = { ...session, selected: viewIndex }; }}
+            ><span>{viewIndex < 0 ? 'Default View' : session.views[viewIndex]}</span></button>
+          {/each}
+        </section>
       </div>
     </div>
   {/if}

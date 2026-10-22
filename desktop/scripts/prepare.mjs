@@ -193,6 +193,17 @@ async function copyRuntime(name, environmentName, fallback) {
   await cp(source, join(resourcesRoot, 'runtime', name), { recursive: true, dereference: true });
 }
 
+/** Compiles the Apple Vision OCR helper next to the bundled Tesseract. */
+async function buildVisionOcr() {
+  const output = join(resourcesRoot, 'runtime', 'ocr', 'bin', 'docuflex-vision-ocr');
+  run('xcrun', [
+    'swiftc', '-O', '-target', 'arm64-apple-macos26.0',
+    join(desktopRoot, 'native', 'vision-ocr.swift'),
+    '-o', output
+  ]);
+  run('codesign', ['--force', '--sign', '-', output]);
+}
+
 async function copyApplicationResources() {
   await cp(join(repositoryRoot, 'build'), join(resourcesRoot, 'frontend'), { recursive: true });
   await cp(join(repositoryRoot, 'backend', 'out'), join(resourcesRoot, 'backend', 'out'), { recursive: true });
@@ -213,6 +224,7 @@ async function copyApplicationResources() {
   const macOcrRuntime = process.platform === 'darwin' ? join(desktopRoot, 'vendor', 'ocr-macos-arm64') : '';
   await copyRuntime('pdf2htmlEX', 'DOCUFLEX_PDF2HTMLEX_RUNTIME', macPdfRuntime);
   await copyRuntime('ocr', 'DOCUFLEX_OCR_RUNTIME', macOcrRuntime);
+  if (process.platform === 'darwin') await buildVisionOcr();
 
   if (process.platform === 'darwin' && !process.env.DOCUFLEX_OFFICE_RUNTIME?.trim()) {
     const officeBin = join(resourcesRoot, 'runtime', 'office', 'bin');
@@ -275,6 +287,39 @@ async function writeDesktopShell() {
 `);
 }
 
+// PDF to LaTeX compiles with Tectonic: one self-contained binary, pinned and
+// verified by checksum. It fetches the TeX packages a document needs on first
+// use and keeps them in the user's cache.
+const tectonicVersion = '0.17.0';
+const tectonicBuilds = {
+  'darwin-arm64': { triple: 'aarch64-apple-darwin', extension: 'tar.gz', sha256: 'a3f1cac7c5678f01661a92212f58480ae3b0634115d880dbc59e2953ded45667' },
+  'win32-x64': { triple: 'x86_64-pc-windows-msvc', extension: 'zip', sha256: 'f61ce51f0b0ade1015b7de7ef368541c5424e9756ecbd0d7af97d6d48030845f' },
+  // Static musl build: the gnu one needs glibc 2.39, newer than the Ubuntu 22.04 build runner and many desktops.
+  'linux-x64': { triple: 'x86_64-unknown-linux-musl', extension: 'tar.gz', sha256: '8533d07f9ccbd7a65824b9e0459041bca34af1eb33daba48f59215593753a3b7' }
+};
+
+async function prepareTectonicRuntime() {
+  const build = tectonicBuilds[target];
+  if (!build) throw new Error(`No Tectonic build is pinned for ${target}.`);
+  const archiveName = `tectonic-${tectonicVersion}-${build.triple}.${build.extension}`;
+  const archivePath = join(cacheRoot, archiveName);
+  if (!(await exists(archivePath))) {
+    console.log(`Downloading ${archiveName}`);
+    await download(`https://github.com/tectonic-typesetting/tectonic/releases/download/tectonic%40${tectonicVersion}/${archiveName}`, archivePath);
+  }
+  const actual = createHash('sha256').update(await readFile(archivePath)).digest('hex');
+  if (actual !== build.sha256) {
+    await rm(archivePath, { force: true });
+    throw new Error(`Tectonic checksum failed for ${archiveName}.`);
+  }
+  const destination = join(resourcesRoot, 'runtime', 'tectonic');
+  await mkdir(destination, { recursive: true });
+  run('tar', ['-xf', archivePath, '-C', destination]);
+  const executable = join(destination, process.platform === 'win32' ? 'tectonic.exe' : 'tectonic');
+  if (!(await exists(executable))) throw new Error(`Bundled Tectonic executable is missing: ${executable}`);
+  if (process.platform !== 'win32') run('chmod', ['+x', executable]);
+}
+
 async function main() {
   if (!supportedTargets.has(target)) throw new Error(`Unsupported desktop build target: ${target}`);
   await mkdir(cacheRoot, { recursive: true });
@@ -288,6 +333,7 @@ async function main() {
   await prepareNodeRuntime();
   await prepareJavaRuntime();
   await preparePythonRuntime();
+  await prepareTectonicRuntime();
   await generateIcons();
   await writeRuntimeManifest();
   await writeDesktopShell();

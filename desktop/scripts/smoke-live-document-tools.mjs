@@ -82,8 +82,10 @@ try {
   if (!ocrBytes.subarray(0, 5).equals(Buffer.from('%PDF-'))) {
     throw new Error('OCR did not return a PDF document.');
   }
-  if (ocrBytes.length < 5_000 || ocrBytes.length < pdf.length * 3) {
-    throw new Error(`OCR returned a suspiciously small, potentially blank PDF (${ocrBytes.length} bytes).`);
+  // OCR lays invisible text over scanned pages and leaves the pages themselves (and
+  // pages that already have text, like this one) untouched, so the size barely changes.
+  if (ocrBytes.length < pdf.length * 0.9) {
+    throw new Error(`OCR returned a smaller PDF than it received (${ocrBytes.length} of ${pdf.length} bytes).`);
   }
   assertPdfHasVisiblePixels(ocrBytes);
 } catch (error) {

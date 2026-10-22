@@ -376,7 +376,9 @@ fn spawn_services(
     #[cfg(target_os = "macos")]
     frontend_command
         .env("FONTCONFIG_PATH", pdf2html.join("etc/fonts"))
-        .env("FONTCONFIG_FILE", "fonts.conf");
+        .env("FONTCONFIG_FILE", "fonts.conf")
+        // OCR with Apple Vision; Tesseract stays as the fallback.
+        .env("VISION_OCR_BIN", ocr.join("bin/docuflex-vision-ocr"));
     let frontend = frontend_command
         .stdin(Stdio::null())
         .stdout(frontend_stdout)
@@ -520,6 +522,96 @@ async fn docuflex_save_overwrite(path: String, base64: String) -> Result<(), Str
     fs::write(&path, &bytes).map_err(|error| error.to_string())
 }
 
+/// Prints a PDF through the system print dialog. On macOS PDFKit prints the
+/// file itself, so text stays sharp and each page is fitted to the chosen
+/// paper. Elsewhere this errors with "unsupported" and the frontend prints
+/// through the web view instead.
+#[tauri::command]
+async fn docuflex_print_pdf(
+    window: tauri::WebviewWindow,
+    name: String,
+    base64: String,
+) -> Result<(), String> {
+    let bytes = BASE64_STANDARD
+        .decode(base64)
+        .map_err(|error| error.to_string())?;
+    print_pdf(&window, &name, bytes)
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "PDFKit", kind = "framework")]
+extern "C" {}
+
+#[cfg(target_os = "macos")]
+fn print_pdf(window: &tauri::WebviewWindow, name: &str, bytes: Vec<u8>) -> Result<(), String> {
+    // PDFKit reads pages lazily, so the file stays until the next print job.
+    let directory = std::env::temp_dir().join("docuflex-print");
+    let _ = fs::remove_dir_all(&directory);
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let stem: String = name
+        .trim_end_matches(".pdf")
+        .chars()
+        .filter(|character| !matches!(character, '/' | '\\' | ':' | '\0'))
+        .collect();
+    let stem = if stem.trim().is_empty() { "Document".to_string() } else { stem };
+    let path = directory.join(format!("{stem}.pdf"));
+    fs::write(&path, &bytes).map_err(|error| error.to_string())?;
+
+    let ns_window = window.ns_window().map_err(|error| error.to_string())? as usize;
+    let path = path.to_string_lossy().into_owned();
+    window
+        .run_on_main_thread(move || {
+            use objc2::rc::{Allocated, Retained};
+            use objc2::runtime::{AnyClass, AnyObject, Sel};
+            use objc2::msg_send;
+            use objc2_app_kit::{NSPrintInfo, NSPrintOperation, NSWindow};
+            use objc2_foundation::{NSString, NSURL};
+
+            // SAFETY: runs on the main thread with Tauri's live NSWindow; the
+            // messages match PDFKit's documented PDFDocument API.
+            unsafe {
+                let Some(class) = AnyClass::get(c"PDFDocument") else {
+                    return;
+                };
+                let url = NSURL::fileURLWithPath(&NSString::from_str(&path));
+                let allocated: Allocated<AnyObject> = msg_send![class, alloc];
+                let document: Option<Retained<AnyObject>> = msg_send![allocated, initWithURL: &*url];
+                let Some(document) = document else {
+                    return;
+                };
+                let print_info = NSPrintInfo::sharedPrintInfo();
+                // kPDFPrintPageScaleToFit = 1
+                let operation: Option<Retained<NSPrintOperation>> = msg_send![
+                    &*document,
+                    printOperationForPrintInfo: &*print_info,
+                    scalingMode: 1isize,
+                    autoRotate: true
+                ];
+                let Some(operation) = operation else {
+                    return;
+                };
+                operation.setJobTitle(Some(&NSString::from_str(&stem)));
+                let ns_window = &*(ns_window as *const NSWindow);
+                let no_selector: Option<Sel> = None;
+                let _: () = msg_send![
+                    &*operation,
+                    runOperationModalForWindow: ns_window,
+                    delegate: Option::<&AnyObject>::None,
+                    didRunSelector: no_selector,
+                    contextInfo: std::ptr::null_mut::<std::ffi::c_void>()
+                ];
+                // The sheet runs after this returns; keep the document alive for it.
+                std::mem::forget(document);
+            }
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn print_pdf(_window: &tauri::WebviewWindow, _name: &str, _bytes: Vec<u8>) -> Result<(), String> {
+    Err("unsupported".to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     configure_platform_webview();
@@ -544,6 +636,7 @@ pub fn run() {
             start_window_drag,
             docuflex_save_prompt,
             docuflex_save_overwrite,
+            docuflex_print_pdf,
             updater::docuflex_update_check,
             updater::docuflex_update_download,
             updater::docuflex_update_install
