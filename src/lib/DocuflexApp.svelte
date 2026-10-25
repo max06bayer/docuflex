@@ -2,6 +2,8 @@
   import { onDestroy, onMount, tick } from 'svelte';
   import { cubicOut } from 'svelte/easing';
   import { scale } from 'svelte/transition';
+  import ToolSearchResults from '$lib/ToolSearchResults.svelte';
+  import HomeSearchPanel from '$lib/HomeSearchPanel.svelte';
   import PdfEditor from '$lib/PdfEditor.svelte';
   import { trackEvent } from '$lib/analytics.js';
   import CompressFilesPanel from '$lib/CompressFilesPanel.svelte';
@@ -79,6 +81,7 @@
   let closingTabs = new Set();
   let sortExpanded = false;
   let searchQuery = '';
+  let homeSearchOpen = false;
   /** @type {'recent' | 'size' | 'name'} */
   let sortMode = 'recent';
   let sortModeText = 'Recent';
@@ -721,10 +724,11 @@
 
   /** @param {DragEvent} event */
   function handleFileDrop(event) {
+    if (event.defaultPrevented && event.currentTarget === window) return;
     event.preventDefault();
-    const file = event.dataTransfer?.files?.[0];
-    if (!file || (!file.name.toLowerCase().endsWith('.pdf') && file.type !== 'application/pdf')) return;
-    addFileTab(file);
+    for (const file of [...(event.dataTransfer?.files ?? [])]) {
+      if (file.name.toLowerCase().endsWith('.pdf') || file.type === 'application/pdf') addFileTab(file);
+    }
   }
 
   /** @param {File} file @param {string} [password] */
@@ -900,9 +904,20 @@
     if (updatedRecent) void persistRecentDocument(updatedRecent);
   }
 
+  function openSearch() {
+    if (pdfEditor) pdfEditor.openSearchPanel();
+    else homeSearchOpen = true;
+  }
+
   /** @param {KeyboardEvent} event */
   function handleQuickToolShortcut(event) {
+    if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === 'f') {
+      event.preventDefault();
+      openSearch();
+      return;
+    }
     if (event.key === 'Escape') {
+      homeSearchOpen = false;
       sortExpanded = false;
       recentContextMenu = null;
       activePagesQuickTool = null;
@@ -948,6 +963,12 @@
     const handleNativeError = (event) => showErrorToast(event.detail.title, event.detail.message);
     window.addEventListener('pointerdown', closeHomepageMenus);
     window.addEventListener('keydown', handleQuickToolShortcut);
+    /** @param {DragEvent} event */
+    const allowFileDrop = (event) => {
+      if ([...(event.dataTransfer?.types ?? [])].includes('Files')) event.preventDefault();
+    };
+    window.addEventListener('dragover', allowFileDrop);
+    window.addEventListener('drop', handleFileDrop);
     window.addEventListener('scroll', hideQuickTooltip, true);
     window.addEventListener('resize', hideQuickTooltip);
     window.addEventListener('docuflex:error', /** @type {EventListener} */ (handleNativeError));
@@ -962,6 +983,8 @@
       window.removeEventListener('popstate', handleHistoryBack);
       window.removeEventListener('pointerdown', closeHomepageMenus);
       window.removeEventListener('keydown', handleQuickToolShortcut);
+      window.removeEventListener('dragover', allowFileDrop);
+      window.removeEventListener('drop', handleFileDrop);
       window.removeEventListener('docuflex:error', /** @type {EventListener} */ (handleNativeError));
       window.removeEventListener('scroll', hideQuickTooltip, true);
       window.removeEventListener('resize', hideQuickTooltip);
@@ -975,12 +998,6 @@
   });
 </script>
 
-<svelte:head>
-  <title>Docuflex Editor — Edit PDFs Online, Free</title>
-  <meta name="description" content="No account needed. Edit, sign, merge, split, compress and convert PDFs online for free with Docuflex. Private and open source." />
-  <link rel="canonical" href="https://docuflex.eu/editor" />
-</svelte:head>
-
 <main bind:this={shellElement} class="editor-shell" class:website={isWebsite} class:editor-mode={activeTab !== null} class:document-entering={documentEntering} class:ai-docked={aiPanelOpen && aiStatus?.available}>
   <header class="topbar">
     <div class="window-head">
@@ -989,8 +1006,6 @@
         <button class="web-logo" aria-label="Go to Home" title="Home" onclick={() => (activeTab = null)}>
           <img src="/redesign/docuflex-logo1.svg" alt="Docuflex" />
         </button>
-      {:else}
-        <img class="sidebar-toggle" src="/redesign/sidebar-toggle.svg" alt="" />
       {/if}
       <nav class="history" aria-label="History navigation">
         <button class="history-button back" aria-label="Undo" title="Undo" onclick={() => pdfEditor?.undo()}>
@@ -1068,7 +1083,7 @@
           onmouseleave={hideUtilityTooltip}
           onfocus={(event) => scheduleUtilityTooltip(webSearchUtility, event.currentTarget)}
           onblur={hideUtilityTooltip}
-          onclick={() => { hideUtilityTooltip(); pdfEditor?.openSearchPanel(); }}
+          onclick={() => { hideUtilityTooltip(); openSearch(); }}
         >
           <img class="utility-icon-search" src="/redesign/icon-search.svg" alt="" />
         </button>
@@ -1152,7 +1167,7 @@
         { id: 'search', icon: '/search.svg', label: 'Search', description: 'Find text in the current PDF.' },
         { id: 'assistant', icon: '/redesign/icon-brain.svg', label: 'AI Chat', description: aiStatus?.available ? (aiBusy ? 'Docuflex AI is working…' : 'Ask AI about your document or let it edit for you.') : aiStatus?.configurable ? 'Add your OpenRouter API key in Settings to chat with AI.' : 'Chat with AI about your document.' },
         { id: 'settings', icon: '/redesign/icon-settings2.svg', label: 'Settings', description: 'Open Docuflex settings.' }
-      ].filter((utility) => activeTab === null ? utility.id !== 'search' : utility.id !== 'home' && utility.id !== 'search') as utility (utility.id)}
+      ].filter((utility) => activeTab === null ? true : utility.id !== 'home' && utility.id !== 'search') as utility (utility.id)}
         {@const aiUtility = utility.id === 'assistant'}
         <button
           class="utility-button"
@@ -1172,7 +1187,7 @@
           onclick={() => {
             hideUtilityTooltip();
             if (utility.id === 'home') activeTab = null;
-            else if (utility.id === 'search') pdfEditor?.openSearchPanel();
+            else if (utility.id === 'search') openSearch();
             else if (utility.id === 'settings') { settingsKeyFocus = false; settingsPanelOpen = !settingsPanelOpen; mcpPanelOpen = false; if (settingsPanelOpen) aiPanelOpen = false; }
             else if (utility.id === 'assistant' && !aiStatus?.available) { settingsKeyFocus = true; settingsPanelOpen = true; mcpPanelOpen = false; aiPanelOpen = false; }
             else if (utility.id === 'assistant') { aiPanelOpen = !aiPanelOpen; if (aiPanelOpen) { settingsPanelOpen = false; mcpPanelOpen = false; } }
@@ -1200,7 +1215,7 @@
         onmouseleave={hideUtilityTooltip}
         onfocus={(event) => scheduleUtilityTooltip(searchUtility, event.currentTarget)}
         onblur={hideUtilityTooltip}
-        onclick={() => { hideUtilityTooltip(); pdfEditor?.openSearchPanel(); }}
+        onclick={() => { hideUtilityTooltip(); openSearch(); }}
       >
         <img class="sidebar-search-icon" src="/redesign/icon-search.svg" alt="" />
       </button>
@@ -1323,6 +1338,10 @@
       </div>
     </div>
 
+    {#if searchQuery.trim()}
+      <div class="home-tool-results"><ToolSearchResults query={searchQuery} tools={quickTools.map((tool) => ({ id: tool.id ?? tool.name.toLowerCase(), label: tool.name, description: tool.description }))} onSelect={(id) => { searchQuery = ''; openQuickTool({ name: id, id }); }} /></div>
+    {/if}
+
     <div class="recent-grid">
       {#each visibleRecentDocuments as document (document.name)}
         <button
@@ -1404,6 +1423,10 @@
       />
     {/if}
   </section>
+  {/if}
+
+  {#if homeSearchOpen && activeTab === null}
+    <HomeSearchPanel tools={quickTools.map((tool) => ({ id: tool.id ?? tool.name.toLowerCase(), label: tool.name, description: tool.description }))} onClose={() => (homeSearchOpen = false)} onSelect={(id) => { homeSearchOpen = false; openQuickTool({ name: id, id }); }} />
   {/if}
 
   <!-- One editor per open tab stays mounted, so switching tabs never reloads a PDF. -->
@@ -1955,6 +1978,8 @@
     from { opacity: 0; transform: scale(0.96); }
     to { opacity: 1; transform: scale(1); }
   }
+
+  .home-tool-results { margin: 0 34px; max-width: 600px; }
 
   .sidebar {
     position: relative;
@@ -2866,15 +2891,6 @@
     background:
       linear-gradient(90deg, rgba(255, 255, 255, 0) 43.47%, #fff 100%),
       linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, #fff 100%);
-  }
-
-  .sidebar-toggle {
-    position: absolute;
-    top: 18px;
-    left: 186px;
-    width: 20px;
-    height: 20px;
-    pointer-events: none;
   }
 
   .editor-shell .history {

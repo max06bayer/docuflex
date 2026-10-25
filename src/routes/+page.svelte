@@ -79,10 +79,18 @@
     content="No account needed. Edit, sign, merge, compress, convert and translate PDFs locally or online. Free forever, private, open source."
   />
   <meta property="og:image" content="https://docuflex.eu/landing-page/editor-rendering.webp" />
+  <meta property="og:image:alt" content="Docuflex PDF editor with document pages and editing tools" />
+  <meta property="og:locale" content="en_US" />
   <meta name="twitter:card" content="summary_large_image" />
   {@html `<script type="application/ld+json">${JSON.stringify({
     '@context': 'https://schema.org',
     '@graph': [
+      {
+        '@type': 'WebSite',
+        '@id': 'https://docuflex.eu/#website',
+        name: 'Docuflex',
+        url: 'https://docuflex.eu/'
+      },
       {
         '@type': 'Organization',
         name: 'Docuflex',
@@ -97,7 +105,8 @@
         description:
           'Free, private, open-source PDF editor with no account needed, running locally as a desktop app or online in the browser.',
         applicationCategory: 'BusinessApplication',
-        operatingSystem: 'Web, macOS, Windows',
+        operatingSystem: 'Web, macOS, Windows, Linux',
+        isAccessibleForFree: true,
         screenshot: 'https://docuflex.eu/landing-page/editor-rendering.webp',
         license: 'https://www.gnu.org/licenses/agpl-3.0.html',
         featureList: [

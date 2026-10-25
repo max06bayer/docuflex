@@ -630,6 +630,23 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .manage(Arc::clone(&pending_pdf))
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                if let Some(path) = paths.iter().find(|path| {
+                    path.is_file()
+                        && path
+                            .extension()
+                            .and_then(|extension| extension.to_str())
+                            .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+                }) {
+                    let pending = window.state::<PendingPdf>();
+                    if let Ok(mut pending) = pending.lock() {
+                        *pending = Some(path.clone());
+                    }
+                    notify_pending_pdf(window.app_handle());
+                }
+            }
+        })
         .manage(updater::UpdateState::default())
         .invoke_handler(tauri::generate_handler![
             take_pending_pdf,

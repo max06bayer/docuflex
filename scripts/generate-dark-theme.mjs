@@ -27,6 +27,8 @@ const files = [
   'src/lib/AiFieldBackground.svelte',
   'src/lib/SettingsPanel.svelte',
   'src/lib/McpPanel.svelte',
+  'src/lib/HomeSearchPanel.svelte',
+  'src/lib/ToolSearchResults.svelte',
   'src/lib/TranslateFilesPanel.svelte',
   'src/lib/QuickToolPagesPanel.svelte',
   'src/lib/HomeProtectPanel.svelte',
