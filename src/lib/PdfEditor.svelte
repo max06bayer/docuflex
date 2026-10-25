@@ -3,6 +3,8 @@
   import { cubicOut } from 'svelte/easing';
   import { flip } from 'svelte/animate';
   import { fade, fly, scale } from 'svelte/transition';
+  import ToolSearchResults from '$lib/ToolSearchResults.svelte';
+  import { editorTools, toolDescriptions } from '$lib/editor-tools.js';
   import EditorToolbar from '$lib/EditorToolbar.svelte';
   import HtmlPdfEditor from '$lib/HtmlPdfEditor.svelte';
   import TranslateFilesPanel from '$lib/TranslateFilesPanel.svelte';
@@ -10298,7 +10300,7 @@
     {@const textMarkPanelLabel = textMarkPanelType === 'crossout' ? 'Crossout' : textMarkPanelType[0].toUpperCase() + textMarkPanelType.slice(1)}
     {@const textMarkPanelColor = textMarkPanelType === 'highlight' ? selectionHighlightColor : textMarkPanelType === 'underline' ? selectionUnderlineColor : selectionCrossoutColor}
     {@const textMarkPanelProperty = textMarkPanelType === 'highlight' ? 'selectionHighlightColor' : textMarkPanelType === 'underline' ? 'selectionUnderlineColor' : 'selectionCrossoutColor'}
-    <div class="protect-panel selection-properties-panel text-tool-properties-panel" role="dialog" aria-label={`${textMarkPanelLabel} properties`} transition:fly={{ x: 18, duration: 240, easing: cubicOut }}>
+    <div class="protect-panel selection-properties-panel text-tool-properties-panel" class:decorated-text-tool={textMarkPanelType !== 'highlight'} role="dialog" aria-label={`${textMarkPanelLabel} properties`} transition:fly={{ x: 18, duration: 240, easing: cubicOut }}>
       <header class="protect-panel-header">
         <img src={`/toolbar/small/${activeTool}.svg`} alt="" />
         <h2>{textMarkPanelLabel}</h2>
@@ -10560,6 +10562,7 @@
             <img src="/arrowright.svg" alt="" />
           </button>
         </div>
+        <ToolSearchResults query={searchQuery} tools={editorTools.filter((tool) => tool.id !== 'search').map((tool) => ({ ...tool, description: toolDescriptions[tool.id] }))} onSelect={(id) => { closeSearchPanel(); activeTool = id; }} />
       </div>
     </div>
   {/if}
@@ -14735,7 +14738,8 @@
 
   .protect-panel.search-panel {
     width: min(420px, calc(100% - 26px));
-    height: 124px;
+    height: auto;
+    max-height: calc(100% - 24px);
   }
 
   .search-panel-content {
@@ -14905,6 +14909,19 @@
     width: 24px;
     height: 24px;
     margin: 0;
+  }
+
+  .decorated-text-tool .protect-panel-header {
+    grid-template-columns: 24px 1fr 28px;
+    padding-left: 15px;
+  }
+
+  /* These 36px SVGs include 6px of padding on each side of the 24px glyph. */
+  .text-tool-properties-panel.decorated-text-tool .protect-panel-header > img {
+    width: 36px;
+    height: 21px;
+    margin: 0;
+    transform: translateX(-6px);
   }
 
   .typography-weight-size-grid,
