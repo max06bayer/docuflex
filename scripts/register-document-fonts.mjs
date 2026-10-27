@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
-import { access, mkdir, lstat, readlink, realpath, symlink, unlink } from 'node:fs/promises';
+import { access, mkdir, lstat, readlink, readdir, realpath, symlink, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // Register the same redistributable faces used by the conversion engine with
@@ -14,9 +14,13 @@ export async function registerDocumentFonts() {
     try {
       const cacheBinary = await realpath(execFileSync('which', ['fc-cache'], { encoding: 'utf8' }).trim());
       const candidates = [join(dirname(cacheBinary), '..', 'etc', 'fonts', 'fonts.conf')];
-      const linkage = execFileSync('ldd', [cacheBinary], { encoding: 'utf8' });
-      const nixLibrary = linkage.match(/(\/nix\/store\/[^\s/]+)\/lib\/libfontconfig\.so/);
-      if (nixLibrary) candidates.unshift(join(nixLibrary[1], 'etc', 'fonts', 'fonts.conf'));
+      if (cacheBinary.startsWith('/nix/store/')) {
+        // Nix splits binaries, libraries and configuration into separate outputs.
+        const packageName = basename(dirname(dirname(cacheBinary))).replace(/^[^-]+-/, '').replace(/-bin$/, '');
+        for (const entry of await readdir('/nix/store')) {
+          if (entry.endsWith(`-${packageName}`)) candidates.unshift(join('/nix/store', entry, 'etc', 'fonts', 'fonts.conf'));
+        }
+      }
       for (const config of candidates) {
         try {
           await access(config);
