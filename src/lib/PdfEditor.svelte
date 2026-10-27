@@ -3,16 +3,16 @@
   import { cubicOut } from 'svelte/easing';
   import { flip } from 'svelte/animate';
   import { fade, fly, scale } from 'svelte/transition';
-  import ToolSearchResults from '$lib/ToolSearchResults.svelte';
-  import { editorTools, toolDescriptions } from '$lib/editor-tools.js';
-  import EditorToolbar from '$lib/EditorToolbar.svelte';
-  import HtmlPdfEditor from '$lib/HtmlPdfEditor.svelte';
-  import TranslateFilesPanel from '$lib/TranslateFilesPanel.svelte';
-  import Pdf3dAnnotation from '$lib/Pdf3dAnnotation.svelte';
-  import { annotationRefFromId } from '$lib/pdf3d/load.js';
-  import { showAppError, translatePdf } from '$lib/translate.js';
-  import { renderLatex } from '$lib/math-render.js';
-  import { printPdf } from '$lib/print.js';
+  import ToolSearchResults from '#lib/ToolSearchResults.svelte';
+  import { editorTools, toolDescriptions } from '#lib/editor-tools.js';
+  import EditorToolbar from '#lib/EditorToolbar.svelte';
+  import HtmlPdfEditor from '#lib/HtmlPdfEditor.svelte';
+  import TranslateFilesPanel from '#lib/TranslateFilesPanel.svelte';
+  import Pdf3dAnnotation from '#lib/Pdf3dAnnotation.svelte';
+  import { annotationRefFromId } from '#lib/pdf3d/load.js';
+  import { showAppError, translatePdf } from '#lib/translate.js';
+  import { renderLatex } from '#lib/math-render.js';
+  import { printPdf } from '#lib/print.js';
 
   /** @typedef {{ x: number; y: number; pressure: number }} StrokePoint */
   /** @typedef {{ id: number; group?: number; type: 'marker' | 'pen'; points: StrokePoint[]; rawPoints?: StrokePoint[]; color?: string; thickness?: number; opacity?: number; falloff?: number; smoothing?: number }} AnnotationStroke */
@@ -287,7 +287,7 @@
   /** @type {Record<number, { ref: number; x: number; y: number; width: number; height: number }[]>} */
   let pdf3dAnnotations = {};
   /** The live 3D view, if one is open; only one runs at a time. */
-  /** @type {(import('$lib/pdf3d/load.js').Pdf3dSession & { ref: number; selected: number }) | null} */
+  /** @type {(import('#lib/pdf3d/load.js').Pdf3dSession & { ref: number; selected: number }) | null} */
   let pdf3dSession = null;
   /** New replies to comments that are already in the PDF, per page, matched by the PDF object ref. */
   /** @type {Record<number, PdfCommentReply[]>} */
@@ -5941,8 +5941,8 @@
           kind: 'resize',
           pageIndex: shapeHit.pageIndex,
           id: shape.id,
-          handleX: /** @type {-1 | 0 | 1} */ (handleX),
-          handleY: /** @type {-1 | 0 | 1} */ (handleY),
+          handleX: /** @type {-1 | 0 | 1} */ (Number(handleX)),
+          handleY: /** @type {-1 | 0 | 1} */ (Number(handleY)),
           initial: { ...shape }
         };
       } else {
@@ -6350,7 +6350,6 @@
     viewer?.querySelectorAll('.textLayer').forEach((layer) => layer.remove());
     void pdfLoadingTask?.destroy();
     pdfLoadingTask = null;
-    pdfDocument?.destroy?.();
     pdfDocument = null;
 
     try {
@@ -9099,7 +9098,6 @@
     textLayerBuilders.forEach((builder) => builder.cancel());
     textLayerAbortController?.abort();
     void pdfLoadingTask?.destroy();
-    pdfDocument?.destroy?.();
   });
 </script>
 

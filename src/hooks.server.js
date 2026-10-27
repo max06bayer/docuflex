@@ -3,9 +3,9 @@ import {
   enterProtectedRoute,
   rejectsCrossSiteMutation,
   securityError
-} from '$lib/server/request-security.js';
+} from '#lib/server/request-security.js';
 
-/** @type {import('@sveltejs/kit').Handle} */
+/** @type {import('@sveltejs/kit/hooks').Handle} */
 export async function handle({ event, resolve }) {
   if (event.url.pathname.startsWith('/api/') && rejectsCrossSiteMutation(event.request)) {
     return applySecurityHeaders(securityError(403, 'Cross-site document requests are not allowed.'), event.url);

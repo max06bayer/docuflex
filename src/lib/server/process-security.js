@@ -1,4 +1,4 @@
-import { env } from '$env/dynamic/private';
+import * as env from '$app/env/private';
 
 const PROFILES = {
   native: { addressSpace: 1536 * 1024 * 1024, cpuSeconds: 600, fileBytes: 350 * 1024 * 1024, processes: 64 },

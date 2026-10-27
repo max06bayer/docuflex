@@ -1,4 +1,4 @@
-import icon from '$lib/assets/favicon.ico?inline';
+import icon from '#lib/assets/favicon.ico?inline';
 
 // Served from a route because the static file server has no MIME type for
 // .ico, and with nosniff an untyped icon may be ignored by crawlers.

@@ -1,6 +1,6 @@
 <script>
   import { onDestroy, onMount, tick } from 'svelte';
-  import HtmlAnnotationOverlay from '$lib/HtmlAnnotationOverlay.svelte';
+  import HtmlAnnotationOverlay from '#lib/HtmlAnnotationOverlay.svelte';
 
   /** @type {File} */
   export let file;
@@ -133,7 +133,7 @@
   async function initializeFile() {
     if (!file) return;
     cleanupExportUrl();
-    pdfDocument?.destroy?.();
+    void pdfDocument?.loadingTask.destroy();
     pdfDocument = null;
     pages = [];
     edits = [];
@@ -170,7 +170,7 @@
     if (!file) return;
 
     cleanupExportUrl();
-    pdfDocument?.destroy?.();
+    void pdfDocument?.loadingTask.destroy();
     pdfDocument = null;
     pages = [];
     edits = [];
@@ -5511,7 +5511,7 @@ ${setupScript}`;
     if (maskFrame) cancelAnimationFrame(maskFrame);
     if (overlayFrame) cancelAnimationFrame(overlayFrame);
     cleanupExportUrl();
-    pdfDocument?.destroy?.();
+    void pdfDocument?.loadingTask.destroy();
   });
 
   onMount(() => {

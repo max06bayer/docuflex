@@ -4,7 +4,7 @@
  * first, so model output can never inject HTML.
  */
 
-import { renderMathMarkup } from '$lib/math-render.js';
+import { renderMathMarkup } from '#lib/math-render.js';
 
 /** Rendered SVG per formula: a string when done, null when the LaTeX is invalid, undefined while rendering. */
 /** @type {Map<string, string | null | undefined>} */

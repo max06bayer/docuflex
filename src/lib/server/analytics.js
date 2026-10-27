@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import maxmind from 'maxmind';
-import { env } from '$env/dynamic/private';
+import * as env from '$app/env/private';
 
 /*
  * Cookie-free web analytics for the landing page, the web editor and release

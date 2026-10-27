@@ -2,7 +2,7 @@
   import { onDestroy, onMount } from 'svelte';
   import { cubicOut } from 'svelte/easing';
   import { fly, scale } from 'svelte/transition';
-  import { LatexError, describeLatexStage, explainLatexStage, formatElapsed, latexKeyReady, latexStatus, rememberLatexModel, runLatex, saveFile, storedLatexModel } from '$lib/latex.js';
+  import { LatexError, describeLatexStage, explainLatexStage, formatElapsed, latexKeyReady, latexStatus, rememberLatexModel, runLatex, saveFile, storedLatexModel } from '#lib/latex.js';
 
   /** @type {() => void} */
   export let onClose = () => {};
@@ -13,7 +13,7 @@
 
   const STYLE_STORAGE_KEY = 'docuflex-latex-style';
 
-  /** @type {import('$lib/latex.js').LatexStatus | null} */
+  /** @type {import('#lib/latex.js').LatexStatus | null} */
   let status = null;
   /** @type {HTMLInputElement | undefined} */
   let fileInput;
@@ -26,7 +26,7 @@
   let openMenu = null;
   let converting = false;
   let error = '';
-  /** @type {import('$lib/latex.js').LatexProgress | null} */
+  /** @type {import('#lib/latex.js').LatexProgress | null} */
   let progress = null;
   /** @type {{ file: File; tex: string; attempts: number } | null} */
   let result = null;
@@ -122,9 +122,10 @@
     clock = setInterval(() => (elapsed = Math.floor((Date.now() - startedAt) / 1000)), 1000);
     const source = inputFile;
     try {
+      const activeStatus = /** @type {import('#lib/latex.js').LatexStatus} */ (status);
       result = await runLatex({
         file: source,
-        status: /** @type {import('$lib/latex.js').LatexStatus} */ (status),
+        status: activeStatus,
         model: selectedModel,
         style: selectedStyle,
         instructions: instructions.trim(),

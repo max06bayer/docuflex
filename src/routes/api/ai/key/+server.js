@@ -1,5 +1,5 @@
-import { deleteOpenRouterKey, saveOpenRouterKey } from '$lib/server/ai.js';
-import { isLocalRequest, mcpAvailable } from '$lib/server/mcp-bridge.js';
+import { deleteOpenRouterKey, saveOpenRouterKey } from '#lib/server/ai.js';
+import { isLocalRequest, mcpAvailable } from '#lib/server/mcp-bridge.js';
 
 /** Saves or removes the OpenRouter key from Settings. Only this computer can reach it. */
 

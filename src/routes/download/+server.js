@@ -1,5 +1,5 @@
 import { redirect } from '@sveltejs/kit';
-import { ANALYTICS_ENABLED, buildRecord, isBot, writeRecord } from '$lib/server/analytics.js';
+import { ANALYTICS_ENABLED, buildRecord, isBot, writeRecord } from '#lib/server/analytics.js';
 
 const RELEASES_URL = 'https://github.com/max06bayer/docuflex/releases/latest';
 
@@ -16,5 +16,5 @@ export async function GET({ request, getClientAddress }) {
       console.error('analytics write failed', error);
     }
   }
-  redirect(302, RELEASES_URL);
+  redirect(302, RELEASES_URL, { external: ['https://github.com'] });
 }

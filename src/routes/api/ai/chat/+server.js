@@ -1,5 +1,5 @@
-import { aiAvailable, streamCompletion, visitorKey, visitorMemories } from '$lib/server/ai.js';
-import { isLocalRequest, mcpAvailable } from '$lib/server/mcp-bridge.js';
+import { aiAvailable, streamCompletion, visitorKey, visitorMemories } from '#lib/server/ai.js';
+import { isLocalRequest, mcpAvailable } from '#lib/server/mcp-bridge.js';
 
 /**
  * One model turn of the AI chat. The window runs the agent loop: it sends the

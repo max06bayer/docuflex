@@ -1,4 +1,4 @@
-import { env } from '$env/dynamic/private';
+import * as env from '$app/env/private';
 import { spawn } from 'node:child_process';
 import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
@@ -10,8 +10,8 @@ import {
   isPdf,
   privateFailure,
   safeFormData
-} from '$lib/server/request-security.js';
-import { boundedCommand } from '$lib/server/process-security.js';
+} from '#lib/server/request-security.js';
+import { boundedCommand } from '#lib/server/process-security.js';
 
 const COMPRESSION_TIMEOUT_MS = 180_000;
 /** @type {Record<string, { dpi: number; quality: number }>} */

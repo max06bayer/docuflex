@@ -1,4 +1,4 @@
-import { TRANSLATION_LANGUAGE_CODES, startDownload, translationStatus } from '$lib/server/translate-runtime.js';
+import { TRANSLATION_LANGUAGE_CODES, startDownload, translationStatus } from '#lib/server/translate-runtime.js';
 
 const NO_STORE = { 'Cache-Control': 'no-store' };
 

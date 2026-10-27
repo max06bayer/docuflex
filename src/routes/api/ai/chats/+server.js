@@ -1,6 +1,6 @@
-import { aiAvailable } from '$lib/server/ai.js';
-import { deleteChat, listChats, readChat, saveChat } from '$lib/server/ai-chats.js';
-import { isLocalRequest } from '$lib/server/mcp-bridge.js';
+import { aiAvailable } from '#lib/server/ai.js';
+import { deleteChat, listChats, readChat, saveChat } from '#lib/server/ai-chats.js';
+import { isLocalRequest } from '#lib/server/mcp-bridge.js';
 
 /** @param {Request} request @param {URL} url */
 async function allowed(request, url) {

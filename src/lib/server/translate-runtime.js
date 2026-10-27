@@ -1,4 +1,4 @@
-import { env } from '$env/dynamic/private';
+import * as env from '$app/env/private';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants, createWriteStream, existsSync } from 'node:fs';
@@ -7,7 +7,7 @@ import { homedir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { logPrivateError } from '$lib/server/request-security.js';
+import { logPrivateError } from '#lib/server/request-security.js';
 
 export const TRANSLATION_LANGUAGE_CODES = new Set(['en', 'de', 'es', 'fr', 'it', 'pt', 'nl', 'pl', 'ru', 'uk', 'ar', 'zh', 'ja', 'ko']);
 

@@ -173,6 +173,14 @@ async function preparePythonRuntime() {
   } else {
     await cp(source, destination, { recursive: true, dereference: process.platform === 'win32' });
   }
+  if (process.platform === 'linux') {
+    // setup-python's interpreter depends on a shared library without a
+    // relocatable RUNPATH. Scope its library path to Python, never the GUI.
+    const launcher = join(destination, 'bin', 'python3');
+    await rm(launcher, { force: true });
+    await writeFile(launcher, '#!/bin/sh\nPYTHON_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)\nexport LD_LIBRARY_PATH="$PYTHON_ROOT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\nexec "$PYTHON_ROOT/bin/python3.12" "$@"\n');
+    run('chmod', ['+x', launcher]);
+  }
   const executable = process.platform === 'win32'
     ? join(destination, 'python.exe')
     : join(destination, 'bin', 'python3');
@@ -354,7 +362,9 @@ async function main() {
   await rm(join(tauriRoot, 'target', 'release', 'resources'), { recursive: true, force: true });
   await mkdir(resourcesRoot, { recursive: true });
 
-  runNpm(['run', 'build']);
+  runNpm(['run', 'build'], { env: {
+    DOCUFLEX_DESKTOP_ORIGIN: `http://127.0.0.1:${process.env.DOCUFLEX_VARIANT === 'redesign' ? 43137 : 43127}`
+  } });
   runNpm(['run', 'backend:compile']);
   await copyApplicationResources();
   await prepareNodeRuntime();

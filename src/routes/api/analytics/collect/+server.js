@@ -1,4 +1,4 @@
-import { ANALYTICS_ENABLED, buildRecord, isBot, writeRecord } from '$lib/server/analytics.js';
+import { ANALYTICS_ENABLED, buildRecord, isBot, writeRecord } from '#lib/server/analytics.js';
 
 const MAX_BODY_BYTES = 2048;
 const EVENT_NAMES = new Set(['tool_open', 'export', 'file_open']);

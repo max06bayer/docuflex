@@ -1,7 +1,7 @@
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, extname, isAbsolute, resolve } from 'node:path';
-import { callApp } from '$lib/server/mcp-bridge.js';
+import { callApp } from '#lib/server/mcp-bridge.js';
 
 /**
  * Tools the Docuflex MCP server exposes. Each one runs inside the open

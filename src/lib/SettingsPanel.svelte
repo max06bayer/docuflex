@@ -2,9 +2,9 @@
   import { onDestroy, tick } from 'svelte';
   import { cubicOut } from 'svelte/easing';
   import { fade, fly, scale } from 'svelte/transition';
-  import { applyTheme, currentTheme } from '$lib/theme.js';
-  import { removeVisitorKey, saveVisitorKey } from '$lib/ai-web.js';
-  import { checkForUpdate, isDesktopApp } from '$lib/updater.js';
+  import { applyTheme, currentTheme } from '#lib/theme.js';
+  import { removeVisitorKey, saveVisitorKey } from '#lib/ai-web.js';
+  import { checkForUpdate, isDesktopApp } from '#lib/updater.js';
 
   /** @type {() => void} */
   export let onClose = () => {};

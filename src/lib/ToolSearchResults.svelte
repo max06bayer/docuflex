@@ -1,6 +1,6 @@
 <script>
   export let query = '';
-  import { editorTools } from '$lib/editor-tools.js';
+  import { editorTools } from '#lib/editor-tools.js';
   const menuTools = new Map(editorTools.map((tool) => [tool.id, tool]));
   /** Only home tools without a bottom-toolbar entry need separate artwork. @type {Record<string, string>} */
   const homeIcons = {

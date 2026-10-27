@@ -2,12 +2,12 @@
   import { onDestroy, onMount, tick } from 'svelte';
   import { cubicOut } from 'svelte/easing';
   import { fade, fly, slide } from 'svelte/transition';
-  import { onMathRendered, renderMarkdown } from '$lib/ai-markdown.js';
-  import AiFieldBackground from '$lib/AiFieldBackground.svelte';
+  import { onMathRendered, renderMarkdown } from '#lib/ai-markdown.js';
+  import AiFieldBackground from '#lib/AiFieldBackground.svelte';
   import {
     deleteVisitorChat, downloadPdf, fileToBase64, listVisitorChats, pickPdf, readVisitorChat,
     runVisitorMemoryTool, saveVisitorChat, visitorKey, visitorMemories
-  } from '$lib/ai-web.js';
+  } from '#lib/ai-web.js';
 
   /**
    * AI chat docked next to the document. The model (through /api/ai/chat)

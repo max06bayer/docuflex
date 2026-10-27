@@ -1,4 +1,4 @@
-import { env } from '$env/dynamic/private';
+import * as env from '$app/env/private';
 import { spawn } from 'node:child_process';
 import { access, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
@@ -11,8 +11,8 @@ import {
   contentLengthExceeds,
   isPdf,
   privateFailure
-} from '$lib/server/request-security.js';
-import { boundedCommand } from '$lib/server/process-security.js';
+} from '#lib/server/request-security.js';
+import { boundedCommand } from '#lib/server/process-security.js';
 
 const MAX_CONVERTER_LOG_BYTES = 64 * 1024;
 const CONVERSION_TIMEOUT_MS = 180_000;
