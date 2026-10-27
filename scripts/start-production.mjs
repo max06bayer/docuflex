@@ -1,14 +1,8 @@
 import { spawn } from 'node:child_process';
-import { mkdir } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { updateGeoip } from './update-geoip.mjs';
 import { registerDocumentFonts } from './register-document-fonts.mjs';
 
-// Nix's Office launcher otherwise tries /run/user/<uid>, which the
-// restricted container user cannot create.
-const runtimeDirectory = process.env.XDG_RUNTIME_DIR || join(tmpdir(), `docuflex-runtime-${process.getuid?.() ?? 'server'}`);
-await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
 await registerDocumentFonts();
 
 const javaEnvironment = {
@@ -21,7 +15,6 @@ const javaEnvironment = {
 };
 const frontendEnvironment = {
   ...process.env,
-  XDG_RUNTIME_DIR: runtimeDirectory,
   PDF_BACKEND_URL:
     process.env.PDF_BACKEND_URL ??
     `http://${javaEnvironment.PDF_BACKEND_HOST}:${javaEnvironment.PDF_BACKEND_PORT}`,
