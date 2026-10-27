@@ -101,6 +101,7 @@ rm -rf -- "$OFFICE_EXTRACT" "$OFFICE_ARCHIVE"
 find "$RUNTIME_ROOT/office/program" -maxdepth 1 -type f \
   \( -name 'libvclplug_qt*lo.so' -o -name 'libvclplug_kf*lo.so' \
      -o -name 'libkf*be*lo.so' -o -name 'libqt*be*lo.so' \
+     -o -name 'libgtk4be*lo.so' -o -name 'libavmediaqt*.so' \
      -o -name 'libvclplug_gtk4lo.so' \) -delete
 mv "$RUNTIME_ROOT/office/program/soffice" "$RUNTIME_ROOT/office/program/soffice-vendor"
 cp desktop/runtime/soffice-linux.sh "$RUNTIME_ROOT/office/program/soffice"
