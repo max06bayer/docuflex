@@ -273,6 +273,10 @@ fn isolate_service_environment(_command: &mut Command) {
         // runtimes on rolling distributions such as Arch/CachyOS.
         _command.env_remove("LD_LIBRARY_PATH");
         _command.env_remove("LD_PRELOAD");
+        // AppRun's Python plugin points these at AppDir/usr, whereas our
+        // interpreter and standard library live together in runtime/python.
+        _command.env_remove("PYTHONHOME");
+        _command.env_remove("PYTHONPATH");
     }
 }
 
