@@ -145,7 +145,7 @@ class EditableConversion(unittest.TestCase):
             directory=self.directory/'render-images'
             directory.mkdir()
             subprocess.run([os.environ['DOCUMENT_CONVERTER_BIN'],f'-env:UserInstallation={(directory/"profile").as_uri()}',
-                            '--headless','--convert-to','pdf','--outdir',str(directory),str(output)],check=True,capture_output=True,timeout=60)
+                            '--headless','--convert-to','pdf','--outdir',str(directory),str(output)],check=True,timeout=60)
             with fitz.open(directory/'masked-images.pdf') as rendered:
                 pix=rendered[0].get_pixmap()
                 # Photo survived instead of exposing the purple base rectangle.
@@ -194,7 +194,7 @@ class EditableConversion(unittest.TestCase):
             subprocess.run([os.environ['DOCUMENT_CONVERTER_BIN'],
                             f'-env:UserInstallation={(directory / "profile").as_uri()}',
                             '--headless', '--convert-to', 'pdf', '--outdir', str(directory),
-                            str(self.directory / f'output.{fmt}')], check=True, capture_output=True, timeout=60)
+                            str(self.directory / f'output.{fmt}')], check=True, timeout=60)
             with fitz.open(directory / 'output.pdf') as rendered:
                 self.assertEqual(len(rendered), 2)
                 text = ' '.join(page.get_text() for page in rendered)
