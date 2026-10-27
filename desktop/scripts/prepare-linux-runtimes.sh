@@ -96,7 +96,15 @@ for package in "$OFFICE_EXTRACT"/*/DEBS/*.deb; do
 done
 cp -a "$OFFICE_EXTRACT/root/opt/libreoffice26.2/." "$RUNTIME_ROOT/office/"
 rm -rf -- "$OFFICE_EXTRACT" "$OFFICE_ARCHIVE"
-chmod +x "$RUNTIME_ROOT/office/program/soffice" "$RUNTIME_ROOT/office/program/soffice.bin"
+# The app only invokes headless filters. Optional KDE/Qt/GTK4 integrations
+# otherwise make linuxdeploy require entire desktop environments.
+find "$RUNTIME_ROOT/office/program" -maxdepth 1 -type f \
+  \( -name 'libvclplug_qt*lo.so' -o -name 'libvclplug_kf*lo.so' \
+     -o -name 'libkf*be*lo.so' -o -name 'libqt*be*lo.so' \
+     -o -name 'libvclplug_gtk4lo.so' \) -delete
+mv "$RUNTIME_ROOT/office/program/soffice" "$RUNTIME_ROOT/office/program/soffice-vendor"
+cp desktop/runtime/soffice-linux.sh "$RUNTIME_ROOT/office/program/soffice"
+chmod +x "$RUNTIME_ROOT/office/program/soffice" "$RUNTIME_ROOT/office/program/soffice-vendor" "$RUNTIME_ROOT/office/program/soffice.bin"
 
 cat > "$RUNTIME_ROOT/ocr/SOURCE.txt" <<'EOF'
 Linux x86_64 native runtime prepared on Ubuntu 22.04.
