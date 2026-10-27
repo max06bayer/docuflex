@@ -54,6 +54,9 @@ try {
   run(executable('node', 'node'), ['--version']);
   run(executable('java', 'java'), ['--version']);
   run(python, ['-c', 'import PIL, docx, lxml, openpyxl, pptx, xlsxwriter, pymupdf, fontTools; print("python-ok")']);
+  if (process.platform === 'linux') {
+    run(python, [join(resources, 'scripts', 'check-linux-office-dependencies.py'), join(resources, 'runtime', 'office')], { timeout: 120_000 });
+  }
   run(ocrExecutable('pdftoppm'), ['-v']);
   run(ocrExecutable('pdfunite'), ['-v']);
   const languages = run(ocrExecutable('tesseract'), ['--list-langs'], {
