@@ -14,6 +14,7 @@ const buildEnvironment = process.platform === 'linux'
       ...process.env,
       NO_STRIP: '1',
       LD_LIBRARY_PATH: [
+        join(desktopRoot, 'src-tauri', 'resources', 'runtime', 'java', 'lib'),
         join(desktopRoot, 'src-tauri', 'resources', 'runtime', 'java', 'lib', 'server'),
         process.env.LD_LIBRARY_PATH
       ].filter(Boolean).join(':')
