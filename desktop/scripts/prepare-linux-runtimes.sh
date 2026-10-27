@@ -92,6 +92,9 @@ OFFICE_EXTRACT="$RUNTIME_ROOT/office-extract"
 mkdir -p "$OFFICE_EXTRACT/root"
 tar -xzf "$OFFICE_ARCHIVE" -C "$OFFICE_EXTRACT"
 for package in "$OFFICE_EXTRACT"/*/DEBS/*.deb; do
+  case "$package" in
+    *-kde-integration_*) continue ;;
+  esac
   dpkg-deb -x "$package" "$OFFICE_EXTRACT/root"
 done
 cp -a "$OFFICE_EXTRACT/root/opt/libreoffice26.2/." "$RUNTIME_ROOT/office/"
@@ -104,6 +107,11 @@ find "$RUNTIME_ROOT/office/program" -maxdepth 1 -type f \
      -o -name 'libgtk4be*lo.so' -o -name 'libavmedia*.so' \
      -o -name 'liblibreofficekitgtk.so' \
      -o -name 'libvclplug_gtk4lo.so' \) -delete
+# This optional module in LibreOffice's macro interpreter requires libcrypt.so.2,
+# absent on the Ubuntu 22.04 baseline. Document filters do not use it; Docuflex
+# runs conversion in its own separately bundled Python interpreter.
+find "$RUNTIME_ROOT/office/program" -type f \
+  -path '*/python-core-*/lib/lib-dynload/_crypt.*.so' -delete
 mv "$RUNTIME_ROOT/office/program/soffice" "$RUNTIME_ROOT/office/program/soffice-vendor"
 cp desktop/runtime/soffice-linux.sh "$RUNTIME_ROOT/office/program/soffice"
 chmod +x "$RUNTIME_ROOT/office/program/soffice" "$RUNTIME_ROOT/office/program/soffice-vendor" "$RUNTIME_ROOT/office/program/soffice.bin"
