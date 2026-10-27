@@ -11,7 +11,10 @@ if [[ -f "$runtime_dir/argostranslate/__init__.py" \
   && -f "$runtime_dir/reportlab/__init__.py" \
   && -f "$runtime_dir/docx/__init__.py" \
   && -f "$runtime_dir/pptx/__init__.py" \
-  && -f "$runtime_dir/openpyxl/__init__.py" ]]; then
+  && -f "$runtime_dir/fontTools/__init__.py" \
+  && -f "$runtime_dir/openpyxl/__init__.py" \
+  && -f "$runtime_dir/.conversion-requirements" ]] \
+  && cmp -s "$root_dir/scripts/requirements-conversion.txt" "$runtime_dir/.conversion-requirements"; then
   echo "Python document tools are already installed."
   exit 0
 fi
@@ -38,18 +41,16 @@ fi
 "${pip_command[@]}" install \
   --disable-pip-version-check \
   --no-input \
+  --upgrade \
   --only-binary=:all: \
   "${cpu_index[@]}" \
   --target "$runtime_dir" \
   "${torch_requirement[@]}" \
   'argostranslate==1.11.0' \
-  'PyMuPDF==1.26.7' \
-  'Pillow==12.3.0' \
   'reportlab==5.0.0' \
-  'python-docx==1.2.0' \
-  'python-pptx==1.0.2' \
-  'openpyxl==3.1.5'
+  -r "$root_dir/scripts/requirements-conversion.txt"
 
 test -f "$runtime_dir/argostranslate/__init__.py"
 test -f "$runtime_dir/fitz/__init__.py"
 test -f "$runtime_dir/PIL/__init__.py"
+cp "$root_dir/scripts/requirements-conversion.txt" "$runtime_dir/.conversion-requirements"

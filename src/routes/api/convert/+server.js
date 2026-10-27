@@ -4,6 +4,7 @@ import { access, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs
 import { constants } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { extname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   MAX_DOCUMENT_BYTES,
   MAX_GENERATED_BYTES,
@@ -55,22 +56,38 @@ export async function POST({ request }) {
   const inputPath = join(directory, `${baseName}.${inputFormat}`);
   try {
     await writeFile(inputPath, bytes);
+    const officeProfile = `-env:UserInstallation=${pathToFileURL(join(directory, 'office-profile')).href}`;
+    const officeConvert = async (/** @type {string} */ source, /** @type {string} */ format) => {
+      await runConverter(await converterBinary(), [officeProfile, '--headless', '--convert-to', format, '--outdir', directory, source]);
+      return convertedOutputPath(directory, source, format);
+    };
     let outputPath;
+    let warning = '';
     if (supportsDirectConversion(inputFormat, outputFormat)) {
-      try {
-        await runConverter(await converterBinary(), ['--headless', '--convert-to', outputFormat, '--outdir', directory, inputPath]);
-        outputPath = await convertedOutputPath(directory, inputPath, outputFormat);
-      } catch (directError) {
-        console.warn(`Direct ${inputFormat.toUpperCase()} to ${outputFormat.toUpperCase()} conversion failed; using page rendering.`, directError);
+      // Office's native filters preserve the source structure. Never silently
+      // flatten a failed conversion into page screenshots.
+      outputPath = await officeConvert(inputPath, outputFormat);
+    } else {
+      const pdfPath = inputFormat === 'pdf' ? inputPath : await officeConvert(inputPath, 'pdf');
+      const generatedFormat = outputFormat === 'doc' ? 'docx' : outputFormat;
+      const generatedPath = join(directory, `converted.${generatedFormat}`);
+      const report = await runConverter(await pythonBinary(), [
+        join(process.cwd(), 'scripts', 'build-converted-office.py'), generatedFormat, generatedPath, pdfPath
+      ]);
+      if (/"ocrPages":\s*[1-9]/.test(report)) {
+        warning = 'Scanned pages were reconstructed with local OCR. Check recognized text; original scan fonts and artwork cannot be recovered reliably.';
       }
+      outputPath = outputFormat === 'doc' ? await officeConvert(generatedPath, 'doc') : generatedPath;
     }
-    outputPath ??= await convertViaPageImages({ directory, inputPath, inputFormat, outputFormat, baseName });
+    if (outputFormat === 'doc') warning = [warning, 'DOC is a legacy format. Use DOCX to retain embedded fonts and the best layout fidelity.'].filter(Boolean).join(' ');
     const outputStats = await stat(outputPath);
     if (!outputStats.size || outputStats.size > MAX_GENERATED_BYTES) throw new Error('Generated document exceeded the safe output limit.');
     const output = await readFile(outputPath);
-    return downloadResponse(output, `${baseName}.${outputFormat}`, outputFormat);
+    return downloadResponse(output, `${baseName}.${outputFormat}`, outputFormat, warning);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
+    const inputError = detail.match(/CONVERSION_INPUT: ([^\r\n]+)/)?.[1];
+    if (inputError) return Response.json({ error: inputError }, { status: 422 });
     return privateFailure(
       error,
       'Document conversion',
@@ -97,32 +114,6 @@ async function convertedOutputPath(directory, inputPath, outputFormat) {
   return join(directory, outputName);
 }
 
-/** @param {{ directory: string; inputPath: string; inputFormat: string; outputFormat: string; baseName: string }} options */
-async function convertViaPageImages({ directory, inputPath, inputFormat, outputFormat, baseName }) {
-  const officeBinary = await converterBinary();
-  let pdfPath = inputPath;
-  if (inputFormat !== 'pdf') {
-    await runConverter(officeBinary, ['--headless', '--convert-to', 'pdf', '--outdir', directory, inputPath]);
-    pdfPath = await convertedOutputPath(directory, inputPath, 'pdf');
-  }
-  if (outputFormat === 'pdf') return pdfPath;
-
-  const pagePrefix = join(directory, 'page');
-  await runConverter(await pdfRendererBinary(), ['-png', '-r', '144', pdfPath, pagePrefix]);
-  const generatedFormat = outputFormat === 'doc' ? 'docx' : outputFormat;
-  const generatedPath = join(directory, `${baseName}-rendered.${generatedFormat}`);
-  await runConverter(await pythonBinary(), [
-    join(process.cwd(), 'scripts', 'build-converted-office.py'),
-    generatedFormat,
-    generatedPath,
-    directory
-  ]);
-  if (outputFormat !== 'doc') return generatedPath;
-
-  await runConverter(officeBinary, ['--headless', '--convert-to', 'doc', '--outdir', directory, generatedPath]);
-  return convertedOutputPath(directory, generatedPath, 'doc');
-}
-
 async function converterBinary() {
   const configured = env.DOCUMENT_CONVERTER_BIN?.trim();
   if (configured) return configured;
@@ -141,18 +132,6 @@ async function converterBinary() {
     }
   }
   return 'soffice';
-}
-
-async function pdfRendererBinary() {
-  const configured = env.PDF_RENDER_BIN?.trim();
-  if (configured) return configured;
-  return firstExecutable([
-    join(homedir(), '.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override/pdftoppm'),
-    '/opt/homebrew/bin/pdftoppm',
-    '/opt/local/bin/pdftoppm',
-    '/usr/local/bin/pdftoppm',
-    '/usr/bin/pdftoppm'
-  ], 'pdftoppm');
 }
 
 async function pythonBinary() {
@@ -185,13 +164,14 @@ function safeBaseName(fileName) {
   return fileName.replace(/\.[^.]+$/, '').replace(/[^a-z0-9._-]+/gi, '-').replace(/^-+|-+$/g, '') || 'converted';
 }
 
-/** @param {Buffer} bytes @param {string} name @param {string} format */
-function downloadResponse(bytes, name, format) {
+/** @param {Buffer} bytes @param {string} name @param {string} format @param {string} [warning] */
+function downloadResponse(bytes, name, format, warning = '') {
   return new Response(new Uint8Array(bytes), {
     headers: {
       'Content-Type': CONTENT_TYPES[format],
       'Content-Disposition': `attachment; filename="${name}"`,
-      'Cache-Control': 'no-store'
+      'Cache-Control': 'no-store',
+      ...(warning ? { 'X-Docuflex-Conversion-Warning': warning } : {})
     }
   });
 }
@@ -200,18 +180,23 @@ function downloadResponse(bytes, name, format) {
 function runConverter(binary, args) {
   return new Promise((resolve, reject) => {
     const command = boundedCommand(binary, args, 'native');
-    const child = spawn(command.binary, command.args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    const child = spawn(command.binary, command.args, { stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
     let errorLog = '';
+    let outputLog = '';
     const timeout = setTimeout(() => {
-      child.kill('SIGKILL');
+      if (process.platform !== 'win32' && child.pid) {
+        try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
+      } else child.kill('SIGKILL');
       reject(new Error('Document conversion timed out.'));
     }, CONVERSION_TIMEOUT_MS);
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => { outputLog = (outputLog + chunk).slice(-64 * 1024); });
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk) => { if (errorLog.length < 64 * 1024) errorLog += chunk; });
     child.on('error', (error) => { clearTimeout(timeout); reject(error); });
-    child.on('exit', (code, signal) => {
+    child.on('close', (code, signal) => {
       clearTimeout(timeout);
-      if (code === 0) resolve(undefined);
+      if (code === 0) resolve(outputLog);
       else reject(new Error(errorLog.trim() || `Document converter stopped (${signal ?? `exit ${code ?? 1}`}).`));
     });
   });

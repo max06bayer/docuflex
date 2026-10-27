@@ -1,6 +1,6 @@
 [package]
 name = "docuflex-desktop"
-version = "0.9.4"
+version = "0.9.5"
 description = "Docuflex offline PDF editor for macOS, Windows, and Linux"
 authors = ["Maximilian Bayer"]
 edition = "2021"

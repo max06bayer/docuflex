@@ -127,7 +127,7 @@ PACKAGE_SIZE=$(du -sk "$PACKAGE_ROOT/usr" | awk '{print $1 * 1024}')
 cat > "$PACKAGE_ROOT/.PKGINFO" <<EOF
 pkgname = docuflex
 pkgbase = docuflex
-pkgver = 0.9.4-1
+pkgver = 0.9.5-1
 pkgdesc = Docuflex offline PDF editor
 url = https://github.com/max06bayer/docuflex
 builddate = $(date +%s)
@@ -145,7 +145,7 @@ EOF
 
 mkdir -p "$OUTPUT_DIR"
 (cd "$PACKAGE_ROOT" && bsdtar --zstd -cf \
-  "$OUTPUT_DIR/docuflex-0.9.4-1-x86_64.pkg.tar.zst" .PKGINFO usr)
+  "$OUTPUT_DIR/docuflex-0.9.5-1-x86_64.pkg.tar.zst" .PKGINFO usr)
 
 ldd "$PACKAGE_ROOT/usr/bin/docuflex-desktop" | tee "$OUTPUT_DIR/docuflex-arch-ldd.txt"
 if grep -q 'not found' "$OUTPUT_DIR/docuflex-arch-ldd.txt"; then

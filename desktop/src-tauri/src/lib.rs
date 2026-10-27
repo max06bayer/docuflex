@@ -371,6 +371,8 @@ fn spawn_services(
         .env("TESSERACT_BIN", ocr_executable(resource_root, "tesseract"))
         .env("TESSDATA_PREFIX", ocr.join("share/tessdata"))
         .env("PDF_RENDER_BIN", ocr_executable(resource_root, "pdftoppm"))
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .env("ANALYTICS_ENABLED", "false")
         .env("DOCUMENT_CONVERTER_PYTHON", python)
         .env("DOCUMENT_CONVERTER_BIN", document_converter);
     #[cfg(target_os = "macos")]
@@ -467,6 +469,43 @@ fn choose_download_destination(suggested: &Path) -> Option<PathBuf> {
     rfd::FileDialog::new()
         .set_file_name(suggested_name)
         .save_file()
+}
+
+#[cfg(target_os = "macos")]
+const MACOS_TRAFFIC_LIGHT_POSITION: (f64, f64) = (16.4, 24.6);
+
+/// AppKit can reset the overlay titlebar during maximize/resize without redrawing
+/// Tao's backing view, so reapply the same inset after those layout changes.
+#[cfg(target_os = "macos")]
+fn position_native_window_buttons(window: &tauri::Window) {
+    if window.is_fullscreen().unwrap_or(false) {
+        return;
+    }
+    let Ok(ns_window) = window.ns_window() else {
+        return;
+    };
+    let ns_window = ns_window as usize;
+    let _ = window.run_on_main_thread(move || {
+        use objc2_app_kit::{NSWindow, NSWindowButton};
+        // SAFETY: Tauri's live window pointer is accessed only on the main thread.
+        let ns_window = unsafe { &*(ns_window as *const NSWindow) };
+        let Some(close) = ns_window.standardWindowButton(NSWindowButton::CloseButton) else { return };
+        let Some(minimize) = ns_window.standardWindowButton(NSWindowButton::MiniaturizeButton) else { return };
+        let Some(zoom) = ns_window.standardWindowButton(NSWindowButton::ZoomButton) else { return };
+        // SAFETY: the native titlebar view hierarchy is read on the main thread.
+        let Some(container) = (unsafe { close.superview().and_then(|view| view.superview()) }) else { return };
+        let close_frame = close.frame();
+        let spacing = minimize.frame().origin.x - close_frame.origin.x;
+        let mut frame = container.frame();
+        frame.size.height = close_frame.size.height + MACOS_TRAFFIC_LIGHT_POSITION.1;
+        frame.origin.y = ns_window.frame().size.height - frame.size.height;
+        container.setFrame(frame);
+        for (index, button) in [close, minimize, zoom].into_iter().enumerate() {
+            let mut origin = button.frame().origin;
+            origin.x = MACOS_TRAFFIC_LIGHT_POSITION.0 + index as f64 * spacing;
+            button.setFrameOrigin(origin);
+        }
+    });
 }
 
 /// Hides or shows the native traffic lights (the web view can still ask for this).
@@ -631,6 +670,10 @@ pub fn run() {
     let app = tauri::Builder::default()
         .manage(Arc::clone(&pending_pdf))
         .on_window_event(|window, event| {
+            #[cfg(target_os = "macos")]
+            if matches!(event, tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Focused(true)) {
+                position_native_window_buttons(window);
+            }
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
                 if let Some(path) = paths.iter().find(|path| {
                     path.is_file()
@@ -716,7 +759,10 @@ pub fn run() {
                 // 23.4 × 22.6 pt from the top-left (Figma's 29 × 28 at the macOS UI scale
                 // of 0.8075). Tauri places the 14 pt button's left edge at x and its
                 // center at y − 2.
-                .traffic_light_position(LogicalPosition::new(16.4, 24.6));
+                .traffic_light_position(LogicalPosition::new(
+                    MACOS_TRAFFIC_LIGHT_POSITION.0,
+                    MACOS_TRAFFIC_LIGHT_POSITION.1,
+                ));
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             let window_builder = window_builder.decorations(false).shadow(true);
             #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -727,7 +773,7 @@ pub fn run() {
                     }
                 }
             });
-            window_builder
+            let window = window_builder
                 .initialization_script(editor_initialization_script())
                 .on_navigation(move |url| {
                     if url.scheme() == "about" {
@@ -778,8 +824,10 @@ pub fn run() {
                     DownloadEvent::Finished { .. } => true,
                     _ => true,
                 })
-                .build()?
-                .maximize()?;
+                .build()?;
+            window.maximize()?;
+            #[cfg(target_os = "macos")]
+            position_native_window_buttons(&window.as_ref().window());
             Ok(())
         })
         .build(tauri::generate_context!())

@@ -1,9 +1,9 @@
 [phases.setup]
-nixPkgs = ["...", "jdk21_headless", "python313", "python313Packages.pip", "curl", "util-linux", "ocrmypdf", "tesseract", "poppler-utils", "qpdf", "ghostscript"]
+nixPkgs = ["...", "jdk21_headless", "python313", "python313Packages.pip", "curl", "util-linux", "ocrmypdf", "tesseract", "poppler-utils", "qpdf", "ghostscript", "libreoffice", "fontconfig"]
 nixLibs = ["...", "gcc-unwrapped", "fontconfig", "freetype", "glib", "libxcb", "xorg.libX11"]
 
 [phases.build]
-cmds = ["bash scripts/install-pdf2htmlex-linux.sh", "bash scripts/install-ocr-languages-linux.sh", "bash scripts/install-python-document-tools.sh", "bash scripts/install-translation-models.sh", "npm run build", "npm run backend:compile"]
+cmds = ["bash scripts/install-pdf2htmlex-linux.sh", "bash scripts/install-ocr-languages-linux.sh", "bash scripts/install-python-document-tools.sh", "bash scripts/install-translation-models.sh", "node scripts/register-document-fonts.mjs", "bash scripts/test-server-conversion.sh", "npm run build", "npm run backend:compile"]
 
 [start]
 cmd = "install -d -o 65532 -g 65532 /tmp/docuflex-home && profile_path=$(readlink -f /root/.nix-profile) && export PATH=$profile_path/bin:$PATH HOME=/tmp/docuflex-home && exec setpriv --reuid=65532 --regid=65532 --clear-groups --no-new-privs --inh-caps=-all --ambient-caps=-all --bounding-set=-all npm run start"

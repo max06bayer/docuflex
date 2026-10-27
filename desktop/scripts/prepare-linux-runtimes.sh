@@ -9,7 +9,7 @@ esac
 
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends \
-  curl libarchive-tools libreoffice-writer pax-utils poppler-utils \
+  curl libarchive-tools libreoffice-writer libreoffice-calc libreoffice-impress pax-utils poppler-utils \
   tesseract-ocr tesseract-ocr-deu tesseract-ocr-eng tesseract-ocr-osd
 
 rm -rf -- "$RUNTIME_ROOT"
@@ -92,5 +92,5 @@ Linux x86_64 native runtime prepared on Ubuntu 22.04.
 OCR: Ubuntu native Tesseract and Poppler packages with English, German, and OSD data.
 EOF
 cat > "$RUNTIME_ROOT/office/SOURCE.txt" <<'EOF'
-Linux x86_64 native LibreOffice Writer runtime prepared from the Ubuntu 22.04 package.
+Linux x86_64 native LibreOffice Writer, Calc and Impress runtime prepared from Ubuntu 22.04 packages.
 EOF

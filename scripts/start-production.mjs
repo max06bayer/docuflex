@@ -1,6 +1,9 @@
 import { spawn } from 'node:child_process';
 import { delimiter, join } from 'node:path';
 import { updateGeoip } from './update-geoip.mjs';
+import { registerDocumentFonts } from './register-document-fonts.mjs';
+
+await registerDocumentFonts();
 
 const javaEnvironment = {
   ...process.env,

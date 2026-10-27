@@ -21,6 +21,8 @@
   let outputFormat = 'docx';
   let outputMenuOpen = false;
   let converting = false;
+  let conversionNotice = '';
+
 
   function chooseFile() {
     fileInput?.click();
@@ -38,6 +40,7 @@
       return;
     }
     inputFile = file;
+    conversionNotice = '';
   }
 
   /** @param {MouseEvent} event */
@@ -49,31 +52,38 @@
   /** @param {string} format */
   function selectOutputFormat(format) {
     outputFormat = format;
+    conversionNotice = '';
     outputMenuOpen = false;
   }
 
   async function convertFile() {
     if (!inputFile || converting) return;
     converting = true;
+    conversionNotice = '';
+    // Keep the requested name/format stable until its download completes.
+    const source = inputFile;
+    const targetFormat = outputFormat;
     try {
       const form = new FormData();
-      form.set('file', inputFile);
-      form.set('outputFormat', outputFormat);
+      form.set('file', source);
+      form.set('outputFormat', targetFormat);
       const response = await fetch('/api/convert', { method: 'POST', body: form });
       if (!response.ok) {
         const error = await response.json().catch(() => null);
         throw new Error(error?.error ?? `Conversion failed (${response.status}).`);
       }
+      conversionNotice = response.headers.get('X-Docuflex-Conversion-Warning') || '';
+      if (targetFormat === 'pdf' || source.name.toLowerCase().endsWith(`.${targetFormat}`)) conversionNotice = 'Conversion complete.';
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement('a');
       anchor.href = url;
-      anchor.download = `${inputFile.name.replace(/\.[^.]+$/, '') || 'converted'}.${outputFormat}`;
+      anchor.download = `${source.name.replace(/\.[^.]+$/, '') || 'converted'}.${targetFormat}`;
       anchor.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (error) {
       console.error(error);
-      window.alert(error instanceof Error ? error.message : 'Could not convert this file.');
+      conversionNotice = error instanceof Error ? error.message : 'Could not convert this file.';
     } finally {
       converting = false;
     }
@@ -114,7 +124,7 @@
 
   <div class="convert-content">
     <div class="output-picker">
-      <button type="button" aria-haspopup="menu" aria-expanded={outputMenuOpen} onclick={toggleOutputMenu}>
+      <button type="button" disabled={converting} aria-haspopup="menu" aria-expanded={outputMenuOpen} onclick={toggleOutputMenu}>
         <span>Output File</span>
         <strong>{outputFormat.toUpperCase()}</strong>
       </button>
@@ -134,6 +144,7 @@
         </div>
       {/if}
     </div>
+    {#if conversionNotice}<p class="conversion-notice" role="status">{conversionNotice}</p>{/if}
   </div>
 
   <footer class="convert-actions">
@@ -161,6 +172,8 @@
   .panel-close:hover { filter: brightness(0); }
   .panel-close:active { transform: scale(0.94); }
   .convert-content { position: relative; display: grid; padding: 15px 11px 15px 12px; border-bottom: 1px solid rgba(0, 0, 0, 0.1); }
+  .conversion-notice { margin: 10px 3px 0; font-size: 13px; line-height: 1.4; letter-spacing: 0; color: rgba(0, 0, 0, 0.65); }
+  .conversion-notice { color: #000; }
   .output-picker { position: relative; }
   .output-picker > button { display: flex; align-items: center; justify-content: center; gap: 8px; box-sizing: border-box; min-width: 0; height: 48px; padding: 0 13px; border: 1px solid rgba(0, 0, 0, 0.1); border-radius: 15px; background: #fff; color: rgba(0, 0, 0, 0.5); font: inherit; letter-spacing: inherit; cursor: pointer; transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease, transform 160ms ease; justify-content: space-between; width: 100%; }
   .output-picker > button:hover, .output-picker > button[aria-expanded='true'] { border-color: rgba(0, 0, 0, 0.18); }
@@ -187,6 +200,8 @@
   :global(:root[data-theme="dark"]) .panel-close { border: 0; filter: brightness(0) invert(1) opacity(0.78); background: url('/redesign/panel-close.svg') center / 12.67px 12.67px no-repeat; }
   :global(:root[data-theme="dark"]) .panel-close:hover { filter: brightness(0) invert(1); }
   :global(:root[data-theme="dark"]) .convert-content { border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+  :global(:root[data-theme="dark"]) .conversion-notice { color: rgba(255, 255, 255, 0.65); }
+  :global(:root[data-theme="dark"]) .conversion-notice { color: rgba(255, 255, 255, 0.92); }
   :global(:root[data-theme="dark"]) .output-picker > button { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.5); }
   :global(:root[data-theme="dark"]) .output-picker > button:hover,
   :global(:root[data-theme="dark"]) .output-picker > button[aria-expanded='true'] { border-color: rgba(255, 255, 255, 0.144); }
