@@ -58,7 +58,7 @@ export async function POST({ request }) {
     await writeFile(inputPath, bytes);
     const officeProfile = `-env:UserInstallation=${pathToFileURL(join(directory, 'office-profile')).href}`;
     const officeConvert = async (/** @type {string} */ source, /** @type {string} */ format) => {
-      await runConverter(await converterBinary(), [officeProfile, '--headless', '--convert-to', format, '--outdir', directory, source]);
+      await runConverter(await converterBinary(), [officeProfile, '--headless', '--convert-to', format, '--outdir', directory, source], 'office');
       return convertedOutputPath(directory, source, format);
     };
     let outputPath;
@@ -176,10 +176,10 @@ function downloadResponse(bytes, name, format, warning = '') {
   });
 }
 
-/** @param {string} binary @param {string[]} args */
-function runConverter(binary, args) {
+/** @param {string} binary @param {string[]} args @param {'native' | 'office'} [profile] */
+function runConverter(binary, args, profile = 'native') {
   return new Promise((resolve, reject) => {
-    const command = boundedCommand(binary, args, 'native');
+    const command = boundedCommand(binary, args, profile);
     const child = spawn(command.binary, command.args, { stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
     let errorLog = '';
     let outputLog = '';

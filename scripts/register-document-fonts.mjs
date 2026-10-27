@@ -1,13 +1,37 @@
 import { execFileSync } from 'node:child_process';
-import { mkdir, lstat, readlink, symlink, unlink } from 'node:fs/promises';
+import { access, mkdir, lstat, readlink, readdir, realpath, symlink, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // Register the same redistributable faces used by the conversion engine with
 // Linux LibreOffice. Production uses a fresh, unprivileged HOME on each boot.
 export async function registerDocumentFonts() {
   if (process.platform !== 'linux') return;
+  if (!process.env.FONTCONFIG_FILE) {
+    // Nix supplies fontconfig outside /etc; the unprivileged server must
+    // inherit its actual config so Office can find the registered fonts.
+    try {
+      const cacheBinary = await realpath(execFileSync('which', ['fc-cache'], { encoding: 'utf8' }).trim());
+      const candidates = [join(dirname(cacheBinary), '..', 'etc', 'fonts', 'fonts.conf')];
+      if (cacheBinary.startsWith('/nix/store/')) {
+        // Nix splits binaries, libraries and configuration into separate outputs.
+        const packageName = basename(dirname(dirname(cacheBinary))).replace(/^[^-]+-/, '').replace(/-bin$/, '');
+        for (const entry of await readdir('/nix/store')) {
+          if (entry.endsWith(`-${packageName}`)) candidates.unshift(join('/nix/store', entry, 'etc', 'fonts', 'fonts.conf'));
+        }
+      }
+      for (const config of candidates) {
+        try {
+          await access(config);
+          process.env.FONTCONFIG_FILE = config;
+          break;
+        } catch { /* Try the next installed configuration. */ }
+      }
+    } catch {
+      // Conventional distributions already provide /etc/fonts/fonts.conf.
+    }
+  }
   const directory = join(process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share'), 'fonts');
   const destination = join(directory, 'docuflex');
   const source = resolve('backend/fonts');

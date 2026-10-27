@@ -15,6 +15,10 @@ const javaEnvironment = {
 };
 const frontendEnvironment = {
   ...process.env,
+  // Headless Office does not need the Nix wrapper's desktop D-Bus session.
+  DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS || 'disabled:',
+  SAL_USE_VCLPLUGIN: 'svp',
+  SAL_DISABLE_OPENCL: '1',
   PDF_BACKEND_URL:
     process.env.PDF_BACKEND_URL ??
     `http://${javaEnvironment.PDF_BACKEND_HOST}:${javaEnvironment.PDF_BACKEND_PORT}`,
