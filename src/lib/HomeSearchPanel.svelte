@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { cubicOut } from 'svelte/easing';
   import { fly } from 'svelte/transition';
-  import ToolSearchResults from '$lib/ToolSearchResults.svelte';
+  import ToolSearchResults from '#lib/ToolSearchResults.svelte';
   /** @type {{ id: string; label: string; description?: string }[]} */
   export let tools = [];
   export let onClose = () => {};

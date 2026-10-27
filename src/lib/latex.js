@@ -1,4 +1,4 @@
-import { visitorKey } from '$lib/ai-web.js';
+import { visitorKey } from '#lib/ai-web.js';
 
 /**
  * The window side of the LaTeX pipeline (PDF Enhance and AI Translate): read

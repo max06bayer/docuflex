@@ -1,4 +1,4 @@
-import { env } from '$env/dynamic/private';
+import * as env from '$app/env/private';
 import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -10,8 +10,8 @@ import {
   isPdf,
   logPrivateError,
   safeFormData
-} from '$lib/server/request-security.js';
-import { boundedCommand } from '$lib/server/process-security.js';
+} from '#lib/server/request-security.js';
+import { boundedCommand } from '#lib/server/process-security.js';
 import {
   TRANSLATION_LANGUAGE_CODES,
   autoInstallEnabled,
@@ -19,7 +19,7 @@ import {
   missingModels,
   pythonBinary,
   translationEnvironment
-} from '$lib/server/translate-runtime.js';
+} from '#lib/server/translate-runtime.js';
 
 const TRANSLATION_TIMEOUT_MS = 30 * 60 * 1000;
 const EDIT_TIMEOUT_MS = 10 * 60 * 1000;

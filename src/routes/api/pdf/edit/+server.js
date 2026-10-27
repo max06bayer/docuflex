@@ -1,5 +1,5 @@
-import { env } from '$env/dynamic/private';
-import { MAX_PDF_JSON_REQUEST_BYTES, contentLengthExceeds } from '$lib/server/request-security.js';
+import * as env from '$app/env/private';
+import { MAX_PDF_JSON_REQUEST_BYTES, contentLengthExceeds } from '#lib/server/request-security.js';
 
 /** @type {import('./$types').RequestHandler} */
 export async function POST({ request, fetch }) {

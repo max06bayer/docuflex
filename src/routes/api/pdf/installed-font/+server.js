@@ -1,4 +1,4 @@
-import { env } from '$env/dynamic/private';
+import * as env from '$app/env/private';
 
 /**
  * The PDF's original font as installed where the backend runs (in the desktop

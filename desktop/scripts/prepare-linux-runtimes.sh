@@ -9,7 +9,7 @@ esac
 
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends \
-  curl libarchive-tools libreoffice-writer pax-utils poppler-utils \
+  curl libarchive-tools pax-utils poppler-utils \
   tesseract-ocr tesseract-ocr-deu tesseract-ocr-eng tesseract-ocr-osd
 
 rm -rf -- "$RUNTIME_ROOT"
@@ -82,15 +82,46 @@ for package in poppler-utils tesseract-ocr tesseract-ocr-eng tesseract-ocr-deu t
   fi
 done
 
-# Dereference Ubuntu's links into /usr/share/libreoffice so the packaged
-# runtime remains self-contained after it leaves the build machine.
-cp -aL /usr/lib/libreoffice/. "$RUNTIME_ROOT/office/"
-chmod +x "$RUNTIME_ROOT/office/program/soffice" "$RUNTIME_ROOT/office/program/soffice.bin"
+# Ubuntu rewrites LibreOffice's bootstrap configuration to absolute /usr and
+# /etc paths. Use the relocatable vendor build, matching the macOS version.
+OFFICE_ARCHIVE="$RUNTIME_ROOT/libreoffice.tar.gz"
+OFFICE_URL=https://download.documentfoundation.org/libreoffice/stable/26.2.6/deb/x86_64/LibreOffice_26.2.6_Linux_x86-64_deb.tar.gz
+curl -L --fail --retry 3 "$OFFICE_URL" -o "$OFFICE_ARCHIVE"
+echo "fd0e8f8f2408dd2e5b90286e60f3f97cf566ba441cd48cfc5bcc68067303e0bc  $OFFICE_ARCHIVE" | sha256sum --check --strict
+OFFICE_EXTRACT="$RUNTIME_ROOT/office-extract"
+mkdir -p "$OFFICE_EXTRACT/root"
+tar -xzf "$OFFICE_ARCHIVE" -C "$OFFICE_EXTRACT"
+for package in "$OFFICE_EXTRACT"/*/DEBS/*.deb; do
+  case "$package" in
+    *-kde-integration_*) continue ;;
+  esac
+  dpkg-deb -x "$package" "$OFFICE_EXTRACT/root"
+done
+cp -a "$OFFICE_EXTRACT/root/opt/libreoffice26.2/." "$RUNTIME_ROOT/office/"
+rm -rf -- "$OFFICE_EXTRACT" "$OFFICE_ARCHIVE"
+# The app only invokes headless filters. Optional KDE/Qt/GTK4 integrations
+# otherwise make linuxdeploy require entire desktop environments.
+find "$RUNTIME_ROOT/office/program" -maxdepth 1 -type f \
+  \( -name 'libvclplug_qt*lo.so' -o -name 'libvclplug_kf*lo.so' \
+     -o -name 'libkf*be*lo.so' -o -name 'libqt*be*lo.so' \
+     -o -name 'libgtk4be*lo.so' -o -name 'libavmedia*.so' \
+     -o -name 'liblibreofficekitgtk.so' \
+     -o -name 'libvclplug_gtk4lo.so' \) -delete
+# This optional module in LibreOffice's macro interpreter requires libcrypt.so.2,
+# absent on the Ubuntu 22.04 baseline. Document filters do not use it; Docuflex
+# runs conversion in its own separately bundled Python interpreter.
+find "$RUNTIME_ROOT/office/program" -type f \
+  -path '*/python-core-*/lib/lib-dynload/_crypt.*.so' -delete
+mv "$RUNTIME_ROOT/office/program/soffice" "$RUNTIME_ROOT/office/program/soffice-vendor"
+cp desktop/runtime/soffice-linux.sh "$RUNTIME_ROOT/office/program/soffice"
+chmod +x "$RUNTIME_ROOT/office/program/soffice" "$RUNTIME_ROOT/office/program/soffice-vendor" "$RUNTIME_ROOT/office/program/soffice.bin"
 
 cat > "$RUNTIME_ROOT/ocr/SOURCE.txt" <<'EOF'
 Linux x86_64 native runtime prepared on Ubuntu 22.04.
 OCR: Ubuntu native Tesseract and Poppler packages with English, German, and OSD data.
 EOF
 cat > "$RUNTIME_ROOT/office/SOURCE.txt" <<'EOF'
-Linux x86_64 native LibreOffice Writer runtime prepared from the Ubuntu 22.04 package.
+Linux x86_64 official LibreOffice 26.2.6, including Writer, Calc and Impress.
+Source: https://download.documentfoundation.org/libreoffice/stable/26.2.6/deb/x86_64/LibreOffice_26.2.6_Linux_x86-64_deb.tar.gz
+Archive SHA-256: fd0e8f8f2408dd2e5b90286e60f3f97cf566ba441cd48cfc5bcc68067303e0bc
 EOF

@@ -50,7 +50,7 @@ jobs:
           npm ci --prefix desktop
       - name: Install bundled Python conversion packages
         shell: pwsh
-        run: python -m pip install --disable-pip-version-check pillow python-docx lxml openpyxl python-pptx xlsxwriter
+        run: python -m pip install --disable-pip-version-check -r scripts/requirements-conversion.txt
       - name: Prepare native Windows runtimes
         shell: pwsh
         run: ./desktop/scripts/prepare-windows-runtimes.ps1 -RuntimeRoot "$pwd/desktop/.native-runtime/windows"
@@ -176,7 +176,9 @@ jobs:
           npm ci
           npm ci --prefix desktop
       - name: Install bundled Python conversion packages
-        run: python -m pip install --disable-pip-version-check pillow python-docx lxml openpyxl python-pptx xlsxwriter
+        run: python -m pip install --disable-pip-version-check -r scripts/requirements-conversion.txt
+      - name: Verify GLib security backport
+        run: cargo test --manifest-path desktop/src-tauri/vendor/glib/Cargo.toml --lib --release variant_iter
       - name: Prepare native Linux runtimes
         run: |
           chmod +x desktop/scripts/prepare-linux-runtimes.sh desktop/runtime/*.sh

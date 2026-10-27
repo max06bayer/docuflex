@@ -1,9 +1,9 @@
 import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { env } from '$env/dynamic/private';
-import { mcpAvailable } from '$lib/server/mcp-bridge.js';
-import { MCP_INSTRUCTIONS, MCP_TOOLS } from '$lib/server/mcp-tools.js';
+import * as env from '$app/env/private';
+import { mcpAvailable } from '#lib/server/mcp-bridge.js';
+import { MCP_INSTRUCTIONS, MCP_TOOLS } from '#lib/server/mcp-tools.js';
 
 /**
  * AI chat: an agent that edits the open documents with the same tools the

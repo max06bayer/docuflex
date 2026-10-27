@@ -58,6 +58,31 @@ async function expectSuccessfulResponse(label, response) {
 
 const pdf = minimalPdf('Docuflex Live Tools');
 const failures = [];
+// Exercise the installed/mounted package, after linuxdeploy or NSIS has
+// relocated its libraries. Pre-package Python tests alone cannot verify that.
+for (const format of ['docx', 'pptx', 'xlsx']) {
+  try {
+    const form = new FormData();
+    form.set('file', new File([pdf], 'live.pdf', { type: 'application/pdf' }));
+    form.set('outputFormat', format);
+    const exported = await expectSuccessfulResponse(`PDF to ${format}`, await fetch(`${frontend}/api/convert`, {
+      method: 'POST', headers: { Origin: frontend }, body: form
+    }));
+    const officeBytes = Buffer.from(await exported.arrayBuffer());
+    if (officeBytes.subarray(0, 2).toString() !== 'PK') throw new Error(`${format} did not return an Office package.`);
+    const back = new FormData();
+    back.set('file', new File([officeBytes], `live.${format}`));
+    back.set('outputFormat', 'pdf');
+    const rendered = await expectSuccessfulResponse(`${format} to PDF`, await fetch(`${frontend}/api/convert`, {
+      method: 'POST', headers: { Origin: frontend }, body: back
+    }));
+    const renderedBytes = Buffer.from(await rendered.arrayBuffer());
+    if (renderedBytes.subarray(0, 5).toString() !== '%PDF-') throw new Error(`${format} roundtrip did not return PDF.`);
+    assertPdfHasVisiblePixels(renderedBytes);
+  } catch (error) {
+    failures.push(error);
+  }
+}
 try {
   const conversion = await expectSuccessfulResponse('Edit Text conversion', await fetch(`${frontend}/api/pdf/convert`, {
     method: 'POST',
@@ -94,4 +119,4 @@ try {
 
 if (failures.length) throw new AggregateError(failures, 'Packaged document tools failed.');
 
-process.stdout.write('Packaged Edit Text and OCR API tests passed.\n');
+process.stdout.write('Packaged Office roundtrips, Edit Text and OCR API tests passed.\n');

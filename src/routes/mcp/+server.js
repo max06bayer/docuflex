@@ -1,5 +1,5 @@
-import { isLocalRequest, mcpAvailable, mcpEnabled } from '$lib/server/mcp-bridge.js';
-import { MCP_INSTRUCTIONS, MCP_TOOLS, runTool } from '$lib/server/mcp-tools.js';
+import { isLocalRequest, mcpAvailable, mcpEnabled } from '#lib/server/mcp-bridge.js';
+import { MCP_INSTRUCTIONS, MCP_TOOLS, runTool } from '#lib/server/mcp-tools.js';
 
 /**
  * Docuflex MCP server (Streamable HTTP transport, JSON responses).

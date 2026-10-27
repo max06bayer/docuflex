@@ -1,7 +1,7 @@
 <script>
   import { onMount } from 'svelte';
-  import DocuflexApp from '$lib/DocuflexApp.svelte';
-  import { trackPage } from '$lib/analytics.js';
+  import DocuflexApp from '#lib/DocuflexApp.svelte';
+  import { trackPage } from '#lib/analytics.js';
 
   let mounted = false;
   onMount(() => {

@@ -1,6 +1,6 @@
-import { MEMORY_TOOLS, aiAvailable, runMemoryTool } from '$lib/server/ai.js';
-import { isLocalRequest } from '$lib/server/mcp-bridge.js';
-import { MCP_TOOLS, runTool } from '$lib/server/mcp-tools.js';
+import { MEMORY_TOOLS, aiAvailable, runMemoryTool } from '#lib/server/ai.js';
+import { isLocalRequest } from '#lib/server/mcp-bridge.js';
+import { MCP_TOOLS, runTool } from '#lib/server/mcp-tools.js';
 
 /** Longest tool text the model gets back; long page text is cut here. */
 const MAX_TEXT = 60_000;

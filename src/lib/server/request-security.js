@@ -1,4 +1,3 @@
-import { env } from '$env/dynamic/private';
 
 const KIB = 1024;
 const MIB = 1024 * KIB;
@@ -99,7 +98,7 @@ export function applySecurityHeaders(response, url) {
       + "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: https://ipc.localhost; worker-src 'self' blob:; "
       + "frame-src 'self' blob:"
   );
-  if (url.protocol === 'https:' || env.NODE_ENV === 'production') {
+  if (url.protocol === 'https:' || process.env.NODE_ENV === 'production') {
     response.headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   }
   if (url.pathname.startsWith('/api/')) {
@@ -181,12 +180,12 @@ function cleanupWindows(now) {
 /** @param {string} pathname @param {number} fallback */
 function configuredLimit(pathname, fallback) {
   const key = `RATE_LIMIT_${pathname.replace(/[^a-z0-9]+/gi, '_').replace(/^_|_$/g, '').toUpperCase()}`;
-  return positiveInteger(env[key], fallback);
+  return positiveInteger(process.env[key], fallback);
 }
 
 /** @param {string} group @param {number} fallback */
 function configuredConcurrency(group, fallback) {
-  return positiveInteger(env[`DOCUMENT_CONCURRENCY_${group.toUpperCase()}`], fallback);
+  return positiveInteger(process.env[`DOCUMENT_CONCURRENCY_${group.toUpperCase()}`], fallback);
 }
 
 /** @param {string | undefined} value @param {number} fallback */

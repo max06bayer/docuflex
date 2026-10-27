@@ -1,5 +1,5 @@
-import { isLocalRequest, mcpAvailable, mcpStatus, setMcpEnabled } from '$lib/server/mcp-bridge.js';
-import { MCP_TOOLS } from '$lib/server/mcp-tools.js';
+import { isLocalRequest, mcpAvailable, mcpStatus, setMcpEnabled } from '#lib/server/mcp-bridge.js';
+import { MCP_TOOLS } from '#lib/server/mcp-tools.js';
 
 /** @param {URL} url */
 function describe(url) {

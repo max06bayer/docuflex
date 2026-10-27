@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const desktopRoot = resolve(import.meta.dirname, '..');
 const resources = join(desktopRoot, 'src-tauri', 'resources');
@@ -52,7 +53,10 @@ const temporary = await mkdtemp(join(tmpdir(), 'docuflex-runtime-smoke-'));
 try {
   run(executable('node', 'node'), ['--version']);
   run(executable('java', 'java'), ['--version']);
-  run(python, ['-c', 'import PIL, docx, lxml, openpyxl, pptx, xlsxwriter; print("python-ok")']);
+  run(python, ['-c', 'import PIL, docx, lxml, openpyxl, pptx, xlsxwriter, pymupdf, fontTools; print("python-ok")']);
+  if (process.platform === 'linux') {
+    run(python, [join(resources, 'scripts', 'check-linux-office-dependencies.py'), join(resources, 'runtime', 'office')], { timeout: 120_000 });
+  }
   run(ocrExecutable('pdftoppm'), ['-v']);
   run(ocrExecutable('pdfunite'), ['-v']);
   const languages = run(ocrExecutable('tesseract'), ['--list-langs'], {
@@ -105,7 +109,17 @@ try {
   const tectonicVersion = run(join(resources, 'runtime', 'tectonic', `tectonic${windows ? '.exe' : ''}`), ['--version']);
   if (!/Tectonic/i.test(tectonicVersion)) throw new Error('Bundled Tectonic did not start.');
 
-  if (process.platform !== 'darwin') run(office, ['--headless', '--version'], { timeout: 60_000 });
+  run(office, ['--headless', '--version'], { timeout: 60_000 });
+  run(python, [join(resources, 'scripts', 'test-editable-conversion.py')], {
+    env: { DOCUMENT_CONVERTER_BIN: office, TESSERACT_BIN: ocrExecutable('tesseract'), TESSDATA_PREFIX: join(resources, 'runtime', 'ocr', 'share', 'tessdata') },
+    timeout: 180_000
+  });
+  // Exercise the actual Office filters on every bundled platform.
+  const officeDocument = join(temporary, 'office.docx');
+  run(python, ['-c', `from docx import Document; d=Document(); d.add_paragraph('Docuflex Office Filters'); d.save(${JSON.stringify(officeDocument)})`]);
+  run(office, [`-env:UserInstallation=${pathToFileURL(join(temporary, 'office-profile')).href}`, '--headless', '--convert-to', 'pdf', '--outdir', temporary, officeDocument], { timeout: 60_000 });
+  const officeText = run(python, ['-c', `import pymupdf; d=pymupdf.open(${JSON.stringify(join(temporary, 'office.pdf'))}); print(d[0].get_text())`]);
+  if (!officeText.includes('Docuflex Office Filters')) throw new Error('Bundled Office filters did not preserve text.');
   process.stdout.write(`Docuflex ${process.platform}-${process.arch} offline runtime smoke test passed.\n`);
 } finally {
   await rm(temporary, { recursive: true, force: true });

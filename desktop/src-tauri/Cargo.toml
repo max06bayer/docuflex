@@ -1,6 +1,6 @@
 [package]
 name = "docuflex-desktop"
-version = "0.9.4"
+version = "0.9.5"
 description = "Docuflex offline PDF editor for macOS, Windows, and Linux"
 authors = ["Maximilian Bayer"]
 edition = "2021"
@@ -13,7 +13,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 side-by-side = []
 
 [build-dependencies]
-tauri-build = { version = "2.5.6", features = [] }
+tauri-build = { version = "2.7.4", features = [] }
 
 [dependencies]
 base64 = "0.22.1"
@@ -22,7 +22,7 @@ rfd = "0.17.2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 sha2 = "0.10.9"
-tauri = { version = "2.11.5", features = ["devtools"] }
+tauri = { version = "2.12.5", features = ["devtools"] }
 tauri-plugin-single-instance = "2.4.0"
 url = "2.5.7"
 
@@ -30,3 +30,7 @@ url = "2.5.7"
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSButton", "NSControl", "NSPrintInfo", "NSPrintOperation", "NSResponder", "NSView", "NSWindow"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSURL"] }
+
+# Upstream security backport for GTK3: see vendor/glib/DOCUFLEX-SECURITY-PATCH.md.
+[patch.crates-io]
+glib = { path = "vendor/glib" }

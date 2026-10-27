@@ -120,15 +120,15 @@ const macPython = {
   archive: 'cpython-3.12.15+20261013-aarch64-apple-darwin-install_only.tar.gz',
   sha256: 'ba32036ad8f4c434d97a1ee7feef8b7edc0fac16777639b97e39c74a108e4440'
 };
-const pythonPackages = ['pillow', 'python-docx', 'lxml', 'openpyxl', 'python-pptx', 'xlsxwriter'];
+const conversionRequirements = join(repositoryRoot, 'scripts', 'requirements-conversion.txt');
 
 async function provisionMacPython() {
   const root = join(cacheRoot, `python-${macPython.version}-${macPython.release}`);
   const python = join(root, 'python');
   const executable = join(python, 'bin', 'python3.12');
   const ready = join(root, '.packages-installed');
-  if (await exists(ready)) return python;
-  await rm(root, { recursive: true, force: true });
+  const requirements = await readFile(conversionRequirements, 'utf8');
+  if (await exists(ready) && await readFile(ready, 'utf8') === requirements) return python;
   await mkdir(root, { recursive: true });
   const archivePath = join(cacheRoot, macPython.archive);
   if (!(await exists(archivePath))) {
@@ -141,9 +141,9 @@ async function provisionMacPython() {
     await rm(archivePath, { force: true });
     throw new Error(`Python checksum failed for ${macPython.archive}.`);
   }
-  run('tar', ['-xzf', archivePath, '-C', root]);
-  run(executable, ['-m', 'pip', 'install', '--disable-pip-version-check', '--no-warn-script-location', ...pythonPackages]);
-  await writeFile(ready, `${pythonPackages.join('\n')}\n`);
+  if (!(await exists(executable))) run('tar', ['-xzf', archivePath, '-C', root]);
+  run(executable, ['-m', 'pip', 'install', '--disable-pip-version-check', '--no-warn-script-location', '-r', conversionRequirements]);
+  await writeFile(ready, requirements);
   return python;
 }
 
@@ -164,24 +164,58 @@ async function preparePythonRuntime() {
       recursive: true,
       filter: (path) => !path.startsWith(join(sourceLibrary, 'site-packages'))
     });
-    const sitePackages = join(destination, 'lib', 'python3.12', 'site-packages');
-    const sourcePackages = join(sourceLibrary, 'site-packages');
-    await mkdir(sitePackages, { recursive: true });
-    for (const packageName of ['PIL', 'docx', 'et_xmlfile', 'lxml', 'openpyxl', 'pptx', 'typing_extensions.py', 'xlsxwriter']) {
-      const packageSource = join(sourcePackages, packageName);
-      if (!(await exists(packageSource))) throw new Error(`Desktop conversion dependency is missing: ${packageName}`);
-      await cp(packageSource, join(sitePackages, packageName), { recursive: true });
-    }
+    // Include native wheels, transitive dependencies and their licence metadata.
+    await cp(join(sourceLibrary, 'site-packages'), join(destination, 'lib', 'python3.12', 'site-packages'), {
+      recursive: true, filter: (path) => !path.includes('__pycache__')
+    });
     await writeFile(join(destination, 'bin', 'python3'), '#!/bin/sh\nexec "$(dirname "$0")/python3.12" "$@"\n');
     run('chmod', ['+x', join(destination, 'bin', 'python3'), join(destination, 'bin', 'python3.12')]);
   } else {
     await cp(source, destination, { recursive: true, dereference: process.platform === 'win32' });
   }
+  if (process.platform === 'linux') {
+    // setup-python's interpreter depends on a shared library without a
+    // relocatable RUNPATH. Scope its library path to Python, never the GUI.
+    const launcher = join(destination, 'bin', 'python3');
+    await rm(launcher, { force: true });
+    await writeFile(launcher, '#!/bin/sh\nPYTHON_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)\nexport LD_LIBRARY_PATH="$PYTHON_ROOT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\nexec "$PYTHON_ROOT/bin/python3.12" "$@"\n');
+    run('chmod', ['+x', launcher]);
+  }
   const executable = process.platform === 'win32'
     ? join(destination, 'python.exe')
     : join(destination, 'bin', 'python3');
   if (!(await exists(executable))) throw new Error(`Bundled Python executable is missing: ${executable}`);
-  run(executable, ['-c', 'import PIL, docx, lxml, openpyxl, pptx, xlsxwriter'], { cwd: destination });
+  run(executable, ['-c', 'import PIL, docx, lxml, openpyxl, pptx, xlsxwriter, pymupdf, fontTools'], { cwd: destination });
+}
+
+
+// The Mac package must contain real Office filters, not the old textutil shim.
+async function prepareMacOffice() {
+  const archive = 'LibreOffice_26.2.6_MacOS_aarch64.dmg';
+  const checksum = '94bb3248df074c225490a8a6d1d9dc87c7d6783dbb7a8e9f0d0c3d94348552af';
+  const image = join(cacheRoot, archive);
+  const cachedApp = join(cacheRoot, 'libreoffice-26.2.6', 'LibreOffice.app');
+  const ready = join(dirname(cachedApp), '.runtime-ready');
+  if (!(await exists(ready))) {
+    await rm(dirname(cachedApp), { recursive: true, force: true });
+    if (!(await exists(image))) await download(`https://download.documentfoundation.org/libreoffice/stable/26.2.6/mac/aarch64/${archive}`, image);
+    if (createHash('sha256').update(await readFile(image)).digest('hex') !== checksum) {
+      await rm(image, { force: true });
+      throw new Error('LibreOffice archive checksum failed.');
+    }
+    const mount = join(cacheRoot, `libreoffice-mount-${process.pid}`);
+    await mkdir(mount, { recursive: true });
+    run('hdiutil', ['attach', image, '-readonly', '-nobrowse', '-mountpoint', mount]);
+    try {
+      await mkdir(dirname(cachedApp), { recursive: true });
+      await cp(join(mount, 'LibreOffice.app'), cachedApp, { recursive: true, verbatimSymlinks: true });
+      await writeFile(ready, checksum);
+    } finally {
+      run('hdiutil', ['detach', mount]);
+      await rm(mount, { recursive: true, force: true });
+    }
+  }
+  await cp(cachedApp, join(resourcesRoot, 'runtime', 'office', 'LibreOffice.app'), { recursive: true, verbatimSymlinks: true });
 }
 
 async function copyRuntime(name, environmentName, fallback) {
@@ -229,7 +263,8 @@ async function copyApplicationResources() {
   if (process.platform === 'darwin' && !process.env.DOCUFLEX_OFFICE_RUNTIME?.trim()) {
     const officeBin = join(resourcesRoot, 'runtime', 'office', 'bin');
     await mkdir(officeBin, { recursive: true });
-    await cp(join(desktopRoot, 'runtime', 'soffice-shim.sh'), join(officeBin, 'soffice'));
+    await prepareMacOffice();
+    await cp(join(desktopRoot, 'runtime', 'soffice-macos.sh'), join(officeBin, 'soffice'));
   } else {
     await copyRuntime('office', 'DOCUFLEX_OFFICE_RUNTIME', '');
   }
@@ -327,7 +362,9 @@ async function main() {
   await rm(join(tauriRoot, 'target', 'release', 'resources'), { recursive: true, force: true });
   await mkdir(resourcesRoot, { recursive: true });
 
-  runNpm(['run', 'build']);
+  runNpm(['run', 'build'], { env: {
+    DOCUFLEX_DESKTOP_ORIGIN: `http://127.0.0.1:${process.env.DOCUFLEX_VARIANT === 'redesign' ? 43137 : 43127}`
+  } });
   runNpm(['run', 'backend:compile']);
   await copyApplicationResources();
   await prepareNodeRuntime();

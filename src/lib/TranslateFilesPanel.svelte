@@ -11,8 +11,8 @@
     translatePdf,
     translationLanguageLabel,
     translationStatus
-  } from '$lib/translate.js';
-  import { LatexError, describeLatexStage, explainLatexStage, formatElapsed, latexKeyReady, latexStatus, rememberLatexModel, runLatex, saveFile, storedLatexModel } from '$lib/latex.js';
+  } from '#lib/translate.js';
+  import { LatexError, describeLatexStage, explainLatexStage, formatElapsed, latexKeyReady, latexStatus, rememberLatexModel, runLatex, saveFile, storedLatexModel } from '#lib/latex.js';
 
   /** @type {() => void} */
   export let onClose = () => {};
@@ -37,12 +37,12 @@
   /** 'ai' rebuilds the document in LaTeX in the new language, keeping its design; home only. */
   /** @type {'local' | 'ai'} */
   let mode = 'local';
-  /** @type {import('$lib/latex.js').LatexStatus | null} */
+  /** @type {import('#lib/latex.js').LatexStatus | null} */
   let aiStatus = null;
   let aiModel = '';
   /** 'match' keeps the original's look (fonts, layout, compared page by page); the others redesign like PDF Enhance. */
   let aiStyle = 'match';
-  /** @type {import('$lib/latex.js').LatexProgress | null} */
+  /** @type {import('#lib/latex.js').LatexProgress | null} */
   let aiProgress = null;
   let aiTex = '';
   let aiElapsed = 0;
@@ -58,7 +58,7 @@
   let result = null;
   /** @type {AbortController | null} */
   let request = null;
-  /** @type {import('$lib/translate.js').TranslationStatus | null} */
+  /** @type {import('#lib/translate.js').TranslationStatus | null} */
   let status = null;
   /** @type {ReturnType<typeof setTimeout> | undefined} */
   let pollTimer;
@@ -92,7 +92,7 @@
     }
   }
 
-  /** @param {import('$lib/translate.js').TranslationStatus} next */
+  /** @param {import('#lib/translate.js').TranslationStatus} next */
   function applyStatus(next) {
     const wasDownloading = downloading;
     status = next;

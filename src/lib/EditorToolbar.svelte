@@ -3,7 +3,7 @@
   import { cubicOut } from 'svelte/easing';
   import { scale } from 'svelte/transition';
 
-  import { groups, toolDescriptions } from '$lib/editor-tools.js';
+  import { groups, toolDescriptions } from '#lib/editor-tools.js';
 
   const nonInvertedTools = new Set(['select', 'image', 'blackout', 'whiteout', 'measure', 'highlight']);
   /** Group primaries built from layered redesign artwork; every other tool shows its 50×50 icon from /redesign/tools. */

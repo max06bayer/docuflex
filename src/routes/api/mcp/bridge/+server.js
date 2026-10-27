@@ -1,4 +1,4 @@
-import { acknowledgeAppCall, isLocalRequest, markClientAlive, mcpAvailable, openAppStream, resolveAppCall } from '$lib/server/mcp-bridge.js';
+import { acknowledgeAppCall, isLocalRequest, markClientAlive, mcpAvailable, openAppStream, resolveAppCall } from '#lib/server/mcp-bridge.js';
 
 /** The Docuflex window subscribes here to receive MCP tool calls. */
 /** @type {import('./$types').RequestHandler} */

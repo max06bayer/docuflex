@@ -1,5 +1,5 @@
-import { AI_FALLBACK_MODEL, AI_MODEL, AI_MODELS, AI_TOOL_INFO, AI_WEB_TOOL_INFO, openRouterKeyHint } from '$lib/server/ai.js';
-import { isLocalRequest, mcpAvailable } from '$lib/server/mcp-bridge.js';
+import { AI_FALLBACK_MODEL, AI_MODEL, AI_MODELS, AI_TOOL_INFO, AI_WEB_TOOL_INFO, openRouterKeyHint } from '#lib/server/ai.js';
+import { isLocalRequest, mcpAvailable } from '#lib/server/mcp-bridge.js';
 
 /** Whether the AI chat can run here, and what the window needs to show it. */
 /** @type {import('./$types').RequestHandler} */

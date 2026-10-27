@@ -3,8 +3,8 @@ import { access, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promi
 import { constants } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { env } from '$env/dynamic/private';
-import { AI_FALLBACK_MODEL, AI_MODEL, AI_MODELS, openRouterKey } from '$lib/server/ai.js';
+import * as env from '$app/env/private';
+import { AI_FALLBACK_MODEL, AI_MODEL, AI_MODELS, openRouterKey } from '#lib/server/ai.js';
 
 /**
  * PDF to LaTeX: a model rewrites a PDF or scan as a complete LaTeX document,

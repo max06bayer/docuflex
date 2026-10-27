@@ -1,5 +1,5 @@
-import { dev } from '$app/environment';
-import { env } from '$env/dynamic/private';
+import { dev } from '$app/env';
+import * as env from '$app/env/private';
 
 /**
  * Relay between the local MCP endpoint (/mcp) and the open Docuflex window.

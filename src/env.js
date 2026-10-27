@@ -1,0 +1,30 @@
+import { defineEnvVars } from '@sveltejs/kit/env';
+
+export const variables = defineEnvVars({
+	PDF_BACKEND_URL: { schema: (input) => input },
+	OCR_LANGUAGES: { schema: (input) => input },
+	VISION_OCR_BIN: { schema: (input) => input },
+	TESSERACT_BIN: { schema: (input) => input },
+	OCR_JOBS: { schema: (input) => input },
+	PDFTOPPM_BIN: { schema: (input) => input },
+	PDF2HTMLEX_BIN: { schema: (input) => input },
+	PDF2HTMLEX_DATA_DIR: { schema: (input) => input },
+	PDF_TOOLS_PYTHONPATH: { schema: (input) => input },
+	DOCUMENT_CONVERTER_PYTHON: { schema: (input) => input },
+	DOCUMENT_CONVERTER_BIN: { schema: (input) => input },
+	PDF_RENDER_BIN: { schema: (input) => input },
+	DOCUFLEX_AI_MODEL: { schema: (input) => input },
+	DOCUFLEX_AI_FALLBACK_MODEL: { schema: (input) => input },
+	ANALYTICS_ENABLED: { schema: (input) => input },
+	ANALYTICS_DATA_DIR: { schema: (input) => input },
+	GEOIP_DB_PATH: { schema: (input) => input },
+	ANALYTICS_SECRET: { schema: (input) => input },
+	DOCUFLEX_TECTONIC: { schema: (input) => input },
+	PATH: { schema: (input) => input },
+	DOCUFLEX_MCP: { schema: (input) => input },
+	DISABLE_DOCUMENT_PRLIMIT: { schema: (input) => input },
+	DOCUMENT_PRLIMIT_BIN: { schema: (input) => input },
+	DOCUFLEX_TRANSLATE_DATA: { schema: (input) => input },
+	DOCUFLEX_TRANSLATE_AUTO_INSTALL: { schema: (input) => input },
+	LOCAL_TRANSLATE_PYTHONPATH: { schema: (input) => input }
+});

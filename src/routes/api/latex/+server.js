@@ -1,6 +1,6 @@
-import { openRouterKeyHint, visitorKey } from '$lib/server/ai.js';
-import { LATEX_STYLES, MATCH_STYLE, MAX_PAGE_IMAGES, convertToLatex, latexModels, tectonicPath } from '$lib/server/latex.js';
-import { isLocalRequest, mcpAvailable } from '$lib/server/mcp-bridge.js';
+import { openRouterKeyHint, visitorKey } from '#lib/server/ai.js';
+import { LATEX_STYLES, MATCH_STYLE, MAX_PAGE_IMAGES, convertToLatex, latexModels, tectonicPath } from '#lib/server/latex.js';
+import { isLocalRequest, mcpAvailable } from '#lib/server/mcp-bridge.js';
 
 /** Whether PDF to LaTeX can run here: the engine, a key, and the models and styles to pick from. */
 /** @type {import('./$types').RequestHandler} */

@@ -1,4 +1,4 @@
-import { env } from '$env/dynamic/private';
+import * as env from '$app/env/private';
 import { spawn } from 'node:child_process';
 import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { availableParallelism, tmpdir } from 'node:os';
@@ -9,8 +9,8 @@ import {
   contentLengthExceeds,
   isPdf,
   privateFailure
-} from '$lib/server/request-security.js';
-import { boundedCommand } from '$lib/server/process-security.js';
+} from '#lib/server/request-security.js';
+import { boundedCommand } from '#lib/server/process-security.js';
 
 const MAX_LOG_BYTES = 96 * 1024;
 const MAX_OCR_JSON_BYTES = 64 * 1024 * 1024;

@@ -1,7 +1,7 @@
 {
   "name": "docuflex-desktop-build",
   "private": true,
-  "version": "0.9.4",
+  "version": "0.9.5",
   "license": "AGPL-3.0-only",
   "type": "module",
   "scripts": {
@@ -14,7 +14,7 @@
     "build:redesign": "npm run stage && npm run smoke && npm run bundle:redesign"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "2.11.4",
+    "@tauri-apps/cli": "2.12.4",
     "pngjs": "7.0.0"
   }
 }

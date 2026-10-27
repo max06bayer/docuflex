@@ -8,30 +8,30 @@
   // @ts-ignore
   import '@fontsource/roboto/latin-700.css';
   import { onMount } from 'svelte';
-  import { trackPage } from '$lib/analytics.js';
+  import { trackPage } from '#lib/analytics.js';
   // Landing images live in src so Vite fingerprints them and they are served
   // with a one-year immutable cache. public/landing-page keeps the originals
   // for the og:image URL and the editor.
-  import logo from '$lib/assets/landing/logo.svg';
-  import arrowRight from '$lib/assets/landing/arrow-right.svg';
-  import background1280 from '$lib/assets/landing/background-1280.webp';
-  import background1920 from '$lib/assets/landing/background-1920.webp';
-  import background2560 from '$lib/assets/landing/background-2560.webp';
-  import editor800 from '$lib/assets/landing/editor-800.webp';
-  import editor1280 from '$lib/assets/landing/editor-1280.webp';
-  import editor1440 from '$lib/assets/landing/editor-1440.webp';
-  import editor1920 from '$lib/assets/landing/editor-1920.webp';
-  import editor2560 from '$lib/assets/landing/editor-2560.webp';
-  import emptyCard from '$lib/assets/landing/card-empty.webp';
-  import video640 from '$lib/assets/landing/video-640.webp';
-  import video1280 from '$lib/assets/landing/video-1280.webp';
-  import videoAvatar from '$lib/assets/landing/video-avatar.webp';
+  import logo from '#lib/assets/landing/logo.svg';
+  import arrowRight from '#lib/assets/landing/arrow-right.svg';
+  import background1280 from '#lib/assets/landing/background-1280.webp';
+  import background1920 from '#lib/assets/landing/background-1920.webp';
+  import background2560 from '#lib/assets/landing/background-2560.webp';
+  import editor800 from '#lib/assets/landing/editor-800.webp';
+  import editor1280 from '#lib/assets/landing/editor-1280.webp';
+  import editor1440 from '#lib/assets/landing/editor-1440.webp';
+  import editor1920 from '#lib/assets/landing/editor-1920.webp';
+  import editor2560 from '#lib/assets/landing/editor-2560.webp';
+  import emptyCard from '#lib/assets/landing/card-empty.webp';
+  import video640 from '#lib/assets/landing/video-640.webp';
+  import video1280 from '#lib/assets/landing/video-1280.webp';
+  import videoAvatar from '#lib/assets/landing/video-avatar.webp';
 
   onMount(() => trackPage('/'));
 
   /** @type {Record<string, string>} */
   const featureCardImages = Object.fromEntries(
-    Object.entries(import.meta.glob('$lib/assets/landing/card-*.webp', { eager: true, import: 'default' })).map(
+    Object.entries(import.meta.glob('#lib/assets/landing/card-*.webp', { eager: true, import: 'default' })).map(
       ([path, url]) => [path.replace(/^.*card-(.+)\.webp$/, '$1'), /** @type {string} */ (url)]
     )
   );
@@ -40,7 +40,7 @@
   const topFeatureCards = ['Merge', 'Convert', 'Sign', 'Translate', 'ORC'];
   const bottomFeatureCards = ['Split', 'Compress', 'Protect', 'Flatten', 'Watermark'];
   const emptyCards = Array(6).fill(emptyCard);
-  /** @type {typeof import('$lib/SettingsPanel.svelte').default | null} */
+  /** @type {typeof import('#lib/SettingsPanel.svelte').default | null} */
   let SettingsPanel = null;
   let legalPanelOpen = false;
   let legalPanelSection = 'top';
@@ -48,7 +48,7 @@
   // The settings panel is only needed after a click, so keep it (and its CSS)
   // out of the landing page's initial load.
   async function openLegalPanel(section = 'top') {
-    SettingsPanel ??= (await import('$lib/SettingsPanel.svelte')).default;
+    SettingsPanel ??= (await import('#lib/SettingsPanel.svelte')).default;
     legalPanelSection = section;
     legalPanelOpen = true;
   }

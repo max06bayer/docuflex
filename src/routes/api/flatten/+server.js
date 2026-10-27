@@ -1,4 +1,4 @@
-import { env } from '$env/dynamic/private';
+import * as env from '$app/env/private';
 import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
 import { access, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
@@ -11,8 +11,8 @@ import {
   isPdf,
   privateFailure,
   safeFormData
-} from '$lib/server/request-security.js';
-import { boundedCommand } from '$lib/server/process-security.js';
+} from '#lib/server/request-security.js';
+import { boundedCommand } from '#lib/server/process-security.js';
 
 const FLATTEN_TIMEOUT_MS = 10 * 60 * 1000;
 /** @type {Promise<string> | undefined} */

@@ -3,16 +3,16 @@
   import { cubicOut } from 'svelte/easing';
   import { flip } from 'svelte/animate';
   import { fade, fly, scale } from 'svelte/transition';
-  import ToolSearchResults from '$lib/ToolSearchResults.svelte';
-  import { editorTools, toolDescriptions } from '$lib/editor-tools.js';
-  import EditorToolbar from '$lib/EditorToolbar.svelte';
-  import HtmlPdfEditor from '$lib/HtmlPdfEditor.svelte';
-  import TranslateFilesPanel from '$lib/TranslateFilesPanel.svelte';
-  import Pdf3dAnnotation from '$lib/Pdf3dAnnotation.svelte';
-  import { annotationRefFromId } from '$lib/pdf3d/load.js';
-  import { showAppError, translatePdf } from '$lib/translate.js';
-  import { renderLatex } from '$lib/math-render.js';
-  import { printPdf } from '$lib/print.js';
+  import ToolSearchResults from '#lib/ToolSearchResults.svelte';
+  import { editorTools, toolDescriptions } from '#lib/editor-tools.js';
+  import EditorToolbar from '#lib/EditorToolbar.svelte';
+  import HtmlPdfEditor from '#lib/HtmlPdfEditor.svelte';
+  import TranslateFilesPanel from '#lib/TranslateFilesPanel.svelte';
+  import Pdf3dAnnotation from '#lib/Pdf3dAnnotation.svelte';
+  import { annotationRefFromId } from '#lib/pdf3d/load.js';
+  import { showAppError, translatePdf } from '#lib/translate.js';
+  import { renderLatex } from '#lib/math-render.js';
+  import { printPdf } from '#lib/print.js';
 
   /** @typedef {{ x: number; y: number; pressure: number }} StrokePoint */
   /** @typedef {{ id: number; group?: number; type: 'marker' | 'pen'; points: StrokePoint[]; rawPoints?: StrokePoint[]; color?: string; thickness?: number; opacity?: number; falloff?: number; smoothing?: number }} AnnotationStroke */
@@ -287,7 +287,7 @@
   /** @type {Record<number, { ref: number; x: number; y: number; width: number; height: number }[]>} */
   let pdf3dAnnotations = {};
   /** The live 3D view, if one is open; only one runs at a time. */
-  /** @type {(import('$lib/pdf3d/load.js').Pdf3dSession & { ref: number; selected: number }) | null} */
+  /** @type {(import('#lib/pdf3d/load.js').Pdf3dSession & { ref: number; selected: number }) | null} */
   let pdf3dSession = null;
   /** New replies to comments that are already in the PDF, per page, matched by the PDF object ref. */
   /** @type {Record<number, PdfCommentReply[]>} */
@@ -4195,8 +4195,15 @@
 
   /** @param {Partial<AnnotationShape>} changes */
   function updateTextFormatting(changes) {
-    const shape = inspectorSelection()[0];
+    const selected = inspectorSelection();
+    const shape = selected[0];
     if (!shape || shape.type !== 'textfield' || !selectedShape) return;
+    if (selected.length > 1) {
+      replaceShapes(selectedShape.pageIndex, selected
+        .filter((item) => item.type === 'textfield')
+        .map((item) => wholeTextFormatting(item, changes)));
+      return;
+    }
     const range = selectedTextRange(shape);
     const inlineChange = ['textColor', 'fontFamily', 'fontSize', 'fontWeight', 'letterSpacing', 'textAlign', 'italic', 'underline', 'strikethrough']
       .some((property) => Object.prototype.hasOwnProperty.call(changes, property));
@@ -4204,11 +4211,11 @@
       const editor = viewer?.querySelector(`[data-text-editor="${shape.id}"]`);
       const text = editor instanceof HTMLElement ? richTextEditorValue(editor) : shape.text ?? '';
       const caret = textFormatSelection?.id === shape.id ? textFormatSelection : null;
+      const formatted = wholeTextFormatting(shape, changes);
       replaceShape(selectedShape.pageIndex, {
-        ...shape,
-        ...changes,
+        ...formatted,
         text,
-        textStyleRanges: remapTextStyleRanges(shape.text ?? '', text, shape.textStyleRanges ?? [])
+        textStyleRanges: remapTextStyleRanges(shape.text ?? '', text, formatted.textStyleRanges)
       });
       if (editingTextShape?.id === shape.id) {
         tick().then(() => restoreTextEditorSelection(shape.id, caret?.start ?? text.length, caret?.end ?? text.length));
@@ -4237,6 +4244,21 @@
       textStyleRanges: [...existingRanges, inlineStyle]
     });
     tick().then(() => restoreTextEditorSelection(shape.id, range.start, range.end));
+  }
+
+  /** Apply whole-field changes over existing inline overrides, preserving unrelated formatting.
+   * @param {AnnotationShape} shape @param {Partial<AnnotationShape>} changes
+   */
+  function wholeTextFormatting(shape, changes) {
+    const textStyleRanges = (shape.textStyleRanges ?? []).map((range) => {
+      const next = { ...range };
+      for (const property of Object.keys(changes)) {
+        const key = /** @type {keyof TextStyleRange} */ (property === 'textColor' ? 'color' : property);
+        delete next[key];
+      }
+      return next;
+    }).filter((range) => Object.keys(range).some((key) => key !== 'start' && key !== 'end'));
+    return { ...shape, ...changes, textStyleRanges };
   }
 
   /** @param {FocusEvent} event @param {number} id */
@@ -5919,8 +5941,8 @@
           kind: 'resize',
           pageIndex: shapeHit.pageIndex,
           id: shape.id,
-          handleX: /** @type {-1 | 0 | 1} */ (handleX),
-          handleY: /** @type {-1 | 0 | 1} */ (handleY),
+          handleX: /** @type {-1 | 0 | 1} */ (Number(handleX)),
+          handleY: /** @type {-1 | 0 | 1} */ (Number(handleY)),
           initial: { ...shape }
         };
       } else {
@@ -6328,7 +6350,6 @@
     viewer?.querySelectorAll('.textLayer').forEach((layer) => layer.remove());
     void pdfLoadingTask?.destroy();
     pdfLoadingTask = null;
-    pdfDocument?.destroy?.();
     pdfDocument = null;
 
     try {
@@ -9077,7 +9098,6 @@
     textLayerBuilders.forEach((builder) => builder.cancel());
     textLayerAbortController?.abort();
     void pdfLoadingTask?.destroy();
-    pdfDocument?.destroy?.();
   });
 </script>
 
@@ -10373,11 +10393,12 @@
     {/if}
   {/if}
   {#if activeTool === 'select' && selectedShape && inspectorSelection().length}
-    {@const inspectedObjects = shapes && inspectorSelection()}
+    {@const inspectedObjects = shapes && selectedShapeIds && selectedShape && inspectorSelection()}
     {@const inspectedObject = inspectedObjects[0]}
-    {@const inspectedFrame = shapes && inspectorFrame()}
+    {@const inspectedFrame = inspectedObjects.length === 1 ? inspectedObject : selectionBounds(inspectedObjects)}
     <div
       class="protect-panel selection-properties-panel"
+      class:textbox-properties-panel={inspectedObjects.every((shape) => shape.type === 'textfield')}
       role="dialog"
       aria-label="Selected object properties"
       transition:fly={{ x: 18, duration: 240, easing: cubicOut }}
@@ -10403,7 +10424,7 @@
             <label class="inspector-field inspector-field-wide"><span class="scrub-label" role="presentation" onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectionGeometry('rotation', value))}>Rotation</span><span class="rotation-field-value">{#if Math.round(inspectedObjects.length === 1 ? inspectedObject.rotation : (multiSelectionFrame?.rotation ?? 0)) > 0}<b class="rotation-sign">+</b>{/if}<input class="scrubbable-number" bind:this={inspectorRotationInput} type="number" step="1" value={Math.round(inspectedObjects.length === 1 ? inspectedObject.rotation : (multiSelectionFrame?.rotation ?? 0))} onpointerdown={(event) => startNumberScrub(event, (value) => updateSelectionGeometry('rotation', value))} oninput={(event) => updateSelectionGeometry('rotation', Number(event.currentTarget.value))} /></span></label>
           </section>
         {/if}
-        {#if inspectedObjects.length === 1 && inspectedObject.type === 'textfield'}
+        {#if inspectedObjects.every((shape) => shape.type === 'textfield')}
           <section class="selection-property-section typography-section" aria-label="Typography">
             <div class="typography-color-row">
               <span>Color</span>
@@ -11554,6 +11575,10 @@
     max-height: calc(100% - 24px);
   }
 
+  .protect-panel.textbox-properties-panel {
+    width: min(350px, calc(100% - 26px));
+  }
+
   .protect-panel.text-selection-panel {
     max-height: none;
     font-family: "Inter Variable", Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -11914,7 +11939,7 @@
 
   .typography-weight-size-grid {
     display: grid;
-    grid-template-columns: minmax(0, 1.45fr) minmax(0, 0.9fr);
+    grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr);
     gap: 9px;
   }
 
@@ -11939,7 +11964,7 @@
 
   .typography-alignment-row {
     display: grid;
-    grid-template-columns: 82px minmax(0, 1fr);
+    grid-template-columns: 110px minmax(0, 1fr);
     align-items: center;
     min-width: 0;
     color: #7a7a7a;
