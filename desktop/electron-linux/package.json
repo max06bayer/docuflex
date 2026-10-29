@@ -1,0 +1,14 @@
+{
+  "name": "docuflex-desktop",
+  "productName": "Docuflex",
+  "version": "0.9.6",
+  "description": "Docuflex offline PDF editor (Linux shell)",
+  "private": true,
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "43.7.9"
+  }
+}
