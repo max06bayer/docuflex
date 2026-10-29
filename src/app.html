@@ -33,6 +33,23 @@
         -webkit-backdrop-filter: none !important;
         backdrop-filter: none !important;
       }
+      /* Animating the toolbar's width and the tool menu's scale re-lays out
+         and repaints it over the PDF canvas every frame in WebKitGTK. */
+      html.docuflex-webkitgtk .editor-toolbar-wrap,
+      html.docuflex-webkitgtk .editor-toolbar-wrap *,
+      html.docuflex-webkitgtk .toolbar-tooltip {
+        transition: none !important;
+        animation: none !important;
+      }
+      html.docuflex-webkitgtk .editor-toolbar-wrap {
+        will-change: transform;
+      }
+      html.docuflex-webkitgtk .tool-menu {
+        background: #fff !important;
+      }
+      html.docuflex-webkitgtk[data-theme='dark'] .tool-menu {
+        background: #181818 !important;
+      }
     </style>
     %sveltekit.head%
   </head>
