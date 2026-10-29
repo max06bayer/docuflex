@@ -226,9 +226,10 @@ function generate(css) {
   ast.walkRules((rule) => {
     // Keyframes steps are not selectors.
     if (rule.parent?.type === 'atrule' && /keyframes$/.test(/** @type {any} */ (rule.parent).name)) return;
-    // Tooltips and the on-page comment cards (pins, tethers, highlights) are
-    // already dark in light mode and stay exactly as they are.
-    if (/tooltip|comment-(card|pin|tether|quote-layer)/i.test(rule.selector)) return;
+    // Tooltips, the error and update boxes and the on-page comment cards
+    // (pins, tethers, highlights) are already dark in light mode and stay
+    // exactly as they are.
+    if (/tooltip|error-toast|update-(toast|progress|actions)|comment-(card|pin|tether|quote-layer)/i.test(rule.selector)) return;
     // Handles and the size badge are drawn on the white page, so they keep the light look too.
     if (/(shape|crop|linear)-[a-z-]*handle|shape-size-badge/.test(rule.selector)) return;
     // Blackout and whiteout boxes are part of the page and show the color they paint.
