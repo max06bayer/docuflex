@@ -290,6 +290,55 @@
       transform: rotate(-45deg);
     }
 
+    /* Linux: one compact framed group at the end of the header's button row. */
+    html[data-docuflex-desktop="linux"] .utilities .docuflex-window-controls {
+      align-items: center;
+      background: #f8f8f8;
+      border: 1px solid #dedede;
+      border-radius: 10px;
+      box-sizing: border-box;
+      flex: none;
+      gap: 2px;
+      height: 41px;
+      margin-left: 6px;
+      padding: 0 3px;
+      position: static;
+    }
+
+    html[data-docuflex-desktop="linux"] .utilities .docuflex-window-control {
+      border-radius: 7px;
+      color: #4a4a4a;
+      cursor: pointer;
+      height: 33px;
+      width: 38px;
+    }
+
+    html[data-docuflex-desktop="linux"] .utilities .docuflex-window-control.close:hover {
+      background: #e5484d;
+    }
+
+    html[data-docuflex-desktop="linux"] .utilities:has(.docuflex-window-controls) {
+      padding-right: 9px !important;
+    }
+
+    html[data-docuflex-desktop="linux"][data-theme="dark"] .utilities .docuflex-window-controls {
+      background: rgba(255, 255, 255, 0.065);
+      border-color: rgba(255, 255, 255, 0.04);
+    }
+
+    html[data-docuflex-desktop="linux"][data-theme="dark"] .utilities .docuflex-window-control {
+      color: #c8c8c8;
+    }
+
+    html[data-docuflex-desktop="linux"][data-theme="dark"] .utilities .docuflex-window-control:hover {
+      background: rgba(255, 255, 255, 0.09);
+      color: #fff;
+    }
+
+    html[data-docuflex-desktop="linux"][data-theme="dark"] .utilities .docuflex-window-control.close:hover {
+      background: #e5484d;
+    }
+
     .docuflex-desktop-export-menu {
       -webkit-backdrop-filter: blur(18px);
       animation: docuflex-desktop-export-menu-in 125ms cubic-bezier(0.215, 0.61, 0.355, 1);
@@ -355,8 +404,21 @@
       });
     };
 
+    // The header is re-rendered between pages, so keep the controls in it.
+    const placeWindowControls = () => {
+      if (desktopPlatform !== 'linux') return;
+      const controls = document.querySelector('.docuflex-window-controls');
+      const utilities = document.querySelector('.utilities');
+      if (!controls) return;
+      if (utilities && controls.parentElement !== utilities) utilities.append(controls);
+      else if (!utilities && controls.parentElement !== document.body) document.body.append(controls);
+    };
+
     markDragRegion();
-    new MutationObserver(markDragRegion).observe(document.documentElement, {
+    new MutationObserver(() => {
+      markDragRegion();
+      placeWindowControls();
+    }).observe(document.documentElement, {
       childList: true,
       subtree: true,
     });
@@ -380,6 +442,7 @@
         controls.append(button);
       }
       document.body.append(controls);
+      placeWindowControls();
     }
   };
 
