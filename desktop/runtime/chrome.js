@@ -290,31 +290,55 @@
       transform: rotate(-45deg);
     }
 
-    /* Linux: one compact framed group at the end of the header's button row. */
+    /* Linux: the window controls share one frame styled like the header's
+       utility buttons (.editor-shell .utility-button in DocuflexApp.svelte). */
     html[data-docuflex-desktop="linux"] .utilities .docuflex-window-controls {
       align-items: center;
-      background: #f8f8f8;
-      border: 1px solid #dedede;
-      border-radius: 10px;
+      background: rgba(0, 0, 0, 0.05);
+      border: 1px solid rgba(0, 0, 0, 0.05);
+      border-radius: 15px;
       box-sizing: border-box;
       flex: none;
-      gap: 2px;
-      height: 41px;
+      gap: 0;
+      height: 40px;
       margin-left: 6px;
-      padding: 0 3px;
+      overflow: hidden;
+      padding: 0;
       position: static;
     }
 
     html[data-docuflex-desktop="linux"] .utilities .docuflex-window-control {
-      border-radius: 7px;
-      color: #4a4a4a;
+      border: 1px solid transparent;
+      border-radius: 14px;
+      box-sizing: border-box;
+      color: #818181;
       cursor: pointer;
-      height: 33px;
-      width: 38px;
+      height: 38px;
+      transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
+      width: 44px;
+    }
+
+    html[data-docuflex-desktop="linux"] .utilities .docuflex-window-control::before,
+    html[data-docuflex-desktop="linux"] .utilities .docuflex-window-control::after {
+      content: none;
+    }
+
+    html[data-docuflex-desktop="linux"] .utilities .docuflex-window-control svg {
+      display: block;
+      height: 24px;
+      width: 24px;
+    }
+
+    html[data-docuflex-desktop="linux"] .utilities .docuflex-window-control:hover {
+      background: rgba(0, 0, 0, 0.05);
+      border-color: rgba(0, 0, 0, 0.04);
+      color: #5f5f5f;
     }
 
     html[data-docuflex-desktop="linux"] .utilities .docuflex-window-control.close:hover {
-      background: #e5484d;
+      background: rgba(229, 72, 77, 0.12);
+      border-color: rgba(229, 72, 77, 0.55);
+      color: #e5484d;
     }
 
     html[data-docuflex-desktop="linux"] .utilities:has(.docuflex-window-controls) {
@@ -327,16 +351,19 @@
     }
 
     html[data-docuflex-desktop="linux"][data-theme="dark"] .utilities .docuflex-window-control {
-      color: #c8c8c8;
+      color: #cfcfcf;
     }
 
     html[data-docuflex-desktop="linux"][data-theme="dark"] .utilities .docuflex-window-control:hover {
-      background: rgba(255, 255, 255, 0.09);
+      background: rgba(255, 255, 255, 0.05);
+      border-color: rgba(255, 255, 255, 0.05);
       color: #fff;
     }
 
     html[data-docuflex-desktop="linux"][data-theme="dark"] .utilities .docuflex-window-control.close:hover {
-      background: #e5484d;
+      background: rgba(229, 72, 77, 0.18);
+      border-color: rgba(229, 72, 77, 0.6);
+      color: #ff6b6f;
     }
 
     .docuflex-desktop-export-menu {
@@ -382,6 +409,15 @@
     }
 
   `;
+
+  // Drawn like the header's 24 px utility icons (1.5 stroke, round caps).
+  const windowControlIcon = (paths) =>
+    `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+  const windowControlIcons = {
+    minimize: windowControlIcon('<path d="M5 12h14"/>'),
+    maximize: windowControlIcon('<rect x="5" y="5" width="14" height="14" rx="2.5"/>'),
+    close: windowControlIcon('<path d="M18 6 6 18"/><path d="m6 6 12 12"/>'),
+  };
 
   const installDesktopChrome = () => {
     document.documentElement.dataset.docuflexDesktop = desktopPlatform;
@@ -436,6 +472,7 @@
         button.className = `docuflex-window-control ${action}`;
         button.type = 'button';
         button.setAttribute('aria-label', label);
+        if (desktopPlatform === 'linux') button.innerHTML = windowControlIcons[action];
         button.addEventListener('click', () => {
           window.location.assign(`/__docuflex/window/${action}`);
         });
