@@ -1,10 +1,12 @@
+import { applyLatexPatches, LATEX_REPAIR_RULES } from '#lib/server/latex-patches.js';
+import { QWEN_MODEL_ID, qwenChat } from '#lib/server/ollama.js';
 import { spawn } from 'node:child_process';
 import { access, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import * as env from '$app/env/private';
-import { AI_FALLBACK_MODEL, AI_MODEL, AI_MODELS, openRouterKey } from '#lib/server/ai.js';
+import { AI_MODEL, AI_MODELS, modelRouting, openRouterKey } from '#lib/server/ai.js';
 
 /**
  * PDF to LaTeX: a model rewrites a PDF or scan as a complete LaTeX document,
@@ -14,7 +16,7 @@ import { AI_FALLBACK_MODEL, AI_MODEL, AI_MODELS, openRouterKey } from '#lib/serv
  */
 
 const COMPILE_TIMEOUT = 240_000;
-const MAX_ATTEMPTS = 4;
+const MAX_ATTEMPTS = 12;
 /** Compare-and-fix rounds when a translation should match the original's look. */
 const REVIEW_ROUNDS = 2;
 /** Pages compared per review round (original next to result). */
@@ -104,7 +106,8 @@ function systemPrompt(translateTo = '', match = false) {
     ]),
     '',
     'Technical rules (the compiler is Tectonic with XeTeX and a TeX Live 2023 package set; it has no shell escape):',
-    '- Output exactly one complete document from \\documentclass to \\end{document} inside a single ```latex code block, and nothing else after it.',
+    '- For the first draft, output exactly one complete document from \\documentclass to \\end{document} inside a single ```latex code block, and nothing else after it.',
+    '- When the user explicitly offers search/replace patches for compiler repairs, you may return those instead of a complete document, following the supplied patch format.',
     '- Use only widely available packages: geometry, fontspec (optional), amsmath, amssymb, amsthm, mathtools, siunitx, xcolor, graphicx, booktabs, tabularx, array, multirow, makecell, longtable, colortbl, enumitem, microtype, caption, subcaption, float, hyperref, fancyhdr, titlesec, multicol, tcolorbox (with \\tcbuselibrary{skins,breakable,theorems}), tikz, pgfplots (\\pgfplotsset{compat=1.18}), pgfplotstable, lmodern, libertinus, newtx, sourcesanspro, roboto, babel or polyglossia, csquotes, listings, adjustbox, wrapfig. Never use lipsum or placeholder text.',
     '- Pick fonts only through font packages (lmodern, libertinus, newtxtext/newtxmath, sourcesanspro, roboto). Never \\setmainfont or \\fontspec a font by name: system fonts are not available.',
     '- No minted, no \\write18, no external files except page-N.jpg, no bibliography files (write references with thebibliography or a plain list).',
@@ -154,11 +157,11 @@ export function extractLatex(reply) {
 
 /**
  * One streamed completion; reports the length of the answer as it grows.
- * @param {{ key: string; model: string; messages: any[]; signal: AbortSignal; onProgress: (characters: number) => void }} options
+ * @param {{ key: string; model: string; messages: any[]; signal: AbortSignal; onProgress: (characters: number) => void; repair?: boolean }} options
  */
-async function complete({ key, model, messages, signal, onProgress }) {
+async function complete({ key, model, messages, signal, onProgress, repair = false }) {
   const chosen = AI_MODELS.some((candidate) => candidate.id === model) ? model : AI_MODEL;
-  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+  const response = model === QWEN_MODEL_ID ? await qwenChat(messages, [], signal, { document: true, repair }) : await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     signal,
     headers: {
@@ -168,10 +171,10 @@ async function complete({ key, model, messages, signal, onProgress }) {
       'X-Title': 'Docuflex'
     },
     body: JSON.stringify({
-      models: chosen === AI_FALLBACK_MODEL ? [chosen] : [chosen, AI_FALLBACK_MODEL],
+      ...modelRouting(chosen),
       stream: true,
-      max_tokens: MAX_OUTPUT_TOKENS,
-      reasoning: { max_tokens: 4096 },
+      max_tokens: repair ? 2048 : MAX_OUTPUT_TOKENS,
+      reasoning: { max_tokens: repair ? 1024 : 4096 },
       messages
     })
   });
@@ -199,6 +202,7 @@ async function complete({ key, model, messages, signal, onProgress }) {
       try {
         const event = JSON.parse(data);
         if (event.error) throw new Error(event.error.message || 'The AI service failed.');
+        if (event.choices?.[0]?.finish_reason === 'length') throw new Error('The model reached its output limit before finishing.');
         const delta = event.choices?.[0]?.delta?.content;
         if (typeof delta === 'string') text += delta;
       } catch (failure) {
@@ -305,7 +309,7 @@ function pageCount(pdf) {
  */
 export async function convertToLatex({ pages, model, style, instructions, name, translateTo = '', fonts = [], key, signal, onEvent }) {
   const apiKey = key ?? (await openRouterKey());
-  if (!apiKey) throw new Error('Add your OpenRouter API key in Settings.');
+  if (!apiKey && model !== QWEN_MODEL_ID) throw new Error('Add your OpenRouter API key in Settings.');
   const files = pages.flatMap((page, index) => {
     const match = page.image?.match(/^data:image\/jpeg;base64,(.+)$/);
     return match ? [{ name: `page-${index + 1}.jpg`, bytes: Buffer.from(match[1], 'base64') }] : [];
@@ -321,17 +325,63 @@ export async function convertToLatex({ pages, model, style, instructions, name, 
   const build = async (conversation, stage, round = 0) => {
     const messages = [...conversation];
     let tex = '';
+    let compileLog = '';
+    let rewriteAllowed = false;
+    /** Failed versions must not cycle back into the compiler. */
+    const failedSources = new Set();
+    /** @param {string} feedback */
+    const repairMessages = (feedback) => {
+      messages.splice(0, messages.length, system, rewriteAllowed ? source : { role: 'user', content: 'The current complete TeX source follows. Repair its compiler errors while preserving its content and design.' },
+        { role: 'assistant', content: `\`\`\`latex\n${tex}\n\`\`\`` },
+        { role: 'user', content: `Compiling the current source with Tectonic (XeTeX) failed:\n${compileLog}\n\n${feedback ? `The last patch was NOT applied: ${feedback}\nThe current source above is unchanged.\n\n` : ''}${rewriteAllowed ? 'A full rewrite is now authorized for this structural repair. Return the complete corrected document in one ```latex block, preserving all content and design.' : LATEX_REPAIR_RULES}` });
+    };
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
       const writing = attempt === 1 ? stage : 'fixing';
       onEvent({ stage: writing, attempt, round, characters: 0 });
-      const reply = await complete({ key: apiKey, model, messages, signal, onProgress: (characters) => onEvent({ stage: writing, attempt, round, characters }) });
+      console.info('[latex] generation', JSON.stringify({ attempt, round, mode: tex ? (rewriteAllowed ? 'rewrite' : 'patch') : 'document' }));
+      let reply;
+      try {
+        reply = await complete({ key: apiKey ?? '', model, messages, signal, repair: Boolean(tex) && !rewriteAllowed, onProgress: (characters) => onEvent({ stage: writing, attempt, round, characters }) });
+      } catch (error) {
+        if (tex && !rewriteAllowed && attempt < MAX_ATTEMPTS && error instanceof Error && error.message.includes('output limit')) {
+          repairMessages('The repair exceeded its small response budget. Return only the few broken lines and their replacements, or request REWRITE_REQUIRED with a short reason.');
+          continue;
+        }
+        // One bounded recovery: forget generated drafts and compiler/review history.
+        // Reasoning is never included in complete()'s messages in the first place.
+        if (model !== QWEN_MODEL_ID || attempt !== 1 || !(error instanceof Error) || !error.message.includes('output limit')) throw error;
+        messages.splice(0, messages.length, system, source, { role: 'user', content: 'The previous response exceeded the output limit and has been discarded. Write a compact but complete LaTeX document: preserve all source content, use concise markup and simple layouts, and avoid extra decorative graphics. Finish with \\end{document}.' });
+        onEvent({ stage: 'resetting', attempt, round });
+        continue;
+      }
       if (stage === 'refining' && attempt === 1 && /^\s*NO_CHANGES\s*$/.test(reply.replace(/```/g, ''))) return null;
-      const extracted = extractLatex(reply);
+      if (tex && !rewriteAllowed && /^REWRITE_REQUIRED:\s*\S/.test(reply.trim()) && reply.trim().length <= 500) {
+        rewriteAllowed = true;
+        console.info('[latex] structural rewrite requested', JSON.stringify({ attempt, round }));
+        repairMessages('');
+        continue;
+      }
+      let patched;
+      try {
+        patched = applyLatexPatches(tex, reply);
+        if (tex && !rewriteAllowed && !patched) throw new Error('A full document was returned without requesting a structural rewrite. Return small search/replace patches, or only REWRITE_REQUIRED: with a short reason.');
+      } catch (error) {
+        if (tex) repairMessages(error instanceof Error ? error.message : 'Invalid replacement.');
+        else messages.push({ role: 'user', content: 'There is no complete source to edit yet. Return the complete document in one ```latex block.' });
+        continue;
+      }
+      const extracted = patched?.tex ?? extractLatex(reply);
       if (!extracted) {
-        messages.push({ role: 'assistant', content: reply.slice(0, 4000) }, { role: 'user', content: 'That was not a LaTeX document. Answer with the complete document in one ```latex block.' });
+        if (tex) repairMessages('The reply was neither valid search/replace pairs nor a complete LaTeX document.');
+        else messages.push({ role: 'assistant', content: reply.slice(0, 4000) }, { role: 'user', content: 'That was not a LaTeX document. Answer with the complete document in one ```latex block.' });
+        continue;
+      }
+      if (failedSources.has(extracted)) {
+        repairMessages('This exact version was already tried and failed. Do not undo earlier repairs or repeat the same edit. Address the actual compiler diagnostic with a different change.');
         continue;
       }
       tex = extracted;
+      if (patched) console.info('[latex] applied patches', JSON.stringify({ attempt, patches: patched.patches, responseCharacters: reply.length, documentCharacters: tex.length }));
       onEvent({ stage: 'compiling', attempt, round });
       let fetching = false;
       const result = await compileLatex(tex, files, signal, (line) => {
@@ -343,11 +393,11 @@ export async function convertToLatex({ pages, model, style, instructions, name, 
       if (result.ok && result.pdf) return { pdf: result.pdf, tex, attempts: attempt };
       console.warn(`[latex] attempt ${attempt} did not compile:\n${result.log.slice(0, 1500)}`);
       onEvent({ stage: 'error', attempt, round, log: result.log.slice(0, 600) });
-      // Only the latest source goes back, so retries stay small.
-      messages.splice(conversation.length, messages.length - conversation.length,
-        { role: 'assistant', content: `\`\`\`latex\n${tex}\n\`\`\`` },
-        { role: 'user', content: `Compiling with Tectonic (XeTeX) failed:\n${result.log}\n\nFix every error (replace unavailable packages, close environments, escape characters) and answer with the complete corrected document in one \`\`\`latex block. Keep the design and content.` }
-      );
+      // Send only the current source and current diagnostic; no failed drafts accumulate.
+      failedSources.add(tex);
+      compileLog = result.log;
+      rewriteAllowed = false;
+      repairMessages('');
     }
     if (stage === 'refining') return null;
     const failure = new Error('The LaTeX document did not compile after several attempts.');

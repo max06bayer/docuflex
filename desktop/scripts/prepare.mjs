@@ -1,3 +1,4 @@
+import { prepareOllamaRuntime } from './prepare-ollama.mjs';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { access, cp, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
@@ -258,7 +259,7 @@ async function copyApplicationResources() {
   const macOcrRuntime = process.platform === 'darwin' ? join(desktopRoot, 'vendor', 'ocr-macos-arm64') : '';
   await copyRuntime('pdf2htmlEX', 'DOCUFLEX_PDF2HTMLEX_RUNTIME', macPdfRuntime);
   await copyRuntime('ocr', 'DOCUFLEX_OCR_RUNTIME', macOcrRuntime);
-  if (process.platform === 'darwin') await buildVisionOcr();
+  if (process.platform === 'darwin') { await buildVisionOcr(); await prepareOllamaRuntime(join(resourcesRoot, 'runtime', 'ollama')); }
 
   if (process.platform === 'darwin' && !process.env.DOCUFLEX_OFFICE_RUNTIME?.trim()) {
     const officeBin = join(resourcesRoot, 'runtime', 'office', 'bin');

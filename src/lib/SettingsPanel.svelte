@@ -1,4 +1,5 @@
 <script>
+  import FeedbackPanel from '#lib/FeedbackPanel.svelte';
   import { onDestroy, tick } from 'svelte';
   import { cubicOut } from 'svelte/easing';
   import { fade, fly, scale } from 'svelte/transition';
@@ -36,6 +37,10 @@
   const KEY_STAR_WIDTH = 15;
   $: keyStars = keyDraft.trim().length;
   $: keyOverflows = keyStars * KEY_STAR_WIDTH > keyMaskWidth - 4;
+  let feedbackOpen = false;
+  /** @type {HTMLButtonElement | undefined} */
+  let feedbackButton;
+  function closeFeedback() { feedbackOpen = false; tick().then(() => feedbackButton?.focus()); }
   let legalOpen = legalOnly;
   /** @type {HTMLDivElement | undefined} */
   let legalContentElement;
@@ -96,7 +101,8 @@
   /** @param {KeyboardEvent} event */
   function handleKeydown(event) {
     if (event.key !== 'Escape') return;
-    if (legalOpen) closeLegal();
+    if (feedbackOpen) closeFeedback();
+    else if (legalOpen) closeLegal();
     else onClose();
   }
 
@@ -182,12 +188,15 @@
       {#if desktop}
         <button class="settings-row settings-link" type="button" onclick={() => checkForUpdate({ manual: true })}>Update</button>
       {/if}
+      <button bind:this={feedbackButton} class="settings-row settings-link" type="button" onclick={() => (feedbackOpen = true)}>Feedback</button>
       <a class="settings-row settings-link" href="https://github.com/max06bayer/docuflex" target="_blank" rel="noreferrer">GitHub</a>
       <a class="settings-row settings-link" href="/">Homepage</a>
       <button class="settings-row settings-link" type="button" onclick={() => (legalOpen = true)}>Legal &amp; Privacy</button>
     </section>
   </div>
 {/if}
+
+{#if feedbackOpen}<FeedbackPanel onClose={closeFeedback} />{/if}
 
 {#if legalOpen}
   <div class="legal-backdrop" role="presentation" onclick={handleBackdropClick} transition:fade={{ duration: 170 }}>
@@ -217,6 +226,7 @@
           <p><strong>Hosting.</strong> Docuflex runs on infrastructure supplied by netcup GmbH at the Vienna, Austria server location. The deployment is managed with a self-hosted Coolify installation and its Traefik reverse proxy. Cloudflare is not used.</p>
           <p><strong>Document processing.</strong> When you use conversion, compression, translation, OCR, protection, flattening, text editing, or export, the document is sent to the Docuflex server serving this app. OCR and PDF conversion run locally on that server. Temporary processing files are removed after the operation and are not used for advertising, profiling, or model training.</p>
           <p><strong>Web analytics.</strong> The web editor and landing page record page views, approximate time on page, scroll depth, release downloads, and coarse device, browser, and operating-system type. IP addresses are never stored. They are used briefly in memory to derive country and region from a database on our own server, and to compute a visitor hash that changes daily. No IP address is sent to a third party. <a href="https://db-ip.com" target="_blank" rel="noreferrer">IP Geolocation by DB-IP</a> (CC BY 4.0). No cookies or browser storage are used for this. Requests with Do Not Track or Global Privacy Control are not measured. The desktop app sends no analytics.</p>
+          <p><strong>Feedback.</strong> If you send feedback, the message, category, app version and platform, and any email address you choose to include are sent to our own server. Documents and API keys are not attached. Feedback is kept for up to 90 days so we can improve Docuflex and reply if requested.</p>
           <p><strong>Operational logs.</strong> The application does not use third-party error reporting or external log drains. Application errors and container events may appear in local Coolify and Docker console logs for troubleshooting and security. The app does not create a separate document or visitor database from these logs. Logs remain until the relevant container is replaced or removed, server cleanup runs, or longer retention is necessary to investigate a security incident.</p>
           <p><strong>No sale or advertising sharing.</strong> Docuflex does not sell personal information or share it for cross-context behavioral advertising.</p>
         </section>

@@ -9,7 +9,7 @@ import { visitorKey } from '#lib/ai-web.js';
 export const MODEL_STORAGE_KEY = 'docuflex-ai-model';
 const RENDER_SCALE = 1.5;
 
-/** @typedef {{ engine: boolean; local: boolean; keyReady: boolean | null; styles: { id: string; label: string }[]; matchStyle: { id: string; label: string }; maxPageImages: number; model: string; models: { id: string; name: string; short?: string }[] }} LatexStatus */
+/** @typedef {{ engine: boolean; local: boolean; keyReady: boolean | null; qwenReady?: boolean; styles: { id: string; label: string }[]; matchStyle: { id: string; label: string }; maxPageImages: number; model: string; models: { id: string; name: string; short?: string; free?: boolean; local?: boolean; downloadable?: boolean; ready?: boolean }[] }} LatexStatus */
 /** @typedef {{ stage: string; attempt?: number; round?: number; characters?: number; page?: number; pages?: number }} LatexProgress */
 
 /** @returns {Promise<LatexStatus>} */
@@ -20,8 +20,8 @@ export async function latexStatus() {
 }
 
 /** @param {LatexStatus | null} status */
-export function latexKeyReady(status) {
-  return status ? (status.local ? Boolean(status.keyReady) : Boolean(visitorKey())) : false;
+export function latexKeyReady(status, model = '') {
+  return status ? (status.local ? Boolean(model === 'ollama/qwen3.5:4b-q4_K_M' ? status.qwenReady : status.keyReady || (!model && status.qwenReady)) : Boolean(visitorKey())) : false;
 }
 
 /** The remembered model if it is still offered, otherwise the default. @param {LatexStatus} status */
@@ -44,6 +44,7 @@ export function rememberLatexModel(id) {
 export function describeLatexStage(value) {
   if (!value) return '';
   const round = value.round ? ` ${value.round}` : '';
+  if (value.stage === 'resetting') return 'Retrying with fresh context…';
   if (value.stage === 'reading') return `Reading page ${value.page ?? 1} of ${value.pages ?? 1}…`;
   if (value.stage === 'sending') return 'Uploading pages…';
   if (value.stage === 'writing') return value.characters ? `Writing LaTeX · ${formatCount(value.characters)}` : 'AI is studying the pages…';
@@ -59,11 +60,12 @@ export function describeLatexStage(value) {
 /** A sentence on what is happening right now, for the panel's info area. @param {LatexProgress | null} value */
 export function explainLatexStage(value) {
   if (!value) return '';
+  if (value.stage === 'resetting') return 'The local model reached its response limit. Discarding the unfinished draft and retrying with compact formatting.';
   if (value.stage === 'reading') return 'Rendering each page and reading its text and fonts, so the AI sees exactly what you see.';
   if (value.stage === 'sending') return 'Sending the page images and text to the AI model.';
   if (value.stage === 'writing') return value.characters ? 'The AI is writing the full LaTeX source: text, formulas, tables and vector figures.' : 'The AI reads every page before it starts writing. Large documents take a while.';
   if (value.stage === 'compiling' || value.stage === 'packages') return 'Compiling the LaTeX into a PDF on this computer.';
-  if (value.stage === 'error' || value.stage === 'fixing') return 'The LaTeX had an error. The AI gets the compiler message and fixes its source.';
+  if (value.stage === 'error' || value.stage === 'fixing') return 'The AI can replace just the broken sections of the TeX source, then recompile the document.';
   if (value.stage === 'reviewing') return 'Rendering the result so the AI can lay it next to the original page by page.';
   if (value.stage === 'refining') return 'The AI compares its pages with the original and fixes overlaps, fonts, sizes and spacing.';
   return '';

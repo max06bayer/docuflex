@@ -5,6 +5,7 @@ fn main() {
                 .commands(&[
                     "take_pending_pdf",
                     "start_window_drag",
+                    "macos_resize_window",
                     "docuflex_save_prompt",
                     "docuflex_save_overwrite",
                     "docuflex_print_pdf",

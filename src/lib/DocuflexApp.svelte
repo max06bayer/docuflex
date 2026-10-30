@@ -1,4 +1,7 @@
 <script>
+  import { translationDownload, downloadTranslationModel, dismissTranslationDownload } from '#lib/translation-download.js';
+  import { formatBytes } from '#lib/translate.js';
+  import { qwenDownload, downloadQwen, dismissQwenDownload, pauseQwenDownload } from '#lib/qwen-download.js';
   import { onDestroy, onMount, tick } from 'svelte';
   import { cubicOut } from 'svelte/easing';
   import { scale } from 'svelte/transition';
@@ -971,6 +974,7 @@
     window.addEventListener('drop', handleFileDrop);
     window.addEventListener('scroll', hideQuickTooltip, true);
     window.addEventListener('resize', hideQuickTooltip);
+    window.addEventListener('docuflex:qwen-ready', refreshAiStatus);
     window.addEventListener('docuflex:error', /** @type {EventListener} */ (handleNativeError));
     void refreshMcpStatus().then(() => {
       if (mcpStatus?.available) connectMcpBridge();
@@ -985,6 +989,7 @@
       window.removeEventListener('keydown', handleQuickToolShortcut);
       window.removeEventListener('dragover', allowFileDrop);
       window.removeEventListener('drop', handleFileDrop);
+      window.removeEventListener('docuflex:qwen-ready', refreshAiStatus);
       window.removeEventListener('docuflex:error', /** @type {EventListener} */ (handleNativeError));
       window.removeEventListener('scroll', hideQuickTooltip, true);
       window.removeEventListener('resize', hideQuickTooltip);
@@ -1477,6 +1482,61 @@
     {/key}
   {/if}
 
+  {#if $translationDownload.visible}
+    <div class="error-toast update-toast model-download-toast" role="status" transition:scale={{ duration: 150, easing: cubicOut, start: 0.96, opacity: 0 }}>
+      <div class="error-toast-body">
+        {#if ['checking', 'preparing', 'downloading', 'installing'].includes($translationDownload.phase)}
+          <strong>{$translationDownload.phase === 'checking' ? 'Checking translation model…' : $translationDownload.phase === 'installing' ? 'Installing translation model…' : 'Downloading translation model'}</strong>
+          <span>{$translationDownload.label}</span>
+          <div class="update-progress" role="progressbar" aria-label="Translation model download" aria-valuemin="0" aria-valuemax="100" aria-valuenow={$translationDownload.total ? Math.round($translationDownload.received / $translationDownload.total * 100) : undefined}><span style:width={`${$translationDownload.total ? Math.min(100, $translationDownload.received / $translationDownload.total * 100) : 0}%`}></span></div>
+          <span>{$translationDownload.phase === 'installing' ? 'Installing…' : $translationDownload.total ? `${Math.round($translationDownload.received / 1e6)} MB of ${formatBytes($translationDownload.total)}${$translationDownload.speed ? ` · ${($translationDownload.speed / 1e6).toFixed(1)} MB/s` : ''}` : 'Preparing…'}</span>
+        {:else if $translationDownload.phase === 'ready'}
+          <strong>Translation model is ready</strong><span>{$translationDownload.label}. Saved for future translations.</span>
+        {:else if $translationDownload.phase === 'error'}
+          <strong>Translation model download failed</strong><span>{$translationDownload.error}</span>
+        {:else}
+          <strong>Download translation model</strong><span>{$translationDownload.label}{$translationDownload.size ? ` · about ${formatBytes($translationDownload.size)}` : ''}. One-time download.</span>
+        {/if}
+      </div>
+      <div class="update-actions">
+        {#if ['checking', 'preparing', 'downloading', 'installing'].includes($translationDownload.phase)}
+          <button type="button" onclick={dismissTranslationDownload}>Hide</button>
+        {:else if $translationDownload.phase === 'ready'}
+          <button type="button" onclick={dismissTranslationDownload}>Done</button>
+        {:else}
+          <button class="secondary" type="button" onclick={dismissTranslationDownload}>Later</button><button type="button" onclick={downloadTranslationModel}>{$translationDownload.phase === 'error' ? 'Try again' : 'Download'}</button>
+        {/if}
+      </div>
+    </div>
+  {/if}
+
+  {#if $qwenDownload.visible && !$translationDownload.visible}
+    <div class="error-toast update-toast model-download-toast" role="status" transition:scale={{ duration: 150, easing: cubicOut, start: 0.96, opacity: 0 }}>
+      <div class="error-toast-body">
+        {#if $qwenDownload.phase === 'downloading'}
+          <strong>Downloading Qwen 3.5 4B</strong>
+          <div class="update-progress" role="progressbar" aria-label="Qwen download" aria-valuemin="0" aria-valuemax="100" aria-valuenow={$qwenDownload.total ? Math.round($qwenDownload.received / $qwenDownload.total * 100) : 0}><span style:width={`${$qwenDownload.total ? Math.min(100, $qwenDownload.received / $qwenDownload.total * 100) : 0}%`}></span></div>
+          <span>{$qwenDownload.total ? `${($qwenDownload.received / 1048576).toFixed(0)} of ${($qwenDownload.total / 1048576).toFixed(0)} MB` : $qwenDownload.status || 'Starting…'}</span>
+        {:else if $qwenDownload.phase === 'ready'}
+          <strong>Qwen is ready</strong><span>Saved on this Mac. The model loads when you send a message and unloads after five minutes idle.</span>
+        {:else if $qwenDownload.phase === 'error'}
+          <strong>Qwen download paused</strong><span>{$qwenDownload.error}</span>
+        {:else}
+          <strong>Download Qwen 3.5 4B</strong><span>About 3.3 GB, one time. Runs entirely on this Mac. App updates keep the download; the model loads only when you use it.</span>
+        {/if}
+      </div>
+      <div class="update-actions">
+        {#if $qwenDownload.phase === 'downloading'}
+          <button class="secondary" type="button" onclick={pauseQwenDownload}>Pause</button><button type="button" onclick={dismissQwenDownload}>Hide</button>
+        {:else if $qwenDownload.phase === 'ready'}
+          <button type="button" onclick={dismissQwenDownload}>Done</button>
+        {:else}
+          <button class="secondary" type="button" onclick={dismissQwenDownload}>Later</button><button type="button" onclick={downloadQwen}>{$qwenDownload.phase === 'error' ? 'Resume' : 'Download'}</button>
+        {/if}
+      </div>
+    </div>
+  {/if}
+
   {#if $update.visible}
     <div class="error-toast update-toast" role="status" transition:scale={{ duration: 150, easing: cubicOut, start: 0.96, opacity: 0 }}>
       <div class="error-toast-body">
@@ -1903,6 +1963,7 @@
     transform-origin: top right;
   }
 
+
   .error-toast-body {
     display: grid;
     gap: 3px;
@@ -1928,6 +1989,8 @@
   /* Half as far from the top right corner as the error box. */
   .update-toast { z-index: 1399; top: 72px; right: 12px; }
   .error-toast + .update-toast { top: 150px; }
+
+  .model-download-toast { right: calc(var(--ai-dock, 0px) + 12px); }
 
   .update-progress {
     height: 6px;
@@ -3402,6 +3465,16 @@
   /* dark theme: end generated */
 
   /* dark theme: manual */
+  /* Notification cards keep their dark surface in both themes. */
+  :global(:root[data-theme="dark"]) .error-toast { background: #222222; border-color: rgba(255, 255, 255, 0.08); }
+  :global(:root[data-theme="dark"]) .error-toast-body,
+  :global(:root[data-theme="dark"]) .error-toast-body strong { color: #ffffff; }
+  :global(:root[data-theme="dark"]) .error-toast-body span { color: #aaaaaa; }
+  :global(:root[data-theme="dark"]) .update-progress { background: rgba(255, 255, 255, 0.14); }
+  :global(:root[data-theme="dark"]) .update-progress span { background: #ffffff; }
+  :global(:root[data-theme="dark"]) .update-actions button { background: #ffffff; color: #111111; }
+  :global(:root[data-theme="dark"]) .update-actions button.secondary { background: rgba(255, 255, 255, 0.1); color: #ffffff; }
+
   /* Shell, after the Figma dark frame (Docuflex › Redesign): black glass top bar and sidebar. */
   :global(:root[data-theme="dark"]) .topbar-backdrop img { filter: invert(1) brightness(0.6) contrast(1.2); }
   /* Dark window head: Figma's starry Rectangle 992 (node 801:1490) with its black fade, not the inverted marble. */
@@ -3436,5 +3509,7 @@
   :global(:root[data-theme="dark"]) .quick-tool-icon :global([stroke="#474747"]) { stroke: #2a2a2c; }
   :global(:root[data-theme="dark"]) .quick-tool:hover .quick-tool-icon :global([stroke]),
   :global(:root[data-theme="dark"]) .quick-tool.keyboard-active .quick-tool-icon :global([stroke]) { filter: brightness(1.35); }
+
+  /* dark theme: end manual */
 
 </style>

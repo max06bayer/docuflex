@@ -1,4 +1,5 @@
 <script>
+  import { mcpDrawing } from '#lib/mcp-drawing.js';
   import { onDestroy, onMount, tick } from 'svelte';
   import { cubicOut } from 'svelte/easing';
   import { flip } from 'svelte/animate';
@@ -8553,21 +8554,19 @@
       }
 
       case 'draw': {
-        await mcpEnsureSelectTool();
+        const validated = mcpDrawing(args, toPx);
         const pageIndex = mcpPageIndex(args.page);
+        await mcpEnsureSelectTool();
         const type = args.tool === 'marker' ? 'marker' : 'pen';
-        const points = (Array.isArray(args.points) ? args.points : []).map((/** @type {any} */ point) => ({ x: toPx(Number(point.x)), y: toPx(Number(point.y)), pressure: 0.5 }));
-        if (points.length < 2) throw new Error('A drawing needs at least two points.');
-        /** @type {StrokePoint[]} */
-        const dense = points.reduce((/** @type {StrokePoint[]} */ line, /** @type {StrokePoint} */ point) => appendInterpolatedPoint(line, point), []);
+        const dense = validated.points;
         const stroke = /** @type {AnnotationStroke} */ ({
           id: nextAnnotationId++,
           type,
           points: dense,
           rawPoints: dense,
           color: mcpColor(args.color, type === 'marker' ? markerColor : penColor),
-          thickness: args.thickness ? toPx(Number(args.thickness)) : (type === 'marker' ? markerThickness : penThickness),
-          opacity: args.opacity !== undefined ? clamp(Number(args.opacity), 0.01, 1) : (type === 'marker' ? markerOpacity : penOpacity),
+          thickness: validated.thickness ?? (type === 'marker' ? markerThickness : penThickness),
+          opacity: validated.opacity ?? (type === 'marker' ? markerOpacity : penOpacity),
           falloff: type === 'marker' ? markerFalloff : 0,
           smoothing: type === 'pen' ? penSmoothing : 0
         });

@@ -240,6 +240,8 @@ export const MCP_TOOLS = [
         points: {
           type: 'array',
           minItems: 2,
+          maxItems: 10000,
+          description: 'An array of point objects, e.g. [{"x":100,"y":300},{"x":200,"y":300}]. Each coordinate must be a finite number. Never pass points as a string, coordinate pairs or a flat number array.',
           items: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } }, required: ['x', 'y'] }
         },
         color,

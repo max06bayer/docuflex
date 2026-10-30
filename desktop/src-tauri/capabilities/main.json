@@ -11,6 +11,7 @@
     "core:window:allow-start-dragging",
     "allow-take-pending-pdf",
     "allow-start-window-drag",
+    "allow-macos-resize-window",
     "allow-docuflex-save-prompt",
     "allow-docuflex-save-overwrite",
     "allow-docuflex-print-pdf",
