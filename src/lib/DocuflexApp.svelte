@@ -3385,14 +3385,6 @@
   :global(:root[data-theme="dark"]) .utility-button.active img,
   :global(:root[data-theme="dark"]) .utility-button.active:hover img { filter: brightness(0); }
   :global(:root[data-theme="dark"]) .utility-button:disabled:hover { border-color: #202020; background: #141414; }
-  :global(:root[data-theme="dark"]) .error-toast { border: 1px solid rgba(0, 0, 0, 0.064); background: #ececec; box-shadow: 0 10px 28px rgba(0, 0, 0, 0.6), 0 2px 7px rgba(0, 0, 0, 0.36); }
-  :global(:root[data-theme="dark"]) .error-toast-body { color: #111111; }
-  :global(:root[data-theme="dark"]) .error-toast-body strong { color: #111111; }
-  :global(:root[data-theme="dark"]) .error-toast-body span { color: rgba(255, 255, 255, 0.333); }
-  :global(:root[data-theme="dark"]) .update-progress { background: rgba(255, 255, 255, 0.017); }
-  :global(:root[data-theme="dark"]) .update-progress span { background: rgba(255, 255, 255, 0.05); }
-  :global(:root[data-theme="dark"]) .update-actions button { border: 0; background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.859); }
-  :global(:root[data-theme="dark"]) .update-actions button.secondary { background: rgba(255, 255, 255, 0.012); color: #111111; }
   :global(:root[data-theme="dark"]) .sidebar { background: #111111; border-right: 1px solid #2a2a2a; box-shadow: 0 0 98.6px rgba(0, 0, 0, 0.18); }
   :global(:root[data-theme="dark"]) .quick-tool { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.07); color: rgba(255, 255, 255, 0.75); }
   :global(:root[data-theme="dark"]) .quick-tool kbd { border: 1px solid rgba(255, 255, 255, 0.04); background: rgba(255, 255, 255, 0.033); color: rgba(255, 255, 255, 0.165); }

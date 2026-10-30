@@ -231,6 +231,42 @@ jobs:
           cat /tmp/docuflex-appimage.log
           echo "Packaged AppImage local services were not ready within 60 seconds." >&2
           exit 1
+      # WebKitGTK renders the editor far slower than Chromium, so the Debian
+      # package runs the same resources in the Electron shell.
+      - name: Package Electron Debian build
+        run: |
+          deb=$(find desktop/src-tauri/target/release/bundle/deb -name '*.deb' -print -quit)
+          test -n "$deb"
+          version=$(node -p "require('./package.json').version")
+          chmod +x desktop/scripts/package-linux-electron.sh
+          desktop/scripts/package-linux-electron.sh deb "$deb" desktop/electron-package "$version"
+      - name: Install and launch-test Electron Debian package
+        run: |
+          sudo apt-get install -y ./desktop/electron-package/*.deb
+          rm -f /tmp/docuflex-page-loaded
+          # The runner cannot create the namespaces Chromium's sandbox needs.
+          DOCUFLEX_PAGE_LOAD_MARKER=/tmp/docuflex-page-loaded \
+            timeout 75s xvfb-run -a docuflex-desktop --no-sandbox > /tmp/docuflex-deb.log 2>&1 &
+          app_pid=$!
+          trap 'kill "$app_pid" 2>/dev/null || true; wait "$app_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 60); do
+            if ! kill -0 "$app_pid" 2>/dev/null; then
+              cat /tmp/docuflex-deb.log
+              echo 'Electron Debian package exited before startup completed.' >&2
+              exit 1
+            fi
+            if curl --fail --silent http://127.0.0.1:43128/health >/dev/null \
+              && curl --fail --silent http://127.0.0.1:43127/editor >/dev/null \
+              && grep --quiet '^editor-loaded$' /tmp/docuflex-page-loaded 2>/dev/null; then
+              echo 'Electron Debian services and page-load test passed.'
+              node desktop/scripts/smoke-live-document-tools.mjs
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/docuflex-deb.log
+          echo 'Electron Debian package did not become ready within 60 seconds.' >&2
+          exit 1
       - name: Upload Linux packages
         uses: actions/upload-artifact@v4
         with:
@@ -238,7 +274,7 @@ jobs:
           if-no-files-found: error
           path: |
             desktop/src-tauri/target/release/bundle/appimage/*.AppImage
-            desktop/src-tauri/target/release/bundle/deb/*.deb
+            desktop/electron-package/*.deb
 
   arch-linux-x64:
     name: Arch and CachyOS native x64 package
@@ -273,6 +309,14 @@ jobs:
           desktop/scripts/package-arch-linux.sh \
             "$GITHUB_WORKSPACE/desktop/.deb-extracted" \
             "$GITHUB_WORKSPACE/desktop/arch-package"
+      - name: Package Electron Arch build
+        run: |
+          package=$(find desktop/arch-package -name '*.pkg.tar.zst' -print -quit)
+          test -n "$package"
+          version=$(node -p "require('./package.json').version")
+          chmod +x desktop/scripts/package-linux-electron.sh
+          desktop/scripts/package-linux-electron.sh arch "$package" desktop/electron-arch-package "$version"
+          mv -f desktop/electron-arch-package/*.pkg.tar.zst "$package"
       - name: Install and launch-test native package
         run: |
           package=$(find desktop/arch-package -name '*.pkg.tar.zst' -print -quit)
@@ -280,7 +324,7 @@ jobs:
           pacman -U --noconfirm "$package"
           rm -f /tmp/docuflex-page-loaded
           DOCUFLEX_PAGE_LOAD_MARKER=/tmp/docuflex-page-loaded \
-            timeout 75s xvfb-run -a dbus-run-session -- docuflex-desktop \
+            timeout 75s xvfb-run -a dbus-run-session -- docuflex-desktop --no-sandbox \
             > /tmp/docuflex-arch.log 2>&1 &
           app_pid=$!
           cleanup() {
@@ -297,7 +341,7 @@ jobs:
             if curl --fail --silent http://127.0.0.1:43128/health >/dev/null \
               && curl --fail --silent http://127.0.0.1:43127/editor >/dev/null \
               && grep --quiet '^editor-loaded$' /tmp/docuflex-page-loaded 2>/dev/null; then
-              echo 'Native Arch services and WebKit page-load test passed.'
+              echo 'Native Arch services and Electron page-load test passed.'
               if ! node desktop/scripts/smoke-live-document-tools.mjs; then
                 find "$HOME/.local/share/com.docuflex.editor/logs" -type f -name '*.log' \
                   -exec sh -c 'echo "[$1]"; cat "$1"' _ {} \; 2>/dev/null || true

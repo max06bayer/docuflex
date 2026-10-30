@@ -6227,7 +6227,8 @@
 
   function handleViewerScroll() {
     if (rasterPanelOpen) scheduleRasterPreview();
-    if (zoomLevel > 1) scheduleSharpRender(100);
+    // Pages are painted lazily, so scrolling also paints newly visible pages.
+    scheduleSharpRender(100);
   }
 
   /** @param {number} [delay] */
@@ -6260,7 +6261,6 @@
     const viewerRect = viewer.getBoundingClientRect();
     const shells = [...viewer.querySelectorAll('.pdf-page')].filter((shell) => {
       if (!(shell instanceof HTMLElement)) return false;
-      if (targetQuality === 1) return true;
       const rect = shell.getBoundingClientRect();
       return rect.bottom >= viewerRect.top - viewerRect.height && rect.top <= viewerRect.bottom + viewerRect.height;
     });
@@ -6500,7 +6500,13 @@
       canvas.style.height = `${viewport.height}px`;
       canvas.width = Math.floor(viewport.width * outputScale);
       canvas.height = Math.floor(viewport.height * outputScale);
-      canvas.dataset.renderZoom = '1';
+      // Painting every page up front allocates a full-resolution canvas per
+      // page and freezes large documents; far pages are painted on scroll.
+      const viewerRect = viewer?.getBoundingClientRect();
+      const shellRect = shell.getBoundingClientRect();
+      const nearViewport = !viewerRect ||
+        (shellRect.bottom >= viewerRect.top - viewerRect.height && shellRect.top <= viewerRect.bottom + viewerRect.height);
+      canvas.dataset.renderZoom = nearViewport ? '1' : '0';
       const textLayerBuilder = new pdfViewer.TextLayerBuilder({
         pdfPage: page,
         abortSignal: textLayerAbortController?.signal,
@@ -6509,7 +6515,7 @@
       textLayerBuilders.push(textLayerBuilder);
 
       await Promise.all([
-        page.render({
+        nearViewport && page.render({
           canvas,
           canvasContext: context,
           viewport,

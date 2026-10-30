@@ -290,6 +290,82 @@
       transform: rotate(-45deg);
     }
 
+    /* Linux: the window controls share one frame styled like the header's
+       utility buttons (.editor-shell .utility-button in DocuflexApp.svelte). */
+    html[data-docuflex-desktop="linux"] .utilities .docuflex-window-controls {
+      align-items: center;
+      background: rgba(0, 0, 0, 0.05);
+      border: 1px solid rgba(0, 0, 0, 0.05);
+      border-radius: 15px;
+      box-sizing: border-box;
+      flex: none;
+      gap: 0;
+      height: 40px;
+      margin-left: 6px;
+      overflow: hidden;
+      padding: 0;
+      position: static;
+    }
+
+    html[data-docuflex-desktop="linux"] .utilities .docuflex-window-control {
+      border: 1px solid transparent;
+      border-radius: 14px;
+      box-sizing: border-box;
+      color: #818181;
+      cursor: pointer;
+      height: 38px;
+      transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
+      width: 44px;
+    }
+
+    html[data-docuflex-desktop="linux"] .utilities .docuflex-window-control::before,
+    html[data-docuflex-desktop="linux"] .utilities .docuflex-window-control::after {
+      content: none;
+    }
+
+    html[data-docuflex-desktop="linux"] .utilities .docuflex-window-control svg {
+      display: block;
+      height: 24px;
+      width: 24px;
+    }
+
+    html[data-docuflex-desktop="linux"] .utilities .docuflex-window-control:hover {
+      background: rgba(0, 0, 0, 0.05);
+      border-color: rgba(0, 0, 0, 0.04);
+      color: #5f5f5f;
+    }
+
+    html[data-docuflex-desktop="linux"] .utilities .docuflex-window-control.close:hover {
+      background: rgba(229, 72, 77, 0.12);
+      border-color: rgba(229, 72, 77, 0.55);
+      color: #e5484d;
+    }
+
+    html[data-docuflex-desktop="linux"] .utilities:has(.docuflex-window-controls) {
+      padding-right: 9px !important;
+    }
+
+    html[data-docuflex-desktop="linux"][data-theme="dark"] .utilities .docuflex-window-controls {
+      background: rgba(255, 255, 255, 0.065);
+      border-color: rgba(255, 255, 255, 0.04);
+    }
+
+    html[data-docuflex-desktop="linux"][data-theme="dark"] .utilities .docuflex-window-control {
+      color: #cfcfcf;
+    }
+
+    html[data-docuflex-desktop="linux"][data-theme="dark"] .utilities .docuflex-window-control:hover {
+      background: rgba(255, 255, 255, 0.05);
+      border-color: rgba(255, 255, 255, 0.05);
+      color: #fff;
+    }
+
+    html[data-docuflex-desktop="linux"][data-theme="dark"] .utilities .docuflex-window-control.close:hover {
+      background: rgba(229, 72, 77, 0.18);
+      border-color: rgba(229, 72, 77, 0.6);
+      color: #ff6b6f;
+    }
+
     .docuflex-desktop-export-menu {
       -webkit-backdrop-filter: blur(18px);
       animation: docuflex-desktop-export-menu-in 125ms cubic-bezier(0.215, 0.61, 0.355, 1);
@@ -410,6 +486,15 @@
     }
   };
 
+  // Drawn like the header's 24 px utility icons (1.5 stroke, round caps).
+  const windowControlIcon = (paths) =>
+    `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+  const windowControlIcons = {
+    minimize: windowControlIcon('<path d="M5 12h14"/>'),
+    maximize: windowControlIcon('<rect x="6.5" y="6.5" width="11" height="11" rx="2.5"/>'),
+    close: windowControlIcon('<path d="M18 6 6 18"/><path d="m6 6 12 12"/>'),
+  };
+
   const installDesktopChrome = () => {
     installMacResizeGrips();
     document.documentElement.dataset.docuflexDesktop = desktopPlatform;
@@ -432,8 +517,21 @@
       });
     };
 
+    // The header is re-rendered between pages, so keep the controls in it.
+    const placeWindowControls = () => {
+      if (desktopPlatform !== 'linux') return;
+      const controls = document.querySelector('.docuflex-window-controls');
+      const utilities = document.querySelector('.utilities');
+      if (!controls) return;
+      if (utilities && controls.parentElement !== utilities) utilities.append(controls);
+      else if (!utilities && controls.parentElement !== document.body) document.body.append(controls);
+    };
+
     markDragRegion();
-    new MutationObserver(markDragRegion).observe(document.documentElement, {
+    new MutationObserver(() => {
+      markDragRegion();
+      placeWindowControls();
+    }).observe(document.documentElement, {
       childList: true,
       subtree: true,
     });
@@ -451,12 +549,14 @@
         button.className = `docuflex-window-control ${action}`;
         button.type = 'button';
         button.setAttribute('aria-label', label);
+        if (desktopPlatform === 'linux') button.innerHTML = windowControlIcons[action];
         button.addEventListener('click', () => {
           window.location.assign(`/__docuflex/window/${action}`);
         });
         controls.append(button);
       }
       document.body.append(controls);
+      placeWindowControls();
     }
   };
 
