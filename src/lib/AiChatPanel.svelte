@@ -1,8 +1,12 @@
 <script>
+  import { readChatDocument, chatDocumentPrompt } from '#lib/chat-attachments.js';
+  import ModelOption from '#lib/ModelOption.svelte';
+  import { QWEN_MODEL_ID, qwenDownload, openQwenDownload } from '#lib/qwen-download.js';
   import { onDestroy, onMount, tick } from 'svelte';
   import { cubicOut } from 'svelte/easing';
   import { fade, fly, slide } from 'svelte/transition';
   import { onMathRendered, renderMarkdown } from '#lib/ai-markdown.js';
+  import ModelLogo from '#lib/ModelLogo.svelte';
   import AiFieldBackground from '#lib/AiFieldBackground.svelte';
   import {
     deleteVisitorChat, downloadPdf, fileToBase64, listVisitorChats, pickPdf, readVisitorChat,
@@ -17,7 +21,7 @@
    */
 
   export let open = false;
-  /** @type {{ available: boolean; mode?: string; model?: string; models?: { id: string; name: string; short?: string }[]; fallbackModel?: string; tools?: { name: string; title: string; readOnly: boolean; needsApproval: boolean }[] } | null} */
+  /** @type {{ available: boolean; mode?: string; model?: string; models?: { id: string; name: string; short?: string; free?: boolean; local?: boolean; downloadable?: boolean; ready?: boolean }[]; fallbackModel?: string; tools?: { name: string; title: string; readOnly: boolean; needsApproval: boolean }[] } | null} */
   export let status = null;
   /** @type {() => any} */
   export let getContext = () => ({});
@@ -46,7 +50,7 @@
   /** @typedef {{ x: number; y: number; width: number; height: number }} Region */
   /** @typedef {{ id: number; task: string; page: number; region: Region | null; status: 'running' | 'done' | 'error' | 'cancelled'; steps: number; current: string; summary: string; objects: number[] }} Helper */
   /** @typedef {{ id: string; name: string; rawArgs: string; args: Record<string, any>; status: ToolStatus; result: string; image: string | null; expanded: boolean; helpers?: Helper[] }} ToolEntry */
-  /** @typedef {{ id: number; role: 'user'; text: string; quote: { text: string; page: number | null } | null; images: string[]; startedAt?: number; doneAt?: number }} UserEntry */
+  /** @typedef {{ id: number; role: 'user'; text: string; quote: { text: string; page: number | null } | null; images: string[]; files?: string[]; startedAt?: number; doneAt?: number }} UserEntry */
   /** @typedef {{ id: number; role: 'assistant'; text: string; reasoning: string; thinkingStartedAt: number | null; thinkingMs: number; showReasoning: boolean; tools: ToolEntry[]; streaming: boolean }} AssistantEntry */
   /** @typedef {{ id: number; role: 'error' | 'note'; text: string }} ErrorEntry */
   /** @typedef {UserEntry | AssistantEntry | ErrorEntry} Entry */
@@ -79,6 +83,11 @@
   let draft = '';
   /** @type {string[]} */
   let attachments = [];
+  /** @type {{name: string; text: string}[]} */
+  let documentAttachments = [];
+  let readingAttachments = false;
+  let attachmentError = '';
+  let attachmentGeneration = 0;
   /** Text the person selected in the document; sent along with the next message. */
   /** @type {{ text: string; page: number | null } | null} */
   let selectionQuote = null;
@@ -175,7 +184,8 @@
         continue;
       }
       const lastOfRun = list[index + 1]?.role !== 'assistant';
-      if (lastOfRun && !entry.tools.length && entry.text.trim()) {
+      const isAnswer = lastOfRun && !entry.tools.length && Boolean(entry.text.trim());
+      if (isAnswer && !entry.reasoning) {
         out.push({ kind: 'answer', id: `a${entry.id}`, entry });
         continue;
       }
@@ -184,6 +194,7 @@
         out.push(work);
       }
       work.steps.push(entry);
+      if (isAnswer) out.push({ kind: 'answer', id: `a${entry.id}`, entry });
     }
     return out;
   }
@@ -231,6 +242,7 @@
   function chooseModel(id) {
     selectedModel = id;
     modelMenuOpen = false;
+    if (models.find((model) => model.id === id)?.ready === false && !$qwenDownload.ready) void openQwenDownload();
     try {
       localStorage.setItem(MODEL_STORAGE_KEY, id);
     } catch {
@@ -799,15 +811,17 @@
           refresh();
         }
 
+        if (!tools.length && !entry.text.trim()) {
+          entries = entries.filter((item) => item !== entry);
+          throw new Error('The AI returned no answer or tool action. The task is incomplete; your existing edits are kept.');
+        }
+
         history = [...history, {
           role: 'assistant',
           content: entry.text || null,
           ...(tools.length ? { tool_calls: tools.map((tool) => ({ id: tool.id, type: 'function', function: { name: tool.name, arguments: tool.rawArgs || '{}' } })) } : {})
         }];
-        if (!tools.length) {
-          if (!entry.text.trim()) entries = entries.filter((item) => item !== entry);
-          return;
-        }
+        if (!tools.length) return;
 
         /** @type {string[]} */
         const images = [];
@@ -866,22 +880,27 @@
   /** @param {string} [text] @param {string} [shown] what the chat shows instead of a long built-in prompt */
   async function send(text = draft, shown = '') {
     const message = text.trim();
-    if ((!message && !attachments.length) || busy || !status?.available) return;
+    if ((!message && !attachments.length && !documentAttachments.length) || busy || readingAttachments || !status?.available) return;
+    if (selectedModel === QWEN_MODEL_ID && currentModel?.ready === false && !$qwenDownload.ready) { void openQwenDownload(); return; }
     compactHistory();
     const quote = selectionQuote;
     const images = attachments;
-    let prompt = message || 'Look at the attached image.';
+    const files = documentAttachments;
+    let prompt = message || (files.length ? 'Read the attached files.' : 'Look at the attached image.');
+    if (files.length) prompt += `\n\n${chatDocumentPrompt(files)}`;
     if (quote) prompt = `Selected text in the document${quote.page ? ` (page ${quote.page})` : ''}:\n"""\n${quote.text}\n"""\n\n${prompt}`;
     history = [...history, {
       role: 'user',
       content: images.length ? [{ type: 'text', text: prompt }, ...images.map((url) => ({ type: 'image_url', image_url: { url } }))] : prompt
     }];
     uncompactedFrom = history.length;
-    chat ??= { id: crypto.randomUUID(), createdAt: new Date().toISOString(), title: (shown || message || 'Image').replace(/\s+/g, ' ').slice(0, 80) };
+    chat ??= { id: crypto.randomUUID(), createdAt: new Date().toISOString(), title: (shown || message || files[0]?.name || 'Image').replace(/\s+/g, ' ').slice(0, 80) };
     showHistory = false;
-    entries = [...entries, { id: nextId++, role: 'user', text: shown || message, quote, images, startedAt: Date.now() }];
+    entries = [...entries, { id: nextId++, role: 'user', text: shown || message, quote, images, files: files.map(file => file.name), startedAt: Date.now() }];
     draft = '';
     attachments = [];
+    documentAttachments = [];
+    attachmentError = '';
     if (selectionQuote) usedSelection = selectionQuote.text;
     selectionQuote = null;
     await tick();
@@ -950,7 +969,7 @@
 
   /** @param {string} id */
   async function resumeChat(id) {
-    if (busy) return;
+    if (busy || readingAttachments) return;
     try {
       let stored;
       if (web) stored = readVisitorChat(id);
@@ -1046,6 +1065,8 @@
 
   function newChat() {
     if (busy) stop();
+    attachmentGeneration += 1;
+    readingAttachments = false;
     entries = [];
     history = [];
     uncompactedFrom = null;
@@ -1054,6 +1075,8 @@
     usage = { cost: 0, tokens: 0 };
     draft = '';
     attachments = [];
+    documentAttachments = [];
+    attachmentError = '';
     selectionQuote = null;
     void tick().then(() => {
       autosize();
@@ -1079,34 +1102,58 @@
   }
 
   /** @param {File[]} files */
-  async function addImages(files) {
-    for (const file of files) {
-      if (!file.type.startsWith('image/') || file.size > MAX_IMAGE_BYTES || attachments.length >= 4) continue;
-      const url = await new Promise((resolve) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result));
-        reader.onerror = () => resolve('');
-        reader.readAsDataURL(file);
-      });
-      if (url) attachments = [...attachments, url];
+  async function addFiles(files) {
+    if (busy || readingAttachments || !status?.available) return;
+    readingAttachments = true;
+    const generation = attachmentGeneration;
+    attachmentError = '';
+    try {
+      for (const file of files) {
+        if (generation !== attachmentGeneration) return;
+        try {
+          if (attachments.length + documentAttachments.length >= 4) throw new Error('Attach up to four files per message.');
+          if (file.type.startsWith('image/') && file.type !== 'image/svg+xml') {
+            if (file.size > MAX_IMAGE_BYTES) throw new Error('Images must be 6 MB or smaller.');
+            const url = await new Promise((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(String(reader.result));
+              reader.onerror = () => reject(new Error('Could not read this image.'));
+              reader.readAsDataURL(file);
+            });
+            if (generation !== attachmentGeneration) return;
+            attachments = [...attachments, url];
+          } else {
+            const document = await readChatDocument(file, !web);
+            if (generation !== attachmentGeneration) return;
+            if (documentAttachments.reduce((total, item) => total + item.text.length, 0) + document.text.length > 61000) throw new Error('Attached text exceeds the message limit. Send these files in separate messages.');
+            documentAttachments = [...documentAttachments, document];
+          }
+        } catch (error) {
+          if (generation !== attachmentGeneration) return;
+          attachmentError += `${file.name}: ${error instanceof Error ? error.message : 'Could not read this file.'}\n`;
+        }
+      }
+    } finally {
+      if (generation === attachmentGeneration) readingAttachments = false;
     }
   }
 
   /** @param {ClipboardEvent} event */
   function handlePaste(event) {
-    const files = [...(event.clipboardData?.files ?? [])].filter((file) => file.type.startsWith('image/'));
+    const files = [...(event.clipboardData?.files ?? [])];
     if (!files.length) return;
     event.preventDefault();
-    void addImages(files);
+    void addFiles(files);
   }
 
   /** @param {DragEvent} event */
   function handleDrop(event) {
     dragging = false;
-    const files = [...(event.dataTransfer?.files ?? [])].filter((file) => file.type.startsWith('image/'));
+    const files = [...(event.dataTransfer?.files ?? [])];
     if (!files.length) return;
     event.preventDefault();
-    void addImages(files);
+    event.stopPropagation();
+    void addFiles(files);
   }
 
   /** Remembers text selected in the document so it can go along with the next message. */
@@ -1139,7 +1186,15 @@
   let mathTick = 0;
   const stopMathUpdates = onMathRendered(() => (mathTick += 1));
 
+  /** @param {Event} event */
+  function handleComposerInput(event) {
+    autosize();
+    const value = /** @type {HTMLTextAreaElement} */ (event.currentTarget).value;
+    if (value.trim() && selectedModel === QWEN_MODEL_ID && currentModel?.ready === false && !$qwenDownload.ready && !$qwenDownload.visible) void openQwenDownload();
+  }
+  const handleQwenReady = () => chooseModel(QWEN_MODEL_ID);
   onMount(() => {
+    window.addEventListener('docuflex:qwen-ready', handleQwenReady);
     document.addEventListener('selectionchange', handleSelectionChange);
     // Rows grow after they render (slide-ins, page images), so keep following the bottom.
     contentObserver = new ResizeObserver(() => {
@@ -1155,6 +1210,7 @@
   });
 
   onDestroy(() => {
+    if (typeof window !== 'undefined') window.removeEventListener('docuflex:qwen-ready', handleQwenReady);
     stopMathUpdates();
     if (typeof document !== 'undefined') document.removeEventListener('selectionchange', handleSelectionChange);
     clearInterval(clock);
@@ -1173,7 +1229,7 @@
   aria-hidden={!open}
   inert={!open}
   bind:this={panel}
-  ondragover={(event) => { if ([...(event.dataTransfer?.items ?? [])].some((item) => item.type.startsWith('image/'))) { event.preventDefault(); dragging = true; } }}
+  ondragover={(event) => { if ([...(event.dataTransfer?.items ?? [])].some((item) => item.kind === 'file')) { event.preventDefault(); event.stopPropagation(); if (event.dataTransfer) event.dataTransfer.dropEffect = busy || readingAttachments ? 'none' : 'copy'; dragging = !busy && !readingAttachments; } }}
   ondragleave={(event) => { if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) dragging = false; }}
   ondrop={handleDrop}
 >
@@ -1268,6 +1324,7 @@
                   {#each entry.images as image, index (index)}<img src={image} alt="Attached" />{/each}
                 </div>
               {/if}
+              {#each entry.files ?? [] as name}<p class="ai-note">{name}</p>{/each}
               {#if entry.text}<p class="ai-user-text">{entry.text}</p>{/if}
             </div>
           {:else if block.kind === 'work'}
@@ -1282,11 +1339,14 @@
                 <!-- One string: Svelte trims spaces at the edges of {#if} blocks, which glued "Working·8s". -->
                 <span class="ai-work-label">{running ? `${currentStep(block.steps)}${elapsed > 0 ? ` · ${duration(elapsed)}` : ''}` : elapsed > 0 ? `Worked for ${duration(elapsed)}` : 'Worked'}</span>
                 {#if tools.length}<span class="ai-work-count">{`· ${tools.length} ${tools.length === 1 ? 'step' : 'steps'}${failed ? ` · ${failed} failed` : ''}`}</span>{/if}
-                {#if tools.length}<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>{/if}
+                {#if tools.length || block.steps.some(step => step.reasoning)}<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>{/if}
               </button>
               {#if expanded}
                 <div class="ai-work-log" transition:slide={{ duration: 220, easing: cubicOut }}>
-                  {#each tools as tool (tool.id)}{@render toolStep(tool)}{/each}
+                  {#each block.steps as step (step.id)}
+                    {#if step.reasoning}<p class="ai-work-reasoning">{step.reasoning}</p>{/if}
+                    {#each step.tools as tool (tool.id)}{@render toolStep(tool)}{/each}
+                  {/each}
                 </div>
               {/if}
               {#each tools.filter((tool) => tool.status === 'approval') as tool (tool.id)}
@@ -1319,8 +1379,10 @@
   </div>
 
   <footer class="ai-composer">
+    {#if readingAttachments}<p class="ai-note" role="status">Reading attachments…</p>{/if}
+    {#if attachmentError}<p class="ai-note" role="alert">{attachmentError}</p>{/if}
     <div class="ai-input">
-      {#if selectionQuote || attachments.length}
+      {#if selectionQuote || attachments.length || documentAttachments.length}
         <div class="ai-chips" transition:slide={{ duration: 180, easing: cubicOut }}>
           {#if selectionQuote}
             <div class="ai-chip quote">
@@ -1328,11 +1390,19 @@
               <button type="button" aria-label="Remove selected text" onclick={() => { usedSelection = selectionQuote?.text ?? ''; selectionQuote = null; }}></button>
             </div>
           {/if}
-          {#each attachments as image, index (image)}
-            <div class="ai-chip image">
-              <img src={image} alt="Attachment" />
-              <button type="button" aria-label="Remove image" onclick={() => (attachments = attachments.filter((_, item) => item !== index))}></button>
+          {#each documentAttachments as file, index (index)}
+            <div class="ai-chip quote">
+              <span>{file.name}</span>
+              <button type="button" aria-label={`Remove ${file.name}`} onclick={() => (documentAttachments = documentAttachments.filter((_, item) => item !== index))}></button>
             </div>
+          {/each}
+          {#each attachments as image, index (image)}
+            <button class="ai-chip image" type="button" aria-label="Remove image" onclick={() => (attachments = attachments.filter((_, item) => item !== index))}>
+              <img src={image} alt="" />
+              <span class="ai-image-remove" aria-hidden="true">
+                <svg width="30" height="30" viewBox="0 0 24 24" fill="none"><path d="m6 6 12 12M18 6 6 18" /></svg>
+              </span>
+            </button>
           {/each}
         </div>
       {/if}
@@ -1340,29 +1410,27 @@
         bind:this={input}
         bind:value={draft}
         rows="1"
-        placeholder={busy ? 'Working… Esc to stop' : 'Ask anything'}
+        placeholder={busy ? 'Working… Esc to stop' : currentModel?.ready === false && !$qwenDownload.ready ? 'Download Qwen to chat locally' : 'Ask anything'}
         aria-label="Message"
         disabled={!status?.available}
-        oninput={autosize}
+        oninput={handleComposerInput}
         onkeydown={handleKeydown}
         onpaste={handlePaste}
       ></textarea>
       <div class="ai-input-bar">
-        <button class="ai-bar-button" type="button" aria-label="Attach image" title="Attach image" disabled={!status?.available || busy} onclick={() => fileInput?.click()}>
+        <button class="ai-bar-button" type="button" aria-label="Attach files" title="Attach files" disabled={!status?.available || busy || readingAttachments} onclick={() => fileInput?.click()}>
           <svg width="26" height="26" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 4.5v15M4.5 12h15" /></svg>
         </button>
         <div class="ai-model-picker">
-          <button class="ai-model" class:open={modelMenuOpen} type="button" aria-haspopup="menu" aria-expanded={modelMenuOpen} disabled={!models.length} onclick={(event) => { event.stopPropagation(); modelMenuOpen = !modelMenuOpen; }}>
-            <span>{modelLabel}</span>
+          <button class="ai-model" class:free={currentModel?.free} class:open={modelMenuOpen} type="button" aria-haspopup="menu" aria-expanded={modelMenuOpen} disabled={!models.length} onclick={(event) => { event.stopPropagation(); modelMenuOpen = !modelMenuOpen; }}>
+            <ModelLogo id={selectedModel} selected />
+            <span>{modelLabel}</span>{#if currentModel?.free}<span class="ai-free-tag">:FREE</span>{/if}
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
           </button>
           {#if modelMenuOpen}
             <div class="ai-model-menu" role="menu" transition:fly={{ y: 6, duration: 160, easing: cubicOut }}>
               {#each models as model (model.id)}
-                <button type="button" role="menuitemradio" aria-checked={model.id === selectedModel} class:active={model.id === selectedModel} onclick={(event) => { event.stopPropagation(); chooseModel(model.id); }}>
-                  <span>{model.name}</span>
-                  {#if model.id === selectedModel}<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7" /></svg>{/if}
-                </button>
+                <ModelOption {model} selected={model.id === selectedModel} onSelect={chooseModel} />
               {/each}
               {#if usage.tokens}<p class="ai-usage">{usage.tokens.toLocaleString()} tokens · ${usage.cost.toFixed(usage.cost < 0.01 ? 4 : 3)}</p>{/if}
             </div>
@@ -1371,14 +1439,14 @@
         {#if busy}
           <button class="ai-send stop" type="button" aria-label="Stop" title="Stop (Esc)" onclick={stop} in:fade={{ duration: 120 }}><span></span></button>
         {:else}
-          <button class="ai-send" type="button" aria-label="Send" title="Send (Enter)" disabled={(!draft.trim() && !attachments.length) || !status?.available} onclick={() => send()} in:fade={{ duration: 120 }}>
+          <button class="ai-send" type="button" aria-label="Send" title="Send (Enter)" disabled={(!draft.trim() && !attachments.length && !documentAttachments.length) || readingAttachments || !status?.available} onclick={() => send()} in:fade={{ duration: 120 }}>
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 19V5M5.5 11.5 12 5l6.5 6.5" /></svg>
           </button>
         {/if}
       </div>
     </div>
   </footer>
-  <input bind:this={fileInput} class="ai-file-input" type="file" accept="image/*" multiple onchange={(event) => { void addImages([...(event.currentTarget.files ?? [])]); event.currentTarget.value = ''; }} />
+  <input bind:this={fileInput} class="ai-file-input" type="file" accept="image/*,.pdf,.txt,.md,.csv,.tsv,.json,.xml,.html,.css,.js,.mjs,.ts,.py,.rs,.java,.c,.cpp,.h,.sh,.yaml,.yml,.toml,.log,.tex,.svelte,.doc,.docx,.xlsx,.pptx" multiple onchange={(event) => { void addFiles([...(event.currentTarget.files ?? [])]); event.currentTarget.value = ''; }} />
 </aside>
 
 <style>
@@ -1711,6 +1779,16 @@
     overflow: hidden;
     border: 1px solid var(--ai-line);
     border-radius: 14px;
+  }
+
+  .ai-work-reasoning {
+    margin: 0;
+    padding: 12px 14px;
+    color: var(--ai-text);
+    font-size: inherit;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 
   @keyframes ai-shimmer {
@@ -2064,7 +2142,23 @@
   }
 
   .ai-chip.quote { flex: 1 1 100%; padding: 7px 34px 7px 10px; }
-  .ai-chip.image { padding: 3px; }
+  .ai-chip.image { padding: 3px; border: 0; cursor: pointer; }
+  .ai-chip.image:focus-visible { outline: 2px solid #1684f8; outline-offset: 2px; }
+  .ai-image-remove {
+    position: absolute;
+    inset: 3px;
+    display: grid;
+    place-items: center;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.5);
+    color: #fff;
+    opacity: 0;
+    transition: opacity 150ms ease;
+    pointer-events: none;
+  }
+  .ai-image-remove svg path { stroke-width: 1.5; }
+  .ai-chip.image:hover .ai-image-remove,
+  .ai-chip.image:focus-visible .ai-image-remove { opacity: 1; }
   .ai-chip.image img { display: block; width: 52px; height: 52px; border-radius: 8px; object-fit: cover; }
 
   .ai-chip button {
@@ -2080,7 +2174,6 @@
     cursor: pointer;
   }
 
-  .ai-chip.image button { top: 2px; right: 2px; background-color: rgba(255, 255, 255, 0.9); }
   .ai-chip button:hover { filter: brightness(0); }
 
   .ai-model-picker { position: relative; justify-self: end; min-width: 0; }
@@ -2108,7 +2201,7 @@
   .ai-model:hover:not(:disabled),
   .ai-model.open { background: rgba(0, 0, 0, 0.05); color: #000; }
   .ai-model svg { flex: none; transition: transform 160ms ease; }
-  .ai-model.open svg { transform: rotate(180deg); }
+  .ai-model.open > svg { transform: rotate(180deg); }
 
   /* Same frosted menu as the toolbar's tool menus. */
   .ai-model-menu {
@@ -2117,7 +2210,11 @@
     right: -42px;
     bottom: calc(100% + 10px);
     display: grid;
-    width: 270px;
+    width: 328px;
+    max-width: calc(100vw - 32px);
+    max-height: min(650px, calc(100dvh - 210px));
+    overflow-y: auto;
+    overscroll-behavior: contain;
     padding: 5px;
     border: 1px solid rgba(0, 0, 0, 0.14);
     border-radius: 15px;
@@ -2127,11 +2224,12 @@
     -webkit-backdrop-filter: blur(18px);
   }
 
-  .ai-model-menu button {
+  .ai-model-menu :global(button) {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    height: 38px;
+    gap: 9px;
+    flex-shrink: 0;
+    height: 36px;
     padding: 0 10px;
     border: 1px solid transparent;
     border-radius: 10px;
@@ -2141,8 +2239,13 @@
     cursor: pointer;
   }
 
-  .ai-model-menu button:hover { color: #000; background: rgba(0, 0, 0, 0.04); }
-  .ai-model-menu button.active { border-color: rgba(0, 0, 0, 0.06); background: rgba(234, 234, 234, 0.6); color: #000; }
+  .ai-model-menu :global(button:hover) { color: #000; background: rgba(0, 0, 0, 0.04); }
+  .ai-model-menu :global(button.active) { border-color: rgba(0, 0, 0, 0.06); background: rgba(234, 234, 234, 0.6); color: #000; }
+
+  .ai-free-tag { flex: none; font-family: var(--ai-mono); font-size: 12px; font-weight: 300; letter-spacing: -0.3px; }
+  .ai-model > .ai-free-tag { font-size: inherit; }
+  .ai-model-menu :global(button > svg) { flex: none; }
+  .ai-model.free, .ai-model.free:hover, .ai-model-menu :global(button.free), .ai-model-menu :global(button.free:hover), .ai-model-menu :global(button.free.active) { color: #1674d5; }
 
   .ai-usage {
     margin: 4px 0 0;
@@ -2215,6 +2318,7 @@
   :global(:root[data-theme="dark"]) .ai-work-line:hover { color: rgba(255, 255, 255, 0.8); }
   :global(:root[data-theme="dark"]) .ai-work-line.live .ai-work-label { background: linear-gradient(90deg, rgba(255, 255, 255, 0.2) 0%, rgba(255, 255, 255, 0.2) 50%, rgba(255, 255, 255, 0.2) 100%) 0 0 / 200% 100%; color: transparent; -webkit-background-clip: text; background-clip: text; }
   :global(:root[data-theme="dark"]) .ai-work-log { border: 1px solid var(--ai-line); }
+  :global(:root[data-theme="dark"]) .ai-work-reasoning { color: var(--ai-text); }
   :global(:root[data-theme="dark"]) .ai-markdown { color: var(--ai-text); }
   :global(:root[data-theme="dark"]) .ai-markdown :global(.table-wrap) { border: 1px solid var(--ai-line); background: rgba(255, 255, 255, 0.05); }
   :global(:root[data-theme="dark"]) .ai-markdown :global(th),
@@ -2265,19 +2369,36 @@
   :global(:root[data-theme="dark"]) .ai-input textarea { border: 0; outline: 0; background: transparent; color: var(--ai-text); }
   :global(:root[data-theme="dark"]) .ai-input textarea::placeholder { color: rgba(255, 255, 255, 0.4); }
   :global(:root[data-theme="dark"]) .ai-chip { background: rgba(255, 255, 255, 0.052); }
+  :global(:root[data-theme="dark"]) .ai-chip.image { border: 0; }
+  :global(:root[data-theme="dark"]) .ai-chip.image:focus-visible { outline: 2px solid #1684f8; }
+  :global(:root[data-theme="dark"]) .ai-image-remove { background: rgba(255, 255, 255, 0.2); color: #111111; }
   :global(:root[data-theme="dark"]) .ai-chip button { border: 0; filter: brightness(0) invert(1) opacity(0.78); background: url('/redesign/panel-close.svg') center / 9px 9px no-repeat; }
-  :global(:root[data-theme="dark"]) .ai-chip.image button { background-color: rgba(255, 255, 255, 0.07); }
   :global(:root[data-theme="dark"]) .ai-chip button:hover { filter: brightness(0) invert(1); }
   :global(:root[data-theme="dark"]) .ai-model { border: 0; background: transparent; color: rgba(255, 255, 255, 0.494); }
   :global(:root[data-theme="dark"]) .ai-model:hover:not(:disabled),
   :global(:root[data-theme="dark"]) .ai-model.open { background: rgba(255, 255, 255, 0.065); color: rgba(255, 255, 255, 0.92); }
   :global(:root[data-theme="dark"]) .ai-model-menu { border: 1px solid rgba(255, 255, 255, 0.112); background: rgba(24, 24, 24, 0.95); box-shadow: 0 7px 18px rgba(0, 0, 0, 0.33), 0 2px 5px rgba(0, 0, 0, 0.15); }
-  :global(:root[data-theme="dark"]) .ai-model-menu button { border: 1px solid transparent; background: transparent; color: rgba(255, 255, 255, 0.75); }
-  :global(:root[data-theme="dark"]) .ai-model-menu button:hover { color: rgba(255, 255, 255, 0.92); background: rgba(255, 255, 255, 0.052); }
-  :global(:root[data-theme="dark"]) .ai-model-menu button.active { border-color: rgba(255, 255, 255, 0.048); background: rgba(22, 22, 22, 0.96); color: rgba(255, 255, 255, 0.92); }
+  :global(:root[data-theme="dark"]) .ai-model-menu :global(button) { border: 1px solid transparent; background: transparent; color: rgba(255, 255, 255, 0.75); }
+  :global(:root[data-theme="dark"]) .ai-model-menu :global(button:hover) { color: rgba(255, 255, 255, 0.92); background: rgba(255, 255, 255, 0.052); }
+  :global(:root[data-theme="dark"]) .ai-model-menu :global(button.active) { border-color: rgba(255, 255, 255, 0.048); background: rgba(22, 22, 22, 0.96); color: rgba(255, 255, 255, 0.92); }
+  :global(:root[data-theme="dark"]) .ai-model.free,
+  :global(:root[data-theme="dark"]) .ai-model.free:hover,
+  :global(:root[data-theme="dark"]) .ai-model-menu :global(button.free),
+  :global(:root[data-theme="dark"]) .ai-model-menu :global(button.free:hover),
+  :global(:root[data-theme="dark"]) .ai-model-menu :global(button.free.active) { color: #1674d5; }
   :global(:root[data-theme="dark"]) .ai-usage { border-top: 1px solid var(--ai-line); color: var(--ai-muted); }
   :global(:root[data-theme="dark"]) .ai-send { border: 0; background: #ececec; color: #111111; }
   :global(:root[data-theme="dark"]) .ai-send.stop span { background: rgba(255, 255, 255, 0.05); }
   /* dark theme: end generated */
+
+  /* dark theme: manual */
+  :global(:root[data-theme="dark"]) .ai-send.stop span { background: #111111; }
+  :global(:root[data-theme="dark"]) .ai-image-remove { background: rgba(0, 0, 0, 0.5); color: #fff; }
+  :global(:root[data-theme="dark"]) .ai-model.free,
+  :global(:root[data-theme="dark"]) .ai-model.free:hover,
+  :global(:root[data-theme="dark"]) .ai-model-menu :global(button.free),
+  :global(:root[data-theme="dark"]) .ai-model-menu :global(button.free:hover),
+  :global(:root[data-theme="dark"]) .ai-model-menu :global(button.free.active) { color: #69b2ff; }
+  /* dark theme: end manual */
 
 </style>

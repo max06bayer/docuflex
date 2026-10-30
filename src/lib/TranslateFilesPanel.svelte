@@ -1,4 +1,8 @@
 <script>
+  import { openTranslationDownload } from '#lib/translation-download.js';
+  import ModelOption from '#lib/ModelOption.svelte';
+  import { QWEN_MODEL_ID, openQwenDownload } from '#lib/qwen-download.js';
+  import ModelLabel from '#lib/ModelLabel.svelte';
   import { onDestroy, onMount } from 'svelte';
   import { cubicOut } from 'svelte/easing';
   import { fly, scale } from 'svelte/transition';
@@ -67,16 +71,16 @@
   $: pairLabel = `${translationLanguageLabel(sourceLanguage)} → ${translationLanguageLabel(targetLanguage)}`;
   $: download = status?.download ?? null;
   $: downloading = Boolean(download && ['preparing', 'downloading', 'installing'].includes(download.phase));
-  $: progress = download?.total ? Math.min(1, download.received / download.total) : 0;
   $: modelReady = Boolean(status?.modelReady);
   $: needsFile = placement === 'home' && !inputFile;
   $: refreshStatus(sourceLanguage, targetLanguage);
   $: ai = placement === 'home' && mode === 'ai';
-  $: aiKeyReady = latexKeyReady(aiStatus);
+  $: needsQwenDownload = Boolean(aiStatus?.models.find((model) => model.id === aiModel)?.downloadable && !aiStatus?.models.find((model) => model.id === aiModel)?.ready);
+  $: aiKeyReady = latexKeyReady(aiStatus, aiModel);
   // Auto matches the original; PDF Enhance's own "Auto" would be a second Auto, so it is left out here.
   $: aiStyles = aiStatus ? [aiStatus.matchStyle, ...aiStatus.styles.filter((style) => style.id !== 'auto')] : [];
   $: aiStyleLabel = aiStyles.find((style) => style.id === aiStyle)?.label ?? '…';
-  $: aiModelLabel = aiStatus?.models.find((model) => model.id === aiModel)?.short ?? aiStatus?.models.find((model) => model.id === aiModel)?.name ?? '…';
+  $: currentAiModel = aiStatus?.models.find((model) => model.id === aiModel);
 
   /** @param {string} source @param {string} target */
   async function refreshStatus(source, target) {
@@ -105,16 +109,10 @@
     }
   }
 
-  async function downloadModel() {
-    if (downloading) return;
-    error = '';
-    try {
-      applyStatus(await translationStatus(sourceLanguage, targetLanguage, 'POST'));
-    } catch (failure) {
-      error = failure instanceof Error ? failure.message : 'Could not start the download.';
-      showAppError('Could not download the translation model', failure);
-    }
+  function downloadModel() {
+    void openTranslationDownload(sourceLanguage, targetLanguage);
   }
+
 
   function chooseFile() {
     fileInput?.click();
@@ -185,6 +183,7 @@
   function chooseAiModel(id) {
     aiModel = id;
     openMenu = null;
+    if (aiStatus?.models.find((model) => model.id === id)?.ready === false) void openQwenDownload();
     rememberLatexModel(id);
   }
 
@@ -200,6 +199,7 @@
   /** AI translation: the same LaTeX pipeline as PDF Enhance, told to keep the original design. */
   async function translateWithAi() {
     if (translating || !inputFile || !aiStatus) return;
+    if (needsQwenDownload) { void openQwenDownload(); return; }
     if (!aiKeyReady) {
       onNeedKey();
       return;
@@ -291,12 +291,6 @@
     onClose();
   }
 
-  /** @param {number} bytesPerSecond */
-  function formatSpeed(bytesPerSecond) {
-    const megabytes = bytesPerSecond / 1e6;
-    return `${megabytes >= 10 ? megabytes.toFixed(0) : megabytes.toFixed(1)} MB/s`;
-  }
-
   /** @param {PointerEvent} event */
   function closeMenus(event) {
     const target = event.target;
@@ -310,6 +304,19 @@
     else onClose();
   }
 
+  /** @param {Event} event */
+  function handleTranslationStatus(event) {
+    const detail = /** @type {CustomEvent} */ (event).detail;
+    if (detail?.source !== sourceLanguage || detail?.target !== targetLanguage) return;
+    clearTimeout(pollTimer);
+    status = detail.status;
+  }
+  onMount(() => {
+    window.addEventListener('docuflex:translation-status', handleTranslationStatus);
+    return () => window.removeEventListener('docuflex:translation-status', handleTranslationStatus);
+  });
+  const handleQwenReady = () => { void loadAiStatus(); };
+  onMount(() => { window.addEventListener('docuflex:qwen-ready', handleQwenReady); return () => window.removeEventListener('docuflex:qwen-ready', handleQwenReady); });
   onMount(() => {
     if (placement === 'home') {
       try {
@@ -350,12 +357,12 @@
       <div class="language-picker">
         <button class="panel-field" type="button" aria-haspopup="menu" aria-expanded={openMenu === 'model'} disabled={translating || !aiStatus} onclick={(event) => toggleMenu('model', event)}>
           <span>Model</span>
-          <strong>{aiModelLabel}</strong>
+          <strong class="model-value"><ModelLabel model={currentAiModel} selected compact /></strong>
         </button>
         {#if openMenu === 'model' && aiStatus}
-          <div class="language-menu" role="menu" transition:scale={{ duration: 125, easing: cubicOut, start: 0.94, opacity: 0 }}>
+          <div class="language-menu model-menu" role="menu" transition:scale={{ duration: 125, easing: cubicOut, start: 0.94, opacity: 0 }}>
             {#each aiStatus.models as model (model.id)}
-              <button class="language-menu-item" class:selected={model.id === aiModel} role="menuitemradio" aria-checked={model.id === aiModel} type="button" onclick={() => chooseAiModel(model.id)}><span>{model.name}</span></button>
+              <ModelOption {model} selected={model.id === aiModel} onSelect={chooseAiModel} />
             {/each}
           </div>
         {/if}
@@ -423,6 +430,8 @@
       {:else if !aiStatus.engine}
         <h3>Unavailable:</h3>
         <p>The LaTeX engine is <span>not installed</span> here. Use the Docuflex desktop app.</p>
+      {:else if needsQwenDownload}
+        <h3>Local Model:</h3><p>Download <span>Qwen 3.5 4B</span> to translate on this Mac.</p>
       {:else if !aiKeyReady}
         <h3>API Key Needed:</h3>
         <p>Uses <span>your OpenRouter key</span>, like the AI chat. Add it in Settings.</p>
@@ -476,6 +485,8 @@
           <span class="progress-label"><b>{describeLatexStage(aiProgress)}</b><em>{formatElapsed(aiElapsed)}</em></span>
         </div>
         <button class="panel-link" type="button" onclick={() => request?.abort()}>Cancel</button>
+      {:else if needsQwenDownload}
+        <button class="panel-action" type="button" onclick={openQwenDownload}>Download Qwen</button>
       {:else if aiStatus && !aiKeyReady}
         <button class="panel-action" type="button" onclick={onNeedKey}>
           <img src="/brain.svg" alt="" />
@@ -489,31 +500,14 @@
         {#if aiTex}<button class="panel-link" type="button" onclick={downloadTex}>Save the uncompiled .tex</button>{/if}
       {/if}
     {:else if downloading && download}
-      <div
-        class="model-progress"
-        class:indeterminate={download.phase !== 'downloading'}
-        role="progressbar"
-        aria-label="Downloading translation model"
-        aria-valuemin="0"
-        aria-valuemax="100"
-        aria-valuenow={Math.round(progress * 100)}
-        style:--progress={download.phase === 'downloading' ? progress : 1}
-      >
-        <span class="progress-fill"></span>
-        {#each ['track', 'fill'] as layer (layer)}
-          <span class={`progress-label ${layer}`} aria-hidden={layer === 'fill'}>
-            {#if download.phase === 'downloading'}
-              <b>{Math.floor(progress * 100)}%</b>
-              <em>{formatSpeed(download.bytesPerSecond)}</em>
-            {:else}
-              <b>{download.phase === 'preparing' ? 'Preparing…' : 'Installing…'}</b>
-            {/if}
-          </span>
-        {/each}
-      </div>
+      <button class="panel-action secondary" type="button" onclick={downloadModel}>Show download</button>
     {:else if status && !modelReady}
       <button class="panel-action download" type="button" disabled={!status.canDownload} onclick={downloadModel}>
-        <img src="/download.svg" alt="" />
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+<path d="M12 15V3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M21 15V19C21 19.5304 20.7893 20.0391 20.4142 20.4142C20.0391 20.7893 19.5304 21 19 21H5C4.46957 21 3.96086 20.7893 3.58579 20.4142C3.21071 20.0391 3 19.5304 3 19V15" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M7 10L12 15L17 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
         <span>Download Model</span>
       </button>
     {:else}
@@ -615,6 +609,9 @@
   .panel-field span { white-space: nowrap; }
   .panel-field strong { overflow: hidden; color: rgba(0, 0, 0, 0.75); font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
 
+  .model-value { display: flex; min-width: 0; max-width: calc(100% - 60px); }
+  .language-menu.model-menu { width: 100%; max-height: min(280px, calc(100dvh - 250px)); overflow-y: auto; overscroll-behavior: contain; }
+
   .language-picker { position: relative; min-width: 0; }
   .language-menu { position: absolute; z-index: 80; top: calc(100% + 8px); right: 0; box-sizing: border-box; width: 226px; max-height: 292px; overflow-y: auto; padding: 4px 5px; border: 1px solid rgba(0, 0, 0, 0.15); border-radius: 15px; background: rgba(255, 255, 255, 0.75); box-shadow: 0 0 100px rgba(0, 0, 0, 0.08); backdrop-filter: blur(4.05px); -webkit-backdrop-filter: blur(4.05px); transform-origin: top right; }
   .language-menu-item { display: flex; align-items: center; box-sizing: border-box; width: 100%; height: 39px; padding: 0 11px; border: 1px solid transparent; border-radius: 10px; background: transparent; color: rgba(0, 0, 0, 0.75); font: inherit; font-size: 20px; letter-spacing: -0.2px; text-align: left; white-space: nowrap; cursor: pointer; transition: color 180ms ease, background-color 180ms ease, border-color 180ms ease; }
@@ -708,6 +705,7 @@
   .panel-action:disabled { cursor: default; opacity: 0.42; }
   .panel-action.busy:disabled { cursor: wait; opacity: 0.82; }
   .panel-action img { width: 24px; height: 24px; filter: brightness(0) invert(1); }
+  .panel-action svg { width: 24px; height: 24px; flex: none; }
 
   .panel-action.download {
     background: #0878f9;
@@ -734,18 +732,6 @@
   }
 
   @keyframes translate-spin { to { transform: rotate(360deg); } }
-
-  /* The Download Model button turns into this bar: blue fills it from the left like a liquid. */
-  .model-progress {
-    --progress: 0;
-    position: relative;
-    height: 48px;
-    overflow: hidden;
-    border-radius: 15px;
-    background: rgba(8, 120, 249, 0.1);
-    box-shadow: inset 0 0 0 1px rgba(8, 120, 249, 0.16);
-    isolation: isolate;
-  }
 
   .progress-fill {
     position: absolute;
@@ -777,7 +763,6 @@
     animation: progress-sheen 2.2s ease-in-out infinite;
   }
 
-  .model-progress.indeterminate .progress-fill::after { display: none; }
 
   @keyframes progress-wave { to { background-position: 0 24px; } }
   @keyframes progress-sheen { to { background-position: 220% 0; } }
@@ -795,17 +780,8 @@
     pointer-events: none;
   }
 
-  .indeterminate .progress-label { justify-content: center; }
   .progress-label b { font-weight: 400; }
   .progress-label em { font-size: 17px; font-style: normal; opacity: 0.8; }
-  .progress-label.track { color: #0878f9; }
-
-  /* The white copy is clipped to the fill, so the text changes colour exactly at the edge. */
-  .progress-label.fill {
-    color: #fff;
-    clip-path: inset(0 calc(100% - var(--progress) * 100%) 0 0);
-    transition: clip-path 420ms cubic-bezier(0.22, 1, 0.36, 1);
-  }
 
   .panel-note {
     margin: -2px 2px 0;
@@ -864,12 +840,9 @@
   :global(:root[data-theme="dark"]) .panel-action.secondary { border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.75); }
   :global(:root[data-theme="dark"]) .panel-action.secondary:hover { box-shadow: none; border-color: rgba(255, 255, 255, 0.144); }
   :global(:root[data-theme="dark"]) .spinner { border: 2px solid rgba(0, 0, 0, 0.24); border-top-color: rgba(255, 255, 255, 0.08); }
-  :global(:root[data-theme="dark"]) .model-progress { background: rgba(8, 120, 249, 0.1); box-shadow: inset 0 0 0 1px rgba(8, 120, 249, 0.48); }
   :global(:root[data-theme="dark"]) .progress-fill { background: linear-gradient(180deg, #2a8cff 0%, #0878f9 55%, #006ae6 100%); }
   :global(:root[data-theme="dark"]) .progress-fill::after { background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 24'%3E%3Cpath d='M0 0h4c4 3 4 9 0 12s-4 9 0 12H0z' fill='%23006ae6'/%3E%3C/svg%3E") 0 0 / 10px 24px repeat-y; }
   :global(:root[data-theme="dark"]) .progress-fill::before { background: linear-gradient(100deg, transparent 20%, rgba(255, 255, 255, 0.026) 45%, transparent 70%) -120% 0 / 60% 100% no-repeat; }
-  :global(:root[data-theme="dark"]) .progress-label.track { color: #0878f9; }
-  :global(:root[data-theme="dark"]) .progress-label.fill { color: #111111; }
   :global(:root[data-theme="dark"]) .panel-note { color: rgba(255, 255, 255, 0.5); }
   :global(:root[data-theme="dark"]) .work-progress .progress-fill { background: linear-gradient(180deg, #2a8cff 0%, #0878f9 55%, #006ae6 100%); }
   :global(:root[data-theme="dark"]) .work-progress .progress-label { color: #111111; }

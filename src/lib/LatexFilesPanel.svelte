@@ -1,4 +1,7 @@
 <script>
+  import ModelOption from '#lib/ModelOption.svelte';
+  import { QWEN_MODEL_ID, openQwenDownload } from '#lib/qwen-download.js';
+  import ModelLabel from '#lib/ModelLabel.svelte';
   import { onDestroy, onMount } from 'svelte';
   import { cubicOut } from 'svelte/easing';
   import { fly, scale } from 'svelte/transition';
@@ -44,10 +47,13 @@
   $: currentModel = models.find((model) => model.id === selectedModel);
   $: modelLabel = currentModel?.short ?? currentModel?.name ?? '…';
   $: styleLabel = styles.find((style) => style.id === selectedStyle)?.label ?? '…';
-  $: hasKey = latexKeyReady(status);
+  $: needsQwenDownload = Boolean(currentModel?.downloadable && !currentModel.ready);
+  $: hasKey = latexKeyReady(status, selectedModel);
   $: ready = Boolean(status?.engine && hasKey);
   $: stageText = describeLatexStage(progress);
 
+  const handleQwenReady = async () => { status = await latexStatus(); selectedModel = QWEN_MODEL_ID; };
+  onMount(() => { window.addEventListener('docuflex:qwen-ready', handleQwenReady); return () => window.removeEventListener('docuflex:qwen-ready', handleQwenReady); });
   onMount(async () => {
     window.addEventListener('pointerdown', closeMenus);
     window.addEventListener('keydown', handleKeydown);
@@ -94,6 +100,7 @@
   function chooseModel(id) {
     selectedModel = id;
     openMenu = null;
+    if (models.find((model) => model.id === id)?.ready === false) void openQwenDownload();
     rememberLatexModel(id);
   }
 
@@ -108,6 +115,7 @@
 
   async function convert() {
     if (converting || !inputFile) return;
+    if (needsQwenDownload) { void openQwenDownload(); return; }
     if (!hasKey) {
       onNeedKey();
       return;
@@ -210,20 +218,24 @@
           onclick={(event) => toggleMenu(/** @type {'model' | 'style'} */ (picker.id), event)}
         >
           <span>{picker.label}</span>
-          <strong>{picker.value}</strong>
+          <strong class:model-value={picker.id === 'model'}>{#if picker.id === 'model'}<ModelLabel model={currentModel} selected compact />{:else}{picker.value}{/if}</strong>
         </button>
         {#if openMenu === picker.id}
-          <div class="output-menu" role="menu" transition:scale={{ duration: 125, easing: cubicOut, start: 0.94, opacity: 0 }}>
-            {#each picker.id === 'model' ? models.map((model) => ({ id: model.id, label: model.name })) : styles as option (option.id)}
+          <div class="output-menu" class:model-menu={picker.id === 'model'} role="menu" transition:scale={{ duration: 125, easing: cubicOut, start: 0.94, opacity: 0 }}>
+            {#each picker.id === 'model' ? models.map((model) => ({ ...model, label: model.name })) : styles as option (option.id)}
               {@const selected = option.id === (picker.id === 'model' ? selectedModel : selectedStyle)}
+              {#if picker.id === 'model'}
+                <ModelOption model={models.find((model) => model.id === option.id) ?? { id: option.id, name: option.label }} {selected} onSelect={chooseModel} />
+              {:else}
               <button
                 class="output-menu-item"
                 class:active={selected}
                 role="menuitemradio"
                 aria-checked={selected}
                 type="button"
-                onclick={() => (picker.id === 'model' ? chooseModel(option.id) : chooseStyle(option.id))}
+                onclick={() => chooseStyle(option.id)}
               ><span>{option.label}</span></button>
+              {/if}
             {/each}
           </div>
         {/if}
@@ -252,6 +264,8 @@
     {:else if !status.engine}
       <h3>Unavailable:</h3>
       <p>The LaTeX engine is <span>not installed</span> here. Use the Docuflex desktop app.</p>
+    {:else if needsQwenDownload}
+      <h3>Local Model:</h3><p>Download <span>Qwen 3.5 4B</span> to enhance PDFs on this Mac.</p>
     {:else if !hasKey}
       <h3>API Key Needed:</h3>
       <p>Uses <span>your OpenRouter key</span>, like the AI chat. Add it in Settings.</p>
@@ -263,7 +277,7 @@
       <p>Compiled <span>{result.file.name}</span>{result.attempts > 1 ? ` after ${result.attempts} attempts` : ''}.</p>
     {:else}
       <h3>How it Works:</h3>
-      <p>The AI reads your PDF or scan and redesigns it as a <span>professional LaTeX</span> document with charts, diagrams and tables. Uses your API key.</p>
+      <p>The AI reads your PDF or scan and redesigns it as a <span>professional LaTeX</span> document with charts, diagrams and tables. {selectedModel === QWEN_MODEL_ID ? 'Runs on this Mac with Qwen.' : 'Uses your API key.'}</p>
     {/if}
   </section>
 
@@ -280,6 +294,8 @@
         <span class="progress-label"><b>{stageText}</b><em>{formatElapsed(elapsed)}</em></span>
       </div>
       <button class="panel-link" type="button" onclick={cancel}>Cancel</button>
+    {:else if needsQwenDownload}
+      <button class="panel-action" type="button" onclick={openQwenDownload}>Download Qwen</button>
     {:else if status && !hasKey}
       <button class="panel-action" type="button" onclick={onNeedKey}>
         <img src="/brain.svg" alt="" />
@@ -369,6 +385,10 @@
   }
 
   /* Pickers and upload match ConvertFilesPanel (.output-picker, .convert-action.upload). */
+  .model-value { display: flex; min-width: 0; max-width: calc(100% - 60px); }
+  .output-menu.model-menu { width: 100%; max-height: min(280px, calc(100dvh - 250px)); overflow-y: auto; overscroll-behavior: contain; }
+  .model-menu .output-menu-item { font-size: 16px; }
+
   .output-picker { position: relative; min-width: 0; }
   .output-picker > button { display: flex; align-items: center; justify-content: space-between; gap: 8px; box-sizing: border-box; width: 100%; min-width: 0; height: 48px; padding: 0 13px; border: 1px solid rgba(0, 0, 0, 0.1); border-radius: 15px; background: #fff; color: rgba(0, 0, 0, 0.5); font: inherit; font-size: 19px; letter-spacing: -0.19px; cursor: pointer; transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease, transform 160ms ease, opacity 160ms ease; }
   .output-picker > button:hover:not(:disabled), .output-picker > button[aria-expanded='true'] { border-color: rgba(0, 0, 0, 0.18); }
@@ -575,6 +595,7 @@
   /* dark theme: end generated */
 
   /* dark theme: manual */
+  :global(:root[data-theme="dark"]) .panel-action:hover:not(:disabled) img[src="/brain.svg"] { filter: brightness(0); }
   :global(:root[data-theme="dark"]) .progress-label { color: #fff; }
 
 </style>

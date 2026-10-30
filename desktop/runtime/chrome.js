@@ -334,7 +334,84 @@
 
   `;
 
+  // Wider targets inside the window supplement AppKit's narrow outside border.
+  // Pointer capture keeps a corner drag attached when the pointer leaves the webview.
+  const installMacResizeGrips = () => {
+    if (desktopPlatform !== 'macos' || document.querySelector('.docuflex-resize-grip')) return;
+    const style = document.createElement('style');
+    style.textContent = `
+      .docuflex-resize-grip { position: fixed; z-index: 2147483647; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-app-region: no-drag; }
+      .docuflex-resize-grip.n { left: 20px; right: 20px; top: 0; height: 8px; cursor: ns-resize; }
+      .docuflex-resize-grip.s { left: 20px; right: 20px; bottom: 0; height: 8px; cursor: ns-resize; }
+      .docuflex-resize-grip.e { top: 20px; bottom: 20px; right: 0; width: 8px; cursor: ew-resize; }
+      .docuflex-resize-grip.w { top: 20px; bottom: 20px; left: 0; width: 8px; cursor: ew-resize; }
+      .docuflex-resize-grip.ne, .docuflex-resize-grip.nw, .docuflex-resize-grip.se, .docuflex-resize-grip.sw { width: 20px; height: 20px; }
+      .docuflex-resize-grip.ne { top: 0; right: 0; cursor: nesw-resize; }
+      .docuflex-resize-grip.nw { top: 0; left: 0; cursor: nwse-resize; clip-path: polygon(0 0, 100% 0, 0 100%); }
+      .docuflex-resize-grip.se { bottom: 0; right: 0; cursor: nwse-resize; }
+      .docuflex-resize-grip.sw { bottom: 0; left: 0; cursor: nesw-resize; }
+    `;
+    document.head.append(style);
+    for (const direction of ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']) {
+      const grip = document.createElement('div');
+      grip.className = `docuflex-resize-grip ${direction}`;
+      grip.setAttribute('aria-hidden', 'true');
+      grip.addEventListener('pointerdown', async (event) => {
+        if (event.button !== 0 || !globalThis.__TAURI__?.core?.invoke) return;
+        event.preventDefault();
+        event.stopPropagation();
+        grip.setPointerCapture(event.pointerId);
+        const invoke = globalThis.__TAURI__.core.invoke;
+        const origin = { x: event.screenX, y: event.screenY };
+        let latest = { x: event.screenX, y: event.screenY };
+        let start = null;
+        let running = false;
+        let dirty = false;
+        let ended = false;
+        const pump = async () => {
+          if (running || !start) return;
+          running = true;
+          try {
+            while (dirty) {
+              dirty = false;
+              await invoke('macos_resize_window', { direction, start, deltaX: latest.x - origin.x, deltaY: latest.y - origin.y });
+            }
+          } catch (error) { console.warn('Window resize stopped:', error); finish(); }
+          finally { running = false; }
+        };
+        const move = (next) => {
+          if (next.pointerId !== event.pointerId || ended) return;
+          latest = { x: next.screenX, y: next.screenY };
+          dirty = true;
+          void pump();
+        };
+        const finish = (next) => {
+          if (next && next.pointerId !== undefined && next.pointerId !== event.pointerId) return;
+          ended = true;
+          grip.removeEventListener('pointermove', move);
+          grip.removeEventListener('pointerup', finish);
+          grip.removeEventListener('pointercancel', finish);
+          grip.removeEventListener('lostpointercapture', finish);
+          window.removeEventListener('blur', finish);
+          if (grip.hasPointerCapture(event.pointerId)) grip.releasePointerCapture(event.pointerId);
+          void pump();
+        };
+        grip.addEventListener('pointermove', move);
+        grip.addEventListener('pointerup', finish);
+        grip.addEventListener('pointercancel', finish);
+        grip.addEventListener('lostpointercapture', finish);
+        window.addEventListener('blur', finish);
+        try {
+          start = await invoke('macos_resize_window', { direction, start: null, deltaX: 0, deltaY: 0 });
+          void pump();
+        } catch (error) { console.warn('Window cannot be resized:', error); finish(); }
+      });
+      document.body.append(grip);
+    }
+  };
+
   const installDesktopChrome = () => {
+    installMacResizeGrips();
     document.documentElement.dataset.docuflexDesktop = desktopPlatform;
 
     if (!document.getElementById('docuflex-desktop-chrome')) {

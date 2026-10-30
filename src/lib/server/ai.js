@@ -1,3 +1,4 @@
+import { QWEN_MODEL_ID, qwenChat, qwenSupported } from '#lib/server/ollama.js';
 import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -16,7 +17,7 @@ import { MCP_INSTRUCTIONS, MCP_TOOLS } from '#lib/server/mcp-tools.js';
 export const AI_MODEL = env.DOCUFLEX_AI_MODEL || 'xiaomi/mimo-v2.6-flash';
 /** Used by OpenRouter when the main model fails or is unavailable. */
 export const AI_FALLBACK_MODEL = env.DOCUFLEX_AI_FALLBACK_MODEL || 'google/gemini-3-flash-preview';
-/** Models the chat can switch between; all of them take tool calls and page images on OpenRouter. */
+/** Models the chat can switch between. Free entries use explicit free variants. */
 export const AI_MODELS = [
   { id: AI_MODEL, name: 'MiMo V2.6 Flash', short: 'MiMo Flash' },
   { id: 'xiaomi/mimo-v2.6-pro', name: 'MiMo V2.6 Pro', short: 'MiMo Pro' },
@@ -27,8 +28,20 @@ export const AI_MODELS = [
   { id: 'anthropic/claude-opus-5.5', name: 'Claude Opus 5.5', short: 'Opus' },
   { id: 'openai/gpt-6.1-sol', name: 'GPT-6.1 Sol', short: 'Sol' },
   { id: 'openai/gpt-6-luna', name: 'GPT-6 Luna', short: 'Luna' },
-  { id: 'moonshotai/kimi-k3', name: 'Kimi K3', short: 'Kimi' }
+  { id: 'moonshotai/kimi-k3', name: 'Kimi K3', short: 'Kimi' },
+  { id: 'openrouter/free', name: 'Free Models Router', short: 'Free Router', free: true },
+  { id: 'dots-studio/dots-3-note-preview:free', name: 'Dots3-Note Preview', short: 'Dots3 Note', free: true },
+  { id: 'nvidia/nemotron-3.5-lightning:free', name: 'Nemotron 3.5 Lightning', short: 'Nemotron Lightning', free: true },
+  { id: 'nvidia/nemotron-3-ultra-550b-a55b:free', name: 'Nemotron 3 Ultra', short: 'Nemotron Ultra', free: true }
 ].filter((model, index, list) => list.findIndex((other) => other.id === model.id) === index);
+/** Free selections must never fall back to a paid model or provider. @param {string} model */
+export function modelRouting(model) {
+  if (AI_MODELS.some((candidate) => candidate.id === model && candidate.free)) {
+    return { model, provider: { max_price: { prompt: 0, completion: 0, image: 0, request: 0 } } };
+  }
+  return { models: model === AI_FALLBACK_MODEL ? [model] : [model, AI_FALLBACK_MODEL] };
+}
+
 const KEY_FILE = join(homedir(), '.docuflex', 'openrouter-key');
 const MEMORY_FILE = join(homedir(), '.docuflex', 'ai-memory.json');
 /** Thinking budget per model turn. MiMo otherwise thinks for a long time on simple steps. */
@@ -78,7 +91,7 @@ export async function deleteOpenRouterKey() {
 }
 
 export async function aiAvailable() {
-  return mcpAvailable() && Boolean(await openRouterKey());
+  return mcpAvailable() && (Boolean(await openRouterKey()) || await qwenSupported());
 }
 
 /** Tools only the AI chat has: its notes about documents. */
@@ -269,6 +282,7 @@ export function systemPrompt(context, memories = []) {
     '',
     'How to work:',
     '- Never guess what a document says. Read it (get_page_text, search_text) or look at it (render_page) first.',
+    '- Attached images and render_page results are visible image inputs: inspect them directly. The PDF canvas is not continuously streamed to you. Before judging a drawing or placing something next to it, use render_page to inspect the relevant area; do not infer its appearance from chat text alone.',
     '- For "this page" or "here", use the current page from the context below. Selected pages and selected text in the context are what the person is pointing at.',
     '- Place added content relative to existing text: get its position from get_page_text or search_text. Check visual results with render_page.',
     '- Every edit can be undone by the person, so act without asking for ordinary edits. Saving files, extracting pages and closing documents ask the person for approval automatically; just call the tool.',
@@ -325,6 +339,12 @@ export function subagentPrompt(scope, context) {
  * @param {{ key: string; memories: { text: string; at: string }[] } | null} [web] a website visitor's own key and browser-kept notes
  */
 export async function streamCompletion(messages, context, signal, subagent = null, model = AI_MODEL, web = null) {
+  if (model === QWEN_MODEL_ID) {
+    if (web) throw new Error('Local Qwen is only available in the macOS app.');
+    const memories = await documentMemories(context);
+    const system = subagent ? subagentPrompt(subagent, context) : systemPrompt(context, memories);
+    return qwenChat([{ role: 'system', content: system }, ...messages], subagent ? SUBAGENT_FUNCTIONS : AI_TOOLS, signal);
+  }
   const chosen = AI_MODELS.some((candidate) => candidate.id === model) ? model : AI_MODEL;
   const key = web ? web.key : await openRouterKey();
   if (!key) throw new Error(web ? 'Add your OpenRouter API key in Settings.' : 'No OpenRouter key is configured on this computer.');
@@ -340,7 +360,7 @@ export async function streamCompletion(messages, context, signal, subagent = nul
       'X-Title': 'Docuflex'
     },
     body: JSON.stringify({
-      models: chosen === AI_FALLBACK_MODEL ? [chosen] : [chosen, AI_FALLBACK_MODEL],
+      ...modelRouting(chosen),
       stream: true,
       messages: [{ role: 'system', content: system }, ...messages],
       tools: subagent ? SUBAGENT_FUNCTIONS : web ? WEB_FUNCTIONS : AI_TOOLS,

@@ -111,6 +111,57 @@ fn start_window_drag(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|error| format!("Could not drag the Docuflex window: {error}"))
 }
 
+/// Atomic AppKit frame updates for the wider in-window resize grips. Tauri's
+/// start_resize_dragging is unsupported on macOS; keep all AppKit work on its main thread.
+#[tauri::command]
+async fn macos_resize_window(
+    app: tauri::AppHandle,
+    direction: String,
+    start: Option<[f64; 4]>,
+    delta_x: f64,
+    delta_y: f64,
+) -> Result<[f64; 4], String> {
+    #[cfg(target_os = "macos")]
+    {
+        if !["n", "s", "e", "w", "ne", "nw", "se", "sw"].contains(&direction.as_str())
+            || !delta_x.is_finite() || !delta_y.is_finite()
+            || start.is_some_and(|frame| frame.iter().any(|value| !value.is_finite())) {
+            return Err("Invalid resize coordinates.".into());
+        }
+        let window = app.get_webview_window("main").ok_or("Window unavailable.")?;
+        if window.is_fullscreen().unwrap_or(false) { return Err("Full-screen windows cannot be resized.".into()); }
+        let (tx, mut rx) = tauri::async_runtime::channel(1);
+        let native_window = window.clone();
+        window.run_on_main_thread(move || {
+            use objc2_app_kit::NSWindow;
+            use objc2_foundation::{NSPoint, NSRect, NSSize};
+            let result = (|| {
+                let pointer = native_window.ns_window().map_err(|error| error.to_string())?;
+                // SAFETY: live Tauri window, accessed on AppKit's main thread.
+                let native = unsafe { &*(pointer as *const NSWindow) };
+                let mut frame = native.frame();
+                if let Some([x, y, width, height]) = start {
+                    let minimum = native.minSize();
+                    let new_width = if direction.contains('w') { width - delta_x } else if direction.contains('e') { width + delta_x } else { width };
+                    let new_height = if direction.contains('n') { height - delta_y } else if direction.contains('s') { height + delta_y } else { height };
+                    let new_width = new_width.clamp(minimum.width.max(960.0), 16_384.0);
+                    let new_height = new_height.clamp(minimum.height.max(640.0), 16_384.0);
+                    frame = NSRect::new(
+                        NSPoint::new(if direction.contains('w') { x + width - new_width } else { x }, if direction.contains('s') { y + height - new_height } else { y }),
+                        NSSize::new(new_width, new_height),
+                    );
+                    native.setFrame_display(frame, true);
+                }
+                Ok([frame.origin.x, frame.origin.y, frame.size.width, frame.size.height])
+            })();
+            let _ = tx.try_send(result);
+        }).map_err(|error| error.to_string())?;
+        rx.recv().await.ok_or_else(|| "Window resize did not complete.".to_string())?
+    }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = (app, direction, start, delta_x, delta_y); Err("macOS only.".into()) }
+}
+
 #[cfg(target_os = "windows")]
 fn native_tool_path(path: PathBuf) -> PathBuf {
     // Tauri may return verbatim (`\\?\`) paths for installed resources. Older
@@ -698,6 +749,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             take_pending_pdf,
             start_window_drag,
+            macos_resize_window,
             docuflex_save_prompt,
             docuflex_save_overwrite,
             docuflex_print_pdf,
@@ -748,6 +800,8 @@ pub fn run() {
             let page_load_marker = std::env::var_os("DOCUFLEX_PAGE_LOAD_MARKER").map(PathBuf::from);
             let window_builder =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::External(editor_url))
+                    // Let HTML drop targets route files to chat or the PDF editor.
+                    .disable_drag_drop_handler()
                     .title("Docuflex")
                     .inner_size(1440.0, 920.0)
                     .min_inner_size(960.0, 640.0)
