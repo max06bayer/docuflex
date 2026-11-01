@@ -4,7 +4,7 @@ import { writable } from 'svelte/store';
  * Desktop updates from the GitHub releases, driven by the native updater
  * (desktop/src-tauri/src/updater.rs). The website has no updater.
  *
- * @typedef {{ current: string; latest: string; available: boolean; releaseUrl: string }} UpdateInfo
+ * @typedef {{ current: string; latest: string; available: boolean; releaseUrl: string; manualInstall?: boolean }} UpdateInfo
  * @typedef {{ phase: 'idle' | 'checking' | 'current' | 'available' | 'downloading' | 'ready' | 'installing' | 'error'; info: UpdateInfo | null; received: number; total: number; error: string; visible: boolean }} UpdateState
  */
 
@@ -71,10 +71,12 @@ export async function installUpdate() {
   if (!api?.core?.invoke) return;
   update.update((state) => ({ ...state, phase: 'installing', visible: true }));
   try {
-    // Docuflex quits here; the helper installs the new version and opens it.
+    // macOS saves/opens a verified installer; other platforms may quit here.
     await api.core.invoke('docuflex_update_install');
+    update.update((state) => ({ ...state, phase: 'idle', visible: false }));
   } catch (error) {
-    update.update((state) => ({ ...state, phase: 'error', error: message(error), visible: true }));
+    const cancelled = message(error) === 'cancelled';
+    update.update((state) => ({ ...state, phase: cancelled ? 'ready' : 'error', error: cancelled ? '' : message(error), visible: true }));
   }
 }
 

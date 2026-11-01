@@ -2,6 +2,11 @@ name: Desktop native builds
 
 on:
   workflow_dispatch:
+    inputs:
+      draft_release:
+        description: 'Refresh an existing draft release (for example v0.9.6); never publishes it'
+        required: false
+        type: string
   # Pushing a version tag (v0.9.2, …) builds everything and creates the GitHub
   # release as a draft with the Windows and Linux files. See RELEASING.md.
   push:
@@ -373,13 +378,14 @@ jobs:
   # (RELEASING.md); nothing is downloaded to and re-uploaded from a local machine.
   release:
     name: Draft GitHub release
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.draft_release != ''
     needs: [windows-x64, linux-x64, arch-linux-x64]
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -395,13 +401,40 @@ jobs:
       - name: Create or update the draft release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ inputs.draft_release || github.ref_name }}
+          MANUAL_DRAFT: ${{ inputs.draft_release }}
         run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Invalid release version'; exit 1; }
           version="${TAG#v}"
-          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          test "$version" = "$(node -p "require('./package.json').version")"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            test "$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = true || {
+              echo 'Refusing to modify a published release'; exit 1;
+            }
+          else
+            test -z "$MANUAL_DRAFT" || { echo 'Manual refresh requires an existing draft'; exit 1; }
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
               --title "Docuflex $version" \
-              --notes "Docuflex $version. Release notes and the macOS DMG are added before publishing. Tested on macOS, Windows and Arch/CachyOS; the Debian package (.deb) is untested."
+              --notes "Docuflex $version. Release notes and the macOS DMG are added before publishing. The Debian package (.deb) is untested."
           fi
+          SOURCE_SHA="$GITHUB_SHA" RELEASE_VERSION="$version" node --input-type=module <<'JS'
+          import {writeFileSync} from 'node:fs';
+          writeFileSync('release/build-provenance-desktop.json', JSON.stringify({version:process.env.RELEASE_VERSION,commit:process.env.SOURCE_SHA,workflow:`https://github.com/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`,platforms:['windows-x64','linux-x64','arch-x64']},null,2)+'\n');
+          JS
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber release/*
-
+          # Retire only the superseded, ambiguously named Debian asset in this draft.
+          old_deb="Docuflex_${version}_amd64.deb"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -Fxq "$old_deb"; then
+            gh release delete-asset "$TAG" "$old_deb" --repo "$GITHUB_REPOSITORY" --yes
+          fi
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets > /tmp/docuflex-release-assets.json
+          node --input-type=module <<'JS'
+          import {readFileSync,writeFileSync} from 'node:fs';
+          const {assets}=JSON.parse(readFileSync('/tmp/docuflex-release-assets.json','utf8'));
+          const files=assets.filter(a=>/\.(exe|AppImage|deb|pkg\.tar\.zst|dmg)$/.test(a.name)||/^build-provenance.*\.json$/.test(a.name)).sort((a,b)=>a.name.localeCompare(b.name));
+          for(const a of files) if(!/^sha256:[a-f0-9]{64}$/.test(a.digest||'')) throw Error('Missing GitHub asset digest: '+a.name);
+          writeFileSync('SHA256SUMS.txt',files.map(a=>a.digest.slice(7)+'  '+a.name).join('\n')+'\n');
+          JS
+          gh release upload "$TAG" SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=true --target "$GITHUB_SHA"

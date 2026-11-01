@@ -1,4 +1,5 @@
 <script>
+  import { requestCloudAiPermission } from '#lib/cloud-ai-permission.js';
   import ModelOption from '#lib/ModelOption.svelte';
   import { QWEN_MODEL_ID, openQwenDownload } from '#lib/qwen-download.js';
   import ModelLabel from '#lib/ModelLabel.svelte';
@@ -120,6 +121,7 @@
       onNeedKey();
       return;
     }
+    if (!(await requestCloudAiPermission(selectedModel)) || converting) return;
     error = '';
     result = null;
     failedTex = '';

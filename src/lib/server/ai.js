@@ -1,6 +1,6 @@
+import { localDataDirectory } from '#lib/server/local-storage.js';
 import { QWEN_MODEL_ID, qwenChat, qwenSupported } from '#lib/server/ollama.js';
 import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import * as env from '$app/env/private';
 import { mcpAvailable } from '#lib/server/mcp-bridge.js';
@@ -42,8 +42,8 @@ export function modelRouting(model) {
   return { models: model === AI_FALLBACK_MODEL ? [model] : [model, AI_FALLBACK_MODEL] };
 }
 
-const KEY_FILE = join(homedir(), '.docuflex', 'openrouter-key');
-const MEMORY_FILE = join(homedir(), '.docuflex', 'ai-memory.json');
+const KEY_FILE = join(localDataDirectory, 'openrouter-key');
+const MEMORY_FILE = join(localDataDirectory, 'ai-memory.json');
 /** Thinking budget per model turn. MiMo otherwise thinks for a long time on simple steps. */
 const REASONING_TOKENS = 1024;
 
@@ -81,7 +81,7 @@ export async function saveOpenRouterKey(key) {
     // Offline: keep the key; the chat reports a bad key when it is used.
   }
   if (response && (response.status === 401 || response.status === 403)) throw new Error('OpenRouter rejected this key.');
-  await mkdir(join(homedir(), '.docuflex'), { recursive: true });
+  await mkdir(localDataDirectory, { recursive: true });
   await writeFile(KEY_FILE, `${trimmed}\n`, { mode: 0o600 });
   await chmod(KEY_FILE, 0o600);
 }
@@ -224,7 +224,7 @@ async function readMemoryFile() {
 
 /** @param {Record<string, { text: string; at: string }[]>} data */
 async function writeMemoryFile(data) {
-  await mkdir(join(homedir(), '.docuflex'), { recursive: true, mode: 0o700 });
+  await mkdir(localDataDirectory, { recursive: true, mode: 0o700 });
   const temporary = `${MEMORY_FILE}.${process.pid}.tmp`;
   await writeFile(temporary, JSON.stringify(data, null, 2), { mode: 0o600 });
   await rename(temporary, MEMORY_FILE);

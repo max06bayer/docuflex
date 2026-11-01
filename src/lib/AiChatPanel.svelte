@@ -1,4 +1,5 @@
 <script>
+  import { requestCloudAiPermission } from '#lib/cloud-ai-permission.js';
   import { readChatDocument, chatDocumentPrompt } from '#lib/chat-attachments.js';
   import ModelOption from '#lib/ModelOption.svelte';
   import { QWEN_MODEL_ID, qwenDownload, openQwenDownload, refreshQwenStatus } from '#lib/qwen-download.js';
@@ -794,6 +795,7 @@
   }
 
   async function runAgent() {
+    if (!(await requestCloudAiPermission(selectedModel)) || busy) return;
     busy = true;
     controller = new AbortController();
     const { signal } = controller;
@@ -883,6 +885,7 @@
     const message = text.trim();
     if ((!message && !attachments.length && !documentAttachments.length) || busy || readingAttachments || !status?.available) return;
     if (selectedModel === QWEN_MODEL_ID && currentModel?.ready === false && !$qwenDownload.ready) { void openQwenDownload(); return; }
+    if (!(await requestCloudAiPermission(selectedModel)) || busy) return;
     compactHistory();
     const quote = selectionQuote;
     const images = attachments;

@@ -1,3 +1,4 @@
+import { requestCloudAiPermission } from '#lib/cloud-ai-permission.js';
 import { visitorKey } from '#lib/ai-web.js';
 
 /**
@@ -152,6 +153,8 @@ export class LatexError extends Error {
  * @param {{ file: File; status: LatexStatus; model: string; style?: string; instructions?: string; translateTo?: string; outputName: string; signal: AbortSignal; onProgress: (progress: LatexProgress) => void }} options
  */
 export async function runLatex({ file, status, model, style = 'auto', instructions = '', translateTo = '', outputName, signal, onProgress }) {
+  if (!(await requestCloudAiPermission(model))) throw new DOMException('Cloud AI was not allowed.', 'AbortError');
+  signal.throwIfAborted();
   const { pages, fonts } = await readPages(file, status.maxPageImages ?? 24, signal, onProgress);
   onProgress({ stage: 'sending' });
   /** @type {Record<string, string>} */

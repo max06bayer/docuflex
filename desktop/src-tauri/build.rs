@@ -9,6 +9,8 @@ fn main() {
                     "docuflex_save_prompt",
                     "docuflex_save_overwrite",
                     "docuflex_print_pdf",
+                    "docuflex_import_local_data",
+                    "docuflex_read_local_file",
                     "docuflex_update_check",
                     "docuflex_update_download",
                     "docuflex_update_install",

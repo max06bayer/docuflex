@@ -242,6 +242,22 @@
    */
   async function runMcpTool(name, args) {
     switch (name) {
+      case '__sandbox_read_file': {
+        const api = /** @type {any} */ (window).__TAURI__;
+        if (!api?.core?.invoke) throw new Error('Native file access is unavailable.');
+        return api.core.invoke('docuflex_read_local_file', { path: String(args.path), limit: Number(args.limit) });
+      }
+      case '__sandbox_save_pdf': {
+        const api = /** @type {any} */ (window).__TAURI__;
+        if (!api?.core?.invoke) throw new Error('Native file access is unavailable.');
+        let path = String(args.path);
+        try { await api.core.invoke('docuflex_save_overwrite', { path, base64: args.base64 }); }
+        catch (error) {
+          if (!/permission|permitted|denied/i.test(String(error))) throw error;
+          path = await api.core.invoke('docuflex_save_prompt', { suggestedName: path.split('/').pop(), base64: args.base64 });
+        }
+        return { path, bytes: Math.floor(String(args.base64).replace(/=+$/, '').length * 3 / 4) };
+      }
       case 'list_documents':
         return { documents: tabs.map((tab) => ({ documentId: tab.id, name: tab.name, active: tab.id === activeTab })) };
       case 'open_document': {
@@ -1557,10 +1573,10 @@
           <span>{$update.total ? `${($update.received / 1048576).toFixed(0)} of ${($update.total / 1048576).toFixed(0)} MB` : 'Starting…'}</span>
         {:else if $update.phase === 'ready'}
           <strong>Update ready</strong>
-          <span>Install restarts Docuflex with version {$update.info?.latest}.</span>
+          <span>{$update.info?.manualInstall ? 'Save and open the installer, then drag Docuflex to Applications.' : `Install restarts Docuflex with version ${$update.info?.latest}.`}</span>
         {:else if $update.phase === 'installing'}
-          <strong>Installing…</strong>
-          <span>Docuflex restarts in a moment.</span>
+          <strong>{$update.info?.manualInstall ? 'Opening installer…' : 'Installing…'}</strong>
+          <span>{$update.info?.manualInstall ? 'Choose where to save the verified installer.' : 'Docuflex restarts in a moment.'}</span>
         {:else if $update.phase === 'error'}
           <strong>Update failed</strong>
           <span>{$update.error}</span>
@@ -1578,7 +1594,7 @@
       {:else if $update.phase === 'ready'}
         <div class="update-actions">
           <button type="button" class="secondary" onclick={dismissUpdate}>Later</button>
-          <button type="button" onclick={installUpdate}>Install</button>
+          <button type="button" onclick={installUpdate}>{$update.info?.manualInstall ? 'Open Installer' : 'Install'}</button>
         </div>
       {:else if $update.phase === 'error'}
         <div class="update-actions">

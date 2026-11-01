@@ -19,6 +19,8 @@ use tauri::{LogicalPosition, TitleBarStyle};
 use url::Url;
 
 mod updater;
+#[cfg(target_os = "macos")]
+mod sandbox;
 
 // The side-by-side build ("Docuflex Redesign") uses its own ports so it can run next to the regular app.
 #[cfg(not(feature = "side-by-side"))]
@@ -78,12 +80,20 @@ fn take_pending_pdf(
     let Some(path) = path else {
         return Ok(None);
     };
+    #[cfg(target_os = "macos")]
+    let access = sandbox::Access::open(&path);
+    #[cfg(target_os = "macos")]
+    let actual_path = &access.path;
+    #[cfg(not(target_os = "macos"))]
+    let actual_path = &path;
     let metadata =
-        fs::metadata(&path).map_err(|error| format!("Could not inspect the PDF: {error}"))?;
+        fs::metadata(actual_path).map_err(|error| format!("Could not inspect the PDF: {error}"))?;
     if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_OPEN_PDF_BYTES {
         return Err("The selected PDF is empty or too large.".to_string());
     }
-    let bytes = fs::read(&path).map_err(|error| format!("Could not read the PDF: {error}"))?;
+    let bytes = fs::read(actual_path).map_err(|error| format!("Could not read the PDF: {error}"))?;
+    #[cfg(target_os = "macos")]
+    access.remember(&path);
     if !bytes.starts_with(b"%PDF-") {
         return Err("The selected file is not a valid PDF.".to_string());
     }
@@ -362,15 +372,23 @@ fn spawn_services(
     let classpath = "backend/out;backend/lib/pdfbox-app-3.0.8.jar";
     #[cfg(not(target_os = "windows"))]
     let classpath = "backend/out:backend/lib/pdfbox-app-3.0.8.jar";
-    let backend_arguments = [
+    let mut backend_arguments = Vec::new();
+    #[cfg(target_os = "macos")]
+    {
+        backend_arguments.push(OsString::from(format!("-Duser.home={}", sandbox::home().display())));
+        backend_arguments.push(OsString::from(format!("-Djava.io.tmpdir={}", sandbox::temporary_directory().display())));
+    }
+    backend_arguments.extend([
         OsString::from("-cp"),
         OsString::from(classpath),
         OsString::from("DocuflexPdfServer"),
-    ];
+    ]);
     let (backend_stdout, backend_stderr) = log_file(log_directory, "pdf-backend")?;
     let mut backend_command =
         supervised_command(resource_root, &parent_pid, &java, &backend_arguments);
     isolate_service_environment(&mut backend_command);
+    #[cfg(target_os = "macos")]
+    sandbox::configure_service(&mut backend_command);
     let backend = backend_command
         .current_dir(resource_root)
         .env("PDF_BACKEND_HOST", "127.0.0.1")
@@ -436,6 +454,11 @@ fn spawn_services(
         .env("FONTCONFIG_FILE", "fonts.conf")
         // OCR with Apple Vision; Tesseract stays as the fallback.
         .env("VISION_OCR_BIN", ocr.join("bin/docuflex-vision-ocr"));
+    #[cfg(target_os = "macos")]
+    {
+        sandbox::configure_service(&mut frontend_command);
+        frontend_command.env("PYTHONPATH", resource_root.join("scripts"));
+    }
     let frontend = frontend_command
         .stdin(Stdio::null())
         .stdout(frontend_stdout)
@@ -602,7 +625,11 @@ async fn docuflex_save_prompt(suggested_name: String, base64: String) -> Result<
         .map_err(|error| error.to_string())?;
     let destination = choose_download_destination(&PathBuf::from(suggested_name))
         .ok_or_else(|| "cancelled".to_string())?;
+    #[cfg(target_os = "macos")]
+    let access = sandbox::Access::open(&destination);
     fs::write(&destination, &bytes).map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    access.remember(&destination);
     Ok(destination.to_string_lossy().into_owned())
 }
 
@@ -613,7 +640,53 @@ async fn docuflex_save_overwrite(path: String, base64: String) -> Result<(), Str
     let bytes = BASE64_STANDARD
         .decode(base64)
         .map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    {
+        let access = sandbox::Access::open(Path::new(&path));
+        fs::write(&access.path, &bytes).map_err(|error| error.to_string())?;
+        access.remember(Path::new(&path));
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
     fs::write(&path, &bytes).map_err(|error| error.to_string())
+}
+
+/// Read a requested local file through its bookmark or a fresh native selection.
+#[tauri::command]
+async fn docuflex_read_local_file(path: String, limit: u64) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    return tauri::async_runtime::spawn_blocking(move || {
+        let requested = PathBuf::from(path);
+        let mut access = sandbox::Access::open(&requested);
+        let probe = fs::metadata(&access.path);
+        if matches!(&probe, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied) {
+            let selected = rfd::FileDialog::new().set_title("Choose the file requested by the AI")
+                .set_file_name(requested.file_name().and_then(|name| name.to_str()).unwrap_or(""))
+                .pick_file().ok_or_else(|| "cancelled".to_string())?;
+            if selected != requested { return Err("The selected file differs from the requested path. Ask the AI to use the file you selected.".into()); }
+            access = sandbox::Access::open(&selected);
+        }
+        let metadata = fs::metadata(&access.path).map_err(|error| error.to_string())?;
+        if !metadata.is_file() || metadata.len() > limit.min(MAX_OPEN_PDF_BYTES) { return Err("The selected file is too large or is not a regular file.".into()); }
+        let data = fs::read(&access.path).map_err(|error| error.to_string())?;
+        access.remember(&requested);
+        Ok(BASE64_STANDARD.encode(data))
+    }).await.map_err(|error| error.to_string())?;
+    #[cfg(not(target_os = "macos"))]
+    { let _ = (path, limit); Err("This file broker is only used by the macOS sandbox.".into()) }
+}
+
+/// Copies old local data into the container only after the user selects it.
+#[tauri::command]
+async fn docuflex_import_local_data() -> Result<u64, String> {
+    #[cfg(target_os = "macos")]
+    return tauri::async_runtime::spawn_blocking(|| {
+        let source = rfd::FileDialog::new().set_title("Choose previous .docuflex or translation cache folder")
+            .pick_folder().ok_or_else(|| "cancelled".to_string())?;
+        sandbox::import_previous_data(&source)
+    }).await.map_err(|error| error.to_string())?;
+    #[cfg(not(target_os = "macos"))]
+    Err("Local data import is only needed for the macOS sandbox.".into())
 }
 
 /// Prints a PDF through the system print dialog. On macOS PDFKit prints the
@@ -639,6 +712,9 @@ extern "C" {}
 #[cfg(target_os = "macos")]
 fn print_pdf(window: &tauri::WebviewWindow, name: &str, bytes: Vec<u8>) -> Result<(), String> {
     // PDFKit reads pages lazily, so the file stays until the next print job.
+    #[cfg(target_os = "macos")]
+    let directory = sandbox::temporary_directory().join("docuflex-print");
+    #[cfg(not(target_os = "macos"))]
     let directory = std::env::temp_dir().join("docuflex-print");
     let _ = fs::remove_dir_all(&directory);
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
@@ -753,6 +829,8 @@ pub fn run() {
             docuflex_save_prompt,
             docuflex_save_overwrite,
             docuflex_print_pdf,
+            docuflex_import_local_data,
+            docuflex_read_local_file,
             updater::docuflex_update_check,
             updater::docuflex_update_download,
             updater::docuflex_update_install
@@ -774,6 +852,9 @@ pub fn run() {
         ))
         .setup(move |app| {
             let resource_root = native_tool_path(app.path().resource_dir()?.join("resources"));
+            #[cfg(target_os = "macos")]
+            let log_directory = sandbox::home().join("Library/Logs/com.docuflex.editor");
+            #[cfg(not(target_os = "macos"))]
             let log_directory = app.path().app_log_dir()?;
             let children = match spawn_services(&resource_root, &log_directory) {
                 Ok(children) => children,

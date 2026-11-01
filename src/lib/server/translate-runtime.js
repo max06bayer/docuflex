@@ -1,3 +1,4 @@
+import { localCacheDirectory } from '#lib/server/local-storage.js';
 import * as env from '$app/env/private';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -12,7 +13,7 @@ import { logPrivateError } from '#lib/server/request-security.js';
 export const TRANSLATION_LANGUAGE_CODES = new Set(['en', 'de', 'es', 'fr', 'it', 'pt', 'nl', 'pl', 'ru', 'uk', 'ar', 'zh', 'ja', 'ko']);
 
 /** Argos models, caches and the downloaded engine live here, outside the (read-only) app bundle. */
-export const TRANSLATE_CACHE = join(homedir(), '.cache', 'docuflex');
+export const TRANSLATE_CACHE = localCacheDirectory;
 const USER_RUNTIME = join(TRANSLATE_CACHE, 'translate-python');
 /**
  * Where the language models live. The hosted server installs every model at build

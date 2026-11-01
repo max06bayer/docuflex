@@ -1,8 +1,10 @@
 <script>
+  import { cloudAiAllowed, revokeCloudAiPermission } from '#lib/cloud-ai-permission.js';
+  import LegalPanel from '#lib/LegalPanel.svelte';
   import FeedbackPanel from '#lib/FeedbackPanel.svelte';
   import { onDestroy, tick } from 'svelte';
   import { cubicOut } from 'svelte/easing';
-  import { fade, fly, scale } from 'svelte/transition';
+  import { fly } from 'svelte/transition';
   import { applyTheme, currentTheme } from '#lib/theme.js';
   import { removeVisitorKey, saveVisitorKey } from '#lib/ai-web.js';
   import { checkForUpdate, isDesktopApp } from '#lib/updater.js';
@@ -11,7 +13,7 @@
   export let onClose = () => {};
   export let legalOnly = false;
   export let legalSection = 'top';
-  /** @type {{ available: boolean; configurable?: boolean; keyHint?: string | null } | null} */
+  /** @type {{ available: boolean; sandboxed?: boolean; configurable?: boolean; keyHint?: string | null } | null} */
   export let aiStatus = null;
   /** Focus the key field on open (the AI button sends people here when no key is saved). */
   export let focusKey = false;
@@ -23,6 +25,25 @@
   function chooseTheme(next) {
     theme = next;
     applyTheme(next);
+  }
+  let importingLocalData = false;
+  let importMessage = '';
+  let importFailed = false;
+  async function importLocalData() {
+    if (importingLocalData) return;
+    importingLocalData = true;
+    importMessage = '';
+    importFailed = false;
+    try {
+      const api = /** @type {any} */ (window).__TAURI__;
+      const files = await api.core.invoke('docuflex_import_local_data');
+      await onAiKeyChange();
+      const { refreshQwenStatus } = await import('#lib/qwen-download.js');
+      await refreshQwenStatus();
+      importMessage = `Imported ${files} files. Existing data was kept.`;
+    } catch (error) {
+      if (String(error) !== 'cancelled') { importFailed = true; importMessage = String(error); }
+    } finally { importingLocalData = false; }
   }
   let keyDraft = '';
   let keyBusy = false;
@@ -42,8 +63,6 @@
   let feedbackButton;
   function closeFeedback() { feedbackOpen = false; tick().then(() => feedbackButton?.focus()); }
   let legalOpen = legalOnly;
-  /** @type {HTMLDivElement | undefined} */
-  let legalContentElement;
 
   function closeLegal() {
     legalOpen = false;
@@ -93,11 +112,6 @@
 
   $: if (focusKey && keyInput) keyInput.focus();
 
-  /** @param {MouseEvent} event */
-  function handleBackdropClick(event) {
-    if (event.target === event.currentTarget) closeLegal();
-  }
-
   /** @param {KeyboardEvent} event */
   function handleKeydown(event) {
     if (event.key !== 'Escape') return;
@@ -111,13 +125,6 @@
     if (typeof window !== 'undefined') window.removeEventListener('keydown', handleKeydown);
   });
 
-  if (legalOnly && typeof window !== 'undefined') {
-    tick().then(() => {
-      if (!legalContentElement || legalSection === 'top') return;
-      const target = legalContentElement.querySelector(`[data-legal-section="${legalSection}"]`);
-      if (target instanceof HTMLElement) legalContentElement.scrollTop = Math.max(0, target.offsetTop - 24);
-    });
-  }
 </script>
 
 {#if !legalOnly}
@@ -188,6 +195,13 @@
       {#if desktop}
         <button class="settings-row settings-link" type="button" onclick={() => checkForUpdate({ manual: true })}>Update</button>
       {/if}
+      {#if desktop && aiStatus?.sandboxed}
+        <button class="settings-row settings-link" type="button" disabled={importingLocalData} onclick={importLocalData}>{importingLocalData ? 'Importing…' : 'Import Existing AI Data…'}</button>
+        {#if importMessage}<p class="settings-import-note" class:failed={importFailed} role="status">{importMessage}</p>{/if}
+      {/if}
+      {#if $cloudAiAllowed}
+        <button class="settings-row settings-link" type="button" onclick={revokeCloudAiPermission}>Revoke Cloud AI Permission</button>
+      {/if}
       <button bind:this={feedbackButton} class="settings-row settings-link" type="button" onclick={() => (feedbackOpen = true)}>Feedback</button>
       <a class="settings-row settings-link" href="https://github.com/max06bayer/docuflex" target="_blank" rel="noreferrer">GitHub</a>
       <a class="settings-row settings-link" href="/">Homepage</a>
@@ -199,74 +213,7 @@
 {#if feedbackOpen}<FeedbackPanel onClose={closeFeedback} />{/if}
 
 {#if legalOpen}
-  <div class="legal-backdrop" role="presentation" onclick={handleBackdropClick} transition:fade={{ duration: 170 }}>
-    <dialog
-      open
-      class="legal-panel"
-      aria-modal="true"
-      aria-labelledby="legal-title"
-      transition:scale={{ duration: 190, easing: cubicOut, start: 0.97, opacity: 0 }}
-    >
-      <header class="panel-header legal-header">
-        <img src="/settings.svg" alt="" />
-        <h2 id="legal-title">Legal &amp; Privacy</h2>
-        <button class="panel-close legal-close" type="button" aria-label="Close Legal and Privacy" onclick={closeLegal}><span></span><span></span></button>
-      </header>
-
-      <div class="legal-content" bind:this={legalContentElement}>
-        <div class="legal-intro">
-          <p>Docuflex is a free and open-source PDF app licensed under the GNU Affero General Public License version 3. It has no user accounts, subscriptions, or advertising. The web editor and landing page use basic, cookie-free page analytics; the desktop app sends none.</p>
-          <p class="updated">Last updated: July 26, 2026</p>
-        </div>
-
-        <section data-legal-section="privacy">
-          <h3>Privacy</h3>
-          <p><strong>Controller.</strong> Maximilian Bayer, Lehmgrubenstraße 11, 86932 Pürgen, Germany. Email: <a href="mailto:max06.bayer@gmail.com">max06.bayer@gmail.com</a>.</p>
-          <p><strong>Files you open.</strong> Recent documents are stored in your browser using IndexedDB so they can appear on the home screen. Saved signatures are stored in your browser using local storage. They remain on that browser until you delete them in Docuflex, clear the browser’s site data, or the browser removes them.</p>
-          <p><strong>Hosting.</strong> Docuflex runs on infrastructure supplied by netcup GmbH at the Vienna, Austria server location. The deployment is managed with a self-hosted Coolify installation and its Traefik reverse proxy. Cloudflare is not used.</p>
-          <p><strong>Document processing.</strong> When you use conversion, compression, translation, OCR, protection, flattening, text editing, or export, the document is sent to the Docuflex server serving this app. OCR and PDF conversion run locally on that server. Temporary processing files are removed after the operation and are not used for advertising, profiling, or model training.</p>
-          <p><strong>Web analytics.</strong> The web editor and landing page record page views, approximate time on page, scroll depth, release downloads, and coarse device, browser, and operating-system type. IP addresses are never stored. They are used briefly in memory to derive country and region from a database on our own server, and to compute a visitor hash that changes daily. No IP address is sent to a third party. <a href="https://db-ip.com" target="_blank" rel="noreferrer">IP Geolocation by DB-IP</a> (CC BY 4.0). No cookies or browser storage are used for this. Requests with Do Not Track or Global Privacy Control are not measured. The desktop app sends no analytics.</p>
-          <p><strong>Feedback.</strong> If you send feedback, the message, category, app version and platform, and any email address you choose to include are sent to our own server. Documents and API keys are not attached. Feedback is kept for up to 90 days so we can improve Docuflex and reply if requested.</p>
-          <p><strong>Operational logs.</strong> The application does not use third-party error reporting or external log drains. Application errors and container events may appear in local Coolify and Docker console logs for troubleshooting and security. The app does not create a separate document or visitor database from these logs. Logs remain until the relevant container is replaced or removed, server cleanup runs, or longer retention is necessary to investigate a security incident.</p>
-          <p><strong>No sale or advertising sharing.</strong> Docuflex does not sell personal information or share it for cross-context behavioral advertising.</p>
-        </section>
-
-        <section data-legal-section="cookies">
-          <h3>Cookies</h3>
-          <p><strong>Docuflex does not currently set or use cookies.</strong> The app does not use advertising cookies, analytics cookies, tracking pixels, or third-party marketing identifiers.</p>
-          <p>Browser storage used for recent documents and saved signatures is not cookie storage. Recent documents use IndexedDB and saved signatures use local storage, as described in the Privacy section above. You can remove this data from Docuflex or through your browser’s site-data settings.</p>
-          <p>If cookies are introduced in a future version, this notice will be updated before they are used and any consent required by applicable law will be requested.</p>
-        </section>
-
-        <section>
-          <h3>Your choices and rights</h3>
-          <p>You can remove recent files from the home screen, remove saved signatures in the signature tool, or clear all locally stored Docuflex data through your browser’s site-data settings.</p>
-          <p>Depending on where you live, you may have rights to request access, correction, deletion, restriction, portability, or objection regarding personal data processed by the public-site operator, and to complain to your local data-protection authority. Send privacy requests to <a href="mailto:max06.bayer@gmail.com">max06.bayer@gmail.com</a>.</p>
-        </section>
-
-        <section>
-          <h3>Software license</h3>
-          <p>Docuflex is free and open-source software under the <strong>GNU Affero General Public License version 3.0 only (AGPL-3.0-only)</strong>. You may use the software for personal or commercial purposes, inspect and modify its source code, and redistribute it under the license’s terms.</p>
-          <p>If you modify Docuflex and let users interact with that version over a network, the AGPL requires you to offer those users the corresponding source code. The complete <a href="https://github.com/max06bayer/docuflex/blob/main/LICENSE" target="_blank" rel="noreferrer"><code>LICENSE</code> file</a> controls; this summary does not replace or modify it. Third-party components remain governed by their own licenses.</p>
-        </section>
-
-        <section data-legal-section="terms">
-          <h3>Terms of use</h3>
-          <p>You must have the right to use and process any document you upload. Do not use the service to violate law, privacy, confidentiality, intellectual-property rights, or the rights of others.</p>
-          <p>Docuflex is a development preview and may contain errors, alter document appearance, or produce incomplete results. Keep an original copy and independently verify important output. It is not legal, medical, financial, archival, or security advice and should not be the only system used for critical documents.</p>
-          <p>To the extent allowed by applicable law, the software and service are provided “as is,” without warranties, and the project operator is not liable for losses arising from their use. Rights that cannot legally be excluded remain unaffected.</p>
-        </section>
-
-        <section class="operator-notice">
-          <h3>Operator information</h3>
-          <p><strong>Service provider and person responsible for Docuflex</strong><br />Maximilian Bayer<br />Lehmgrubenstraße 11<br />86932 Pürgen<br />Germany</p>
-          <p>Email: <a href="mailto:max06.bayer@gmail.com">max06.bayer@gmail.com</a><br />GitHub: <a href="https://github.com/max06bayer/docuflex" target="_blank" rel="noreferrer">max06bayer/docuflex</a></p>
-        </section>
-      </div>
-
-      <footer class="legal-footer"><button type="button" onclick={closeLegal}>Done</button></footer>
-    </dialog>
-  </div>
+  <LegalPanel section={legalSection} onClose={closeLegal} />
 {/if}
 
 <style>
@@ -480,44 +427,14 @@
 
   .settings-action.secondary:not(:disabled):hover { background: rgba(255, 255, 255, 0.7); }
 
+  .settings-import-note { margin: 0 2px; font-size: 16px; line-height: 1.4; color: rgba(0, 0, 0, 0.5); }
+  .settings-import-note.failed { color: #de3542; }
+
   .settings-error {
     margin: -2px 2px 0;
     color: #de3542;
     font-size: 16px;
     letter-spacing: -0.16px;
-  }
-  .panel-header { display: grid; grid-template-columns: 26px 1fr 28px; align-items: center; height: 50px; padding: 0 12px; border-bottom: 1px solid #cacaca; border-radius: 12px 12px 0 0; background: #eee; }
-  .panel-header > img { width: 24px; height: 24px; }
-  .panel-header h2 { margin: 0 0 0 7px; font-size: 18px; font-weight: 400; line-height: 1.22; letter-spacing: -.25px; }
-  .panel-close { position: relative; z-index: 2; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 9px; background: transparent; cursor: pointer; transition: transform 160ms ease; }
-  .panel-close:active { transform: scale(.94); }
-  .panel-close span { position: absolute; top: 13px; left: 6px; width: 16px; height: 1.5px; border-radius: 99px; background: #929292; transform: rotate(45deg); transition: background-color 160ms ease; }
-  .panel-close span + span { transform: rotate(-45deg); }
-  .panel-close:hover span { background: #000; }
-  .legal-backdrop { position: fixed; z-index: 2000; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(235,235,235,.6); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); }
-  .legal-panel { position: relative; display: grid; grid-template-rows: 50px minmax(0,1fr) auto; width: min(850px, calc(100vw - 48px)); height: min(790px, calc(100dvh - 48px)); margin: 0; padding: 0; overflow: hidden; border: 1.5px solid #bdbdbd; border-radius: 13px; background: rgba(250,250,250,.97); box-shadow: 0 28px 85px rgba(0,0,0,.2), 0 5px 20px rgba(0,0,0,.1); color: #111; }
-  .legal-header { min-height: 50px; padding: 0 12px; border-radius: 12px 12px 0 0; }
-  .legal-content { overflow: auto; padding: 25px 30px 34px; overscroll-behavior: contain; }
-  .legal-intro { max-width: 760px; margin: 0 auto 25px; padding: 18px 20px; border: 1px solid #d7d7d7; border-radius: 12px; background: #f1f1f1; }
-  .legal-intro p { margin: 0; font-size: 17px; line-height: 1.45; }
-  .legal-intro .updated { margin-top: 8px; color: #777; font-size: 13px; }
-  .legal-content section { max-width: 760px; margin: 0 auto 27px; }
-  .legal-content h3 { margin: 0 0 10px; font-size: 21px; font-weight: 520; line-height: 1.2; letter-spacing: -.3px; }
-  .legal-content p { margin: 0 0 11px; color: #4e4e4e; font-size: 16px; line-height: 1.52; }
-  .legal-content strong { color: #151515; font-weight: 560; }
-  .legal-content code { padding: 1px 5px; border-radius: 5px; background: #e8e8e8; color: #222; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
-  .legal-content a { color: #0878f9; text-decoration: none; }
-  .legal-content a:hover { text-decoration: underline; }
-  .operator-notice { padding: 18px 20px; border: 1px solid #d4d4d4; border-radius: 12px; background: #f2f2f2; }
-  .operator-notice p:last-child { margin-bottom: 0; }
-  .legal-footer { display: flex; justify-content: flex-end; padding: 14px 22px; border-top: 1px solid #cecece; background: #f4f4f4; }
-  .legal-footer button { min-width: 120px; height: 42px; padding: 0 20px; border: 0; border-radius: 9px; background: #0878f9; color: #fff; font: inherit; font-size: 17px; cursor: pointer; box-shadow: 0 5px 15px rgba(8,120,249,.2); }
-  .legal-footer button:hover { background: #006ff0; }
-  @media (max-width: 680px) {
-    .legal-backdrop { padding: 10px; }
-    .legal-panel { width: calc(100vw - 20px); height: calc(100dvh - 20px); border-radius: 13px; }
-    .legal-content { padding: 18px 18px 28px; }
-    .legal-intro { padding: 15px; }
   }
 
   /* dark theme: generated by scripts/generate-dark-theme.mjs — do not edit */
@@ -545,24 +462,9 @@
   :global(:root[data-theme="dark"]) .settings-action { border: 1px solid #ececec; background: #ececec; color: #111111; }
   :global(:root[data-theme="dark"]) .settings-action.secondary { border-color: rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.75); }
   :global(:root[data-theme="dark"]) .settings-action.secondary:not(:disabled):hover { background: rgba(255, 255, 255, 0.07); }
+  :global(:root[data-theme="dark"]) .settings-import-note { color: rgba(255, 255, 255, 0.5); }
+  :global(:root[data-theme="dark"]) .settings-import-note.failed { color: #de3542; }
   :global(:root[data-theme="dark"]) .settings-error { color: #de3542; }
-  :global(:root[data-theme="dark"]) .panel-header { border-bottom: 1px solid #292929; background: #111111; }
-  :global(:root[data-theme="dark"]) .panel-close { border: 0; background: transparent; }
-  :global(:root[data-theme="dark"]) .panel-close span { color: rgba(255, 255, 255, 0.5); background: rgba(255, 255, 255, 0.14); }
-  :global(:root[data-theme="dark"]) .panel-close:hover span { background: #ececec; }
-  :global(:root[data-theme="dark"]) .legal-backdrop { background: rgba(22, 22, 22, 0.96); }
-  :global(:root[data-theme="dark"]) .legal-panel { border: 1.5px solid #2e2e2e; background: rgba(24, 24, 24, 0.95); box-shadow: 0 28px 85px rgba(0, 0, 0, 0.6), 0 5px 20px rgba(0, 0, 0, 0.3); color: rgba(255, 255, 255, 0.859); }
-  :global(:root[data-theme="dark"]) .legal-intro { border: 1px solid #232323; background: #121212; }
-  :global(:root[data-theme="dark"]) .legal-intro .updated { color: rgba(255, 255, 255, 0.533); }
-  :global(:root[data-theme="dark"]) .legal-content p { color: rgba(255, 255, 255, 0.694); }
-  :global(:root[data-theme="dark"]) .legal-content strong { color: rgba(255, 255, 255, 0.844); }
-  :global(:root[data-theme="dark"]) .legal-content code { background: #101010; color: rgba(255, 255, 255, 0.867); }
-  :global(:root[data-theme="dark"]) .legal-content a { color: #0878f9; text-decoration: none; }
-  :global(:root[data-theme="dark"]) .legal-content a:hover { text-decoration: underline; }
-  :global(:root[data-theme="dark"]) .operator-notice { border: 1px solid #242424; background: #121212; }
-  :global(:root[data-theme="dark"]) .legal-footer { border-top: 1px solid #272727; background: #131313; }
-  :global(:root[data-theme="dark"]) .legal-footer button { border: 0; background: #0878f9; color: #111111; box-shadow: 0 5px 15px rgba(8, 120, 249, 0.6); }
-  :global(:root[data-theme="dark"]) .legal-footer button:hover { background: #006ff0; }
   /* dark theme: end generated */
 
 </style>

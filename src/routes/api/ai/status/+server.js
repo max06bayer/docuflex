@@ -14,5 +14,5 @@ export async function GET({ request, url }) {
   const qwen = await qwenSupported();
   const qwenReady = qwen && await qwenInstalled();
   const models = [...(qwen ? [{ ...QWEN_MODEL, ready: qwenReady }] : []), ...(keyHint ? AI_MODELS : [])];
-  return Response.json({ available: Boolean(keyHint || qwen), configurable: true, keyHint, model: keyHint ? AI_MODEL : QWEN_MODEL.id, models, qwenReady, fallbackModel: AI_FALLBACK_MODEL, tools: AI_TOOL_INFO });
+  return Response.json({ sandboxed: process.env.DOCUFLEX_SANDBOX === '1', available: Boolean(keyHint || qwen), configurable: true, keyHint, model: keyHint ? AI_MODEL : QWEN_MODEL.id, models, qwenReady, fallbackModel: AI_FALLBACK_MODEL, tools: AI_TOOL_INFO });
 }

@@ -1,3 +1,4 @@
+import { localDataDirectory } from '#lib/server/local-storage.js';
 import { localQwenPlatform, accelerationFromModels } from '#lib/server/ollama-platform.js';
 import { downloadedRuntime, ensureDownloadedRuntime } from '#lib/server/ollama-runtime.js';
 import { execFileSync } from 'node:child_process';
@@ -6,7 +7,6 @@ import { readOllamaEvents, qwenCompletionStream } from '#lib/server/ollama-strea
 import { spawn } from 'node:child_process';
 import { access, mkdir, readFile, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
-import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createServer } from 'node:net';
 import { mcpAvailable } from '#lib/server/mcp-bridge.js';
@@ -14,7 +14,7 @@ import { mcpAvailable } from '#lib/server/mcp-bridge.js';
 export const QWEN_MODEL_ID = 'ollama/qwen3.5:4b-q4_K_M';
 export const QWEN_TAG = 'qwen3.5:4b-q4_K_M';
 export const QWEN_MODEL = { id: QWEN_MODEL_ID, name: 'Qwen 3.5 4B', short: 'Qwen 3.5 4B', local: true, downloadable: true };
-const root = join(homedir(), '.docuflex', 'ollama');
+const root = join(localDataDirectory, 'ollama');
 const modelsDirectory = join(root, 'models');
 const manifestPath = join(modelsDirectory, 'manifests', 'registry.ollama.ai', 'library', 'qwen3.5', '4b-q4_K_M');
 /** @type {{ child: import('node:child_process').ChildProcess | null; url: string; starting: Promise<string> | null; download: { phase: string; status: string; received: number; total: number; error: string }; task: Promise<void> | null; abort: AbortController | null; acceleration?: any; shutdownInstalled?: boolean }} */

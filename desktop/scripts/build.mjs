@@ -1,3 +1,4 @@
+import { signSandboxApp } from './sign-macos-sandbox.mjs';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -41,3 +42,9 @@ execFileSync(process.execPath, [tauriCli, 'build', '--verbose', '--bundles', bun
   env: buildEnvironment,
   stdio: 'inherit'
 });
+
+if (process.platform === 'darwin') {
+  const product = process.env.DOCUFLEX_VARIANT === 'redesign' ? 'Docuflex Redesign' : 'Docuflex';
+  const target = process.env.CARGO_TARGET_DIR ? resolve(process.env.CARGO_TARGET_DIR) : join(desktopRoot, 'src-tauri/target');
+  await signSandboxApp(join(target, 'release/bundle/macos', `${product}.app`));
+}

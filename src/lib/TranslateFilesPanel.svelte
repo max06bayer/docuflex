@@ -1,4 +1,5 @@
 <script>
+  import { requestCloudAiPermission } from '#lib/cloud-ai-permission.js';
   import { openTranslationDownload } from '#lib/translation-download.js';
   import ModelOption from '#lib/ModelOption.svelte';
   import { QWEN_MODEL_ID, openQwenDownload } from '#lib/qwen-download.js';
@@ -204,6 +205,7 @@
       onNeedKey();
       return;
     }
+    if (!(await requestCloudAiPermission(aiModel)) || translating) return;
     rememberTranslationLanguages(sourceLanguage, targetLanguage);
     error = '';
     result = null;
