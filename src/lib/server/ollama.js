@@ -40,7 +40,10 @@ if (!state.shutdownInstalled) {
 async function runtimePath() {
   if (!localQwenPlatform() || !mcpAvailable()) return null;
   if (process.platform !== 'darwin') return downloadedRuntime(root);
-  for (const path of [resolve('runtime/ollama/ollama'), resolve('desktop/src-tauri/resources/runtime/ollama/ollama')]) {
+  const candidates = process.env.DOCUFLEX_DISTRIBUTION === 'app-store'
+    ? [resolve('runtime/ollama/ollama')]
+    : [resolve('runtime/ollama/ollama'), resolve('desktop/src-tauri/resources/runtime/ollama/ollama')];
+  for (const path of candidates) {
     try { await access(path, constants.X_OK); return path; } catch {}
   }
   return null;

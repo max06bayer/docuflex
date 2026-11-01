@@ -7,7 +7,7 @@
   import { fly } from 'svelte/transition';
   import { applyTheme, currentTheme } from '#lib/theme.js';
   import { removeVisitorKey, saveVisitorKey } from '#lib/ai-web.js';
-  import { checkForUpdate, isDesktopApp } from '#lib/updater.js';
+  import { checkForUpdate, isDesktopApp, supportsDirectUpdates } from '#lib/updater.js';
 
   /** @type {() => void} */
   export let onClose = () => {};
@@ -21,6 +21,7 @@
   export let onAiKeyChange = () => {};
   let theme = currentTheme();
   const desktop = isDesktopApp();
+  const directUpdates = supportsDirectUpdates();
   /** @param {'light' | 'dark'} next */
   function chooseTheme(next) {
     theme = next;
@@ -192,7 +193,7 @@
       </div>
     </section>
     <section class="settings-section" aria-label="About">
-      {#if desktop}
+      {#if directUpdates}
         <button class="settings-row settings-link" type="button" onclick={() => checkForUpdate({ manual: true })}>Update</button>
       {/if}
       {#if desktop && aiStatus?.sandboxed}

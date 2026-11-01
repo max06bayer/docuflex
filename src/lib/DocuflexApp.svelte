@@ -15,7 +15,7 @@
   import HomeProtectPanel from '#lib/HomeProtectPanel.svelte';
   import QuickToolPagesPanel from '#lib/QuickToolPagesPanel.svelte';
   import SettingsPanel from '#lib/SettingsPanel.svelte';
-  import { update, checkForUpdate, downloadUpdate, installUpdate, dismissUpdate, isDesktopApp } from '#lib/updater.js';
+  import { update, checkForUpdate, downloadUpdate, installUpdate, dismissUpdate, isDesktopApp, supportsDirectUpdates } from '#lib/updater.js';
   import McpPanel from '#lib/McpPanel.svelte';
   import AiChatPanel from '#lib/AiChatPanel.svelte';
   import TranslateFilesPanel from '#lib/TranslateFilesPanel.svelte';
@@ -963,7 +963,7 @@
 
   onMount(() => {
     // The desktop app looks for a newer release on every start.
-    if (isDesktopApp()) void checkForUpdate();
+    if (supportsDirectUpdates()) void checkForUpdate();
     isWebsite = !document.documentElement.dataset.docuflexDesktop;
     const handleHistoryBack = () => {
       if (!isWebsite || !documentHistoryEntry) return;

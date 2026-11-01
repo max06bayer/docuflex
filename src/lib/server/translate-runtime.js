@@ -48,7 +48,7 @@ let speedSamples = [];
  * never installs the engine at runtime (scripts/install-python-document-tools.sh does).
  */
 export function autoInstallEnabled() {
-  return env.DOCUFLEX_TRANSLATE_AUTO_INSTALL === '1';
+  return process.env.DOCUFLEX_DISTRIBUTION !== 'app-store' && env.DOCUFLEX_TRANSLATE_AUTO_INSTALL === '1';
 }
 
 /** @param {string} directory */
@@ -64,6 +64,10 @@ async function hasRuntime(directory) {
 
 /** @returns {Promise<string | null>} */
 export async function findRuntime() {
+  if (process.env.DOCUFLEX_DISTRIBUTION === 'app-store') {
+    const bundled = join(process.cwd(), 'runtime/python/lib/python3.12/site-packages');
+    return await hasRuntime(bundled) ? bundled : null;
+  }
   const configured = env.LOCAL_TRANSLATE_PYTHONPATH?.trim();
   if (configured) return configured;
   for (const candidate of [join(process.cwd(), '.document-python'), USER_RUNTIME]) {
@@ -130,7 +134,7 @@ export async function translationStatus(source, target) {
     engineReady: Boolean(runtime),
     modelReady,
     // The desktop translates on the user's own computer; the hosted build on its server.
-    local: autoInstallEnabled(),
+    local: process.env.DOCUFLEX_DISTRIBUTION === 'app-store' || autoInstallEnabled(),
     downloadBytes: modelReady ? 0 : await estimatedDownloadBytes(missing, !runtime),
     // Without the engine only the desktop can fetch it; models can be fetched wherever the engine exists.
     canDownload: Boolean(runtime) || autoInstallEnabled(),
@@ -248,7 +252,10 @@ async function runDownload(state, source, target) {
   }
   for (const file of files.filter((item) => item.path.endsWith('.argosmodel'))) {
     await mkdir(PACKAGE_DIRECTORY, { recursive: true });
-    await run(python, ['-c', 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])', file.path, PACKAGE_DIRECTORY]);
+    const unpack = process.env.DOCUFLEX_DISTRIBUTION === 'app-store'
+      ? [join(process.cwd(), 'scripts/install-model-data.py'), file.path, PACKAGE_DIRECTORY]
+      : ['-c', 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])', file.path, PACKAGE_DIRECTORY];
+    await run(python, unpack);
     await rm(file.path, { force: true });
   }
   if ((await missingModels(source, target)).length) throw new DownloadError('The language model was downloaded but could not be installed.');

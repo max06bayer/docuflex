@@ -25,14 +25,14 @@ export async function machType(path) {
   } finally { await file.close(); }
 }
 
-export async function signSandboxApp(appPath, identity = process.env.APPLE_SIGNING_IDENTITY || '-') {
+export async function signSandboxApp(appPath, identity = process.env.APPLE_SIGNING_IDENTITY || '-', options = {}) {
   if (process.platform !== 'darwin') throw new Error('macOS signing must run on a Mac.');
   const app = resolve(appPath);
   const executableName = execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleExecutable', join(app, 'Contents/Info.plist')], { encoding: 'utf8' }).trim();
   const main = join(app, 'Contents/MacOS', executableName);
   // Tauri's resource glob dereferences links. Restore the staged topology so
   // framework versions and library aliases remain genuine macOS bundles.
-  const resourceSource = join(desktop, 'src-tauri/resources');
+  const resourceSource = options.resourcesRoot || join(desktop, 'src-tauri/resources');
   const resourceTarget = join(app, 'Contents/Resources/resources');
   async function restoreLinks(source, target) {
     for (const entry of await readdir(source, { withFileTypes: true })) {
@@ -78,10 +78,11 @@ export async function signSandboxApp(appPath, identity = process.env.APPLE_SIGNI
       ...(java || node || office ? ['com.apple.security.cs.allow-jit'] : []),
       ...(java || office ? ['com.apple.security.cs.allow-unsigned-executable-memory'] : []),
       // Ad-hoc signatures have no Team ID for same-team library validation.
-      // Real-identity builds need this exception only for Python extensions.
+      // Direct builds need this exception for downloaded Python extensions.
+      // Store extensions are bundled and signed with the app's identity.
       // Optional translation wheels contain native Python extensions. They
       // remain sandboxed; downloaded-code/store eligibility is a separate gate.
-      ...((python || identity === '-') ? ['com.apple.security.cs.disable-library-validation'] : [])
+      ...(((python && !options.appStore) || identity === '-') ? ['com.apple.security.cs.disable-library-validation'] : [])
     ];
     const key = extras.join(',');
     if (!entitlementFiles.has(key)) {

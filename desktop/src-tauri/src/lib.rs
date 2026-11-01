@@ -18,7 +18,10 @@ use tauri::{webview::DownloadEvent, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri::{LogicalPosition, TitleBarStyle};
 use url::Url;
 
+#[cfg(not(feature = "mac-app-store"))]
 mod updater;
+#[cfg(all(feature = "mac-app-store", not(target_os = "macos")))]
+compile_error!("The mac-app-store feature is only supported on macOS.");
 #[cfg(target_os = "macos")]
 mod sandbox;
 
@@ -361,23 +364,32 @@ fn spawn_services(
     resource_root: &Path,
     log_directory: &Path,
 ) -> Result<Vec<Child>, Box<dyn std::error::Error>> {
-    let java = runtime_executable(resource_root, "java", "java");
+    #[cfg(not(feature = "mac-app-store"))]
+    let backend_binary = runtime_executable(resource_root, "java", "java");
+    #[cfg(feature = "mac-app-store")]
+    let backend_binary = runtime_executable(resource_root, "pdf-backend", "docuflex-pdf-backend");
     let node = runtime_executable(resource_root, "node", "node");
     let pdf2html = resource_root.join("runtime/pdf2htmlEX");
     let ocr = resource_root.join("runtime/ocr");
     let python = python_executable(resource_root);
     let document_converter = office_executable(resource_root);
     let parent_pid = std::process::id().to_string();
-    #[cfg(target_os = "windows")]
+    #[cfg(all(target_os = "windows", not(feature = "mac-app-store")))]
     let classpath = "backend/out;backend/lib/pdfbox-app-3.0.8.jar";
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(all(not(target_os = "windows"), not(feature = "mac-app-store")))]
     let classpath = "backend/out:backend/lib/pdfbox-app-3.0.8.jar";
     let mut backend_arguments = Vec::new();
+    #[cfg(feature = "mac-app-store")]
+    // Native Image signal dispatch uses a named semaphore forbidden by the
+    // App Sandbox. The app supervisor owns termination; raster children also
+    // watch their parent and exit if it disappears.
+    backend_arguments.push(OsString::from("-XX:-EnableSignalHandling"));
     #[cfg(target_os = "macos")]
     {
         backend_arguments.push(OsString::from(format!("-Duser.home={}", sandbox::home().display())));
         backend_arguments.push(OsString::from(format!("-Djava.io.tmpdir={}", sandbox::temporary_directory().display())));
     }
+    #[cfg(not(feature = "mac-app-store"))]
     backend_arguments.extend([
         OsString::from("-cp"),
         OsString::from(classpath),
@@ -385,10 +397,16 @@ fn spawn_services(
     ]);
     let (backend_stdout, backend_stderr) = log_file(log_directory, "pdf-backend")?;
     let mut backend_command =
-        supervised_command(resource_root, &parent_pid, &java, &backend_arguments);
+        supervised_command(resource_root, &parent_pid, &backend_binary, &backend_arguments);
     isolate_service_environment(&mut backend_command);
     #[cfg(target_os = "macos")]
     sandbox::configure_service(&mut backend_command);
+    #[cfg(feature = "mac-app-store")]
+    backend_command
+        .env("DOCUFLEX_NATIVE_RASTER_PYTHON", &python)
+        .env("DOCUFLEX_NATIVE_RASTER_SCRIPT", resource_root.join("scripts/pdf-native-raster.py"))
+        .env("PYTHONPATH", resource_root.join("scripts"))
+        .env("PYTHONDONTWRITEBYTECODE", "1");
     let backend = backend_command
         .current_dir(resource_root)
         .env("PDF_BACKEND_HOST", "127.0.0.1")
@@ -425,7 +443,8 @@ fn spawn_services(
         .env("DOCUFLEX_MCP", "1")
         // The bundle leaves out the ~1 GB translation engine; the server
         // downloads it into ~/.cache/docuflex the first time Translate runs.
-        .env("DOCUFLEX_TRANSLATE_AUTO_INSTALL", "1")
+        .env("DOCUFLEX_TRANSLATE_AUTO_INSTALL", if cfg!(feature = "mac-app-store") { "0" } else { "1" })
+        .env("DOCUFLEX_DISTRIBUTION", if cfg!(feature = "mac-app-store") { "app-store" } else { "direct" })
         // The desktop invokes only its checksum-pinned bundled tools. Linux's
         // RLIMIT_NPROC counts every process owned by the logged-in user, so the
         // server profile's limit can prevent pdf2htmlEX from forking on a
@@ -610,8 +629,9 @@ fn set_native_window_buttons_hidden(window: &tauri::WebviewWindow, hidden: bool)
     });
 }
 
-fn editor_initialization_script() -> &'static str {
-    include_str!("../../runtime/chrome.js")
+fn editor_initialization_script() -> String {
+    let distribution = if cfg!(feature = "mac-app-store") { "app-store" } else { "direct" };
+    format!("window.__DOCUFLEX_DISTRIBUTION__ = '{distribution}';\n{}", include_str!("../../runtime/chrome.js"))
 }
 
 /// Always shows the native save dialog, then writes the decoded bytes to
@@ -798,7 +818,7 @@ pub fn run() {
     let services_for_setup = Arc::clone(&services);
     let services_for_exit = Arc::clone(&services);
 
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .manage(Arc::clone(&pending_pdf))
         .on_window_event(|window, event| {
             #[cfg(target_os = "macos")]
@@ -820,7 +840,10 @@ pub fn run() {
                     notify_pending_pdf(window.app_handle());
                 }
             }
-        })
+        });
+    // Store binaries do not contain or register the GitHub updater.
+    #[cfg(not(feature = "mac-app-store"))]
+    let builder = builder
         .manage(updater::UpdateState::default())
         .invoke_handler(tauri::generate_handler![
             take_pending_pdf,
@@ -834,8 +857,19 @@ pub fn run() {
             updater::docuflex_update_check,
             updater::docuflex_update_download,
             updater::docuflex_update_install
-        ])
-        .plugin(tauri_plugin_single_instance::init(
+        ]);
+    #[cfg(feature = "mac-app-store")]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        take_pending_pdf,
+        start_window_drag,
+        macos_resize_window,
+        docuflex_save_prompt,
+        docuflex_save_overwrite,
+        docuflex_print_pdf,
+        docuflex_import_local_data,
+        docuflex_read_local_file
+    ]);
+    let app = builder.plugin(tauri_plugin_single_instance::init(
             move |app, arguments, cwd| {
                 if let Some(path) = pdf_path_from_arguments(arguments, Path::new(&cwd)) {
                     if let Ok(mut pending) = pending_pdf_for_instance.lock() {

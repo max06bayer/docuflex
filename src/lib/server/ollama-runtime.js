@@ -79,6 +79,7 @@ export async function extractRuntimeArchive(archive,folder,python,script,signal)
  * @param {string} root @param {AbortSignal} signal @param {(state:{status:string;received:number;total:number})=>void} progress
  */
 export async function ensureDownloadedRuntime(root,signal,progress) {
+  if (process.env.DOCUFLEX_DISTRIBUTION === 'app-store') throw new Error('The local runtime must be bundled with the Store app. Reinstall Docuflex.');
   const vendors=await detectGpuVendors();
   const plan=runtimePlan(process.platform,process.arch,vendors);
   if(!plan)throw new Error('Local Qwen is unavailable on this operating system or architecture.');

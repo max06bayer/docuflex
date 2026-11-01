@@ -768,7 +768,7 @@ public class DocuflexPdfServer {
       throw new IllegalArgumentException("Invalid raster image data.", error);
     }
     if (imageBytes.length > 48 * 1024 * 1024) throw new IllegalArgumentException("Raster image is too large.");
-    PDImageXObject image = JPEGFactory.createFromByteArray(document, imageBytes);
+    PDImageXObject image = NativeRasterBridge.enabled() ? NativeRasterBridge.decode(imageBytes).embed(document) : JPEGFactory.createFromByteArray(document, imageBytes);
 
     List<PDAnnotation> widgets = new ArrayList<>();
     for (PDAnnotation annotation : page.getAnnotations()) {
@@ -1059,8 +1059,8 @@ public class DocuflexPdfServer {
     }
 
     Set<COSBase> redactedWidgets = Collections.newSetFromMap(new IdentityHashMap<>());
-    PDFRenderer renderer = new PDFRenderer(document);
-    renderer.setSubsamplingAllowed(false);
+    PDFRenderer renderer = NativeRasterBridge.enabled() ? null : new PDFRenderer(document);
+    if (renderer != null) renderer.setSubsamplingAllowed(false);
     for (Map.Entry<Integer, List<AnnotationStroke>> entry : redactionsByPage.entrySet()) {
       int pageIndex = entry.getKey();
       PDPage page = document.getPage(pageIndex);
@@ -1102,13 +1102,20 @@ public class DocuflexPdfServer {
         }
       }
 
-      BufferedImage rendered = renderer.renderImageWithDPI(pageIndex, REDACTION_DPI, ImageType.RGB);
-      paintRedactions(rendered, display, polygons, black);
-      PDImageXObject pageImage = LosslessFactory.createFromImage(document, rendered);
-      if (pageImage.getCOSObject().getLength() > REDACTION_LOSSLESS_LIMIT) {
-        pageImage = JPEGFactory.createFromImage(document, rendered, 0.9f);
+      PDImageXObject pageImage;
+      if (NativeRasterBridge.enabled()) {
+        NativeRasterBridge.Image raster = NativeRasterBridge.render(document, pageIndex, REDACTION_DPI, display, polygons, black, true);
+        boxes.addAll(raster.redactionBounds());
+        pageImage = raster.embed(document);
+      } else {
+        BufferedImage rendered = renderer.renderImageWithDPI(pageIndex, REDACTION_DPI, ImageType.RGB);
+        paintRedactions(rendered, display, polygons, black);
+        pageImage = LosslessFactory.createFromImage(document, rendered);
+        if (pageImage.getCOSObject().getLength() > REDACTION_LOSSLESS_LIMIT) {
+          pageImage = JPEGFactory.createFromImage(document, rendered, 0.9f);
+        }
+        rendered.flush();
       }
-      rendered.flush();
 
       List<PageGlyph> kept = new ArrayList<>();
       for (PageGlyph glyph : glyphs) {
@@ -1892,9 +1899,11 @@ public class DocuflexPdfServer {
       int pageIndex,
       PDPage page,
       List<AnnotationStroke> shapes) throws IOException {
-    BufferedImage blurSource = shapes.stream().anyMatch(shape -> styleFlag(shape, 18, false) && styleFlag(shape, 19, false))
-        ? new PDFRenderer(document).renderImageWithDPI(pageIndex, 144, ImageType.RGB)
-        : null;
+    boolean needsBlur = shapes.stream().anyMatch(shape -> styleFlag(shape, 18, false) && styleFlag(shape, 19, false));
+    BufferedImage blurSource = needsBlur && !NativeRasterBridge.enabled()
+        ? new PDFRenderer(document).renderImageWithDPI(pageIndex, 144, ImageType.RGB) : null;
+    NativeRasterBridge.Image nativeBlurSource = needsBlur && NativeRasterBridge.enabled()
+        ? NativeRasterBridge.render(document, pageIndex, 144, displaySize(page), List.of(), List.of(), false) : null;
     try (PDPageContentStream content = new PDPageContentStream(
         document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
       content.setNonStrokingColor(1f, 0.302f, 0.333f);
@@ -1904,8 +1913,9 @@ public class DocuflexPdfServer {
 
       for (AnnotationStroke shape : shapes) {
         if (shape.width <= 0 || shape.height <= 0) continue;
-        if (blurSource != null && styleFlag(shape, 18, false) && styleFlag(shape, 19, false)) {
-          drawBackgroundBlur(document, content, page, shape, blurSource);
+        if ((blurSource != null || nativeBlurSource != null) && styleFlag(shape, 18, false) && styleFlag(shape, 19, false)) {
+          if (nativeBlurSource != null) drawNativeBackgroundBlur(document, content, page, shape, nativeBlurSource);
+          else drawBackgroundBlur(document, content, page, shape, blurSource);
         }
         drawObjectShadow(content, page, shape);
         applyObjectStyle(content, shape);
@@ -2019,6 +2029,27 @@ public class DocuflexPdfServer {
         topLeft.y - bottomLeft.y,
         bottomLeft.x,
         bottomLeft.y));
+    content.restoreGraphicsState();
+  }
+
+  private static void drawNativeBackgroundBlur(
+      PDDocument document, PDPageContentStream content, PDPage page, AnnotationStroke shape,
+      NativeRasterBridge.Image source) throws IOException {
+    int left = Math.max(0, Math.min(source.width() - 1, (int) Math.floor(shape.x * source.width())));
+    int top = Math.max(0, Math.min(source.height() - 1, (int) Math.floor(shape.y * source.height())));
+    int right = Math.max(left + 1, Math.min(source.width(), (int) Math.ceil((shape.x + shape.width) * source.width())));
+    int bottom = Math.max(top + 1, Math.min(source.height(), (int) Math.ceil((shape.y + shape.height) * source.height())));
+    int radius = Math.max(1, Math.min(15, (int) Math.round(styleValue(shape, 20, 8) * 0.75)));
+    PDImageXObject image = NativeRasterBridge.blur(source, left, top, right, bottom, radius).embed(document);
+    content.saveGraphicsState();
+    PDExtendedGraphicsState graphicsState = new PDExtendedGraphicsState();
+    float opacity = (float) Math.max(0, Math.min(1, styleValue(shape, 6, 1)));
+    graphicsState.setNonStrokingAlphaConstant(opacity); graphicsState.setStrokingAlphaConstant(opacity);
+    content.setGraphicsStateParameters(graphicsState);
+    appendClosedObjectPath(content, page, shape); content.clip();
+    PdfPoint bottomLeft = shapePoint(page, shape, 0, 1), bottomRight = shapePoint(page, shape, 1, 1), topLeft = shapePoint(page, shape, 0, 0);
+    content.drawImage(image, new Matrix(bottomRight.x-bottomLeft.x, bottomRight.y-bottomLeft.y,
+        topLeft.x-bottomLeft.x, topLeft.y-bottomLeft.y, bottomLeft.x, bottomLeft.y));
     content.restoreGraphicsState();
   }
 
@@ -2211,7 +2242,7 @@ public class DocuflexPdfServer {
     if (imageBytes.length > 12 * 1024 * 1024) {
       throw new IOException("Placed image is too large.");
     }
-    PDImageXObject image = PDImageXObject.createFromByteArray(document, imageBytes, "placed-image.png");
+    PDImageXObject image = NativeRasterBridge.enabled() ? NativeRasterBridge.decode(imageBytes).embed(document) : PDImageXObject.createFromByteArray(document, imageBytes, "placed-image.png");
     PdfPoint bottomLeft = shapePoint(page, shape, 0, 1);
     PdfPoint bottomRight = shapePoint(page, shape, 1, 1);
     PdfPoint topLeft = shapePoint(page, shape, 0, 0);

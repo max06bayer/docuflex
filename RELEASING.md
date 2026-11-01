@@ -81,3 +81,10 @@ runtime smoke tests. Preserve the existing app and local data until the new
 build has passed startup/document checks. Add the macOS artifact and its own
 source-commit provenance to the same draft, then recompute the complete checksum
 list. Never publish a mix of old and new platform binaries as the final release.
+
+## Mac App Store
+
+The separate Store build and its signing/submission gates are documented in
+[desktop/APP_STORE.md](desktop/APP_STORE.md). It does not replace the GitHub
+release workflow or publish the 0.9.6 draft. Local Store QA builds must not be
+installed over an existing Docuflex installation or uploaded as signed releases.

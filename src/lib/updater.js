@@ -19,6 +19,11 @@ export function isDesktopApp() {
   return Boolean(tauri()?.core?.invoke);
 }
 
+/** Native distribution identity is injected before the editor loads. */
+export function supportsDirectUpdates() {
+  return isDesktopApp() && /** @type {any} */ (window).__DOCUFLEX_DISTRIBUTION__ !== 'app-store';
+}
+
 /** @param {unknown} error */
 function message(error) {
   return typeof error === 'string' ? error : error instanceof Error ? error.message : 'Something went wrong.';
@@ -31,6 +36,7 @@ function message(error) {
  * @param {{ manual?: boolean }} [options]
  */
 export async function checkForUpdate({ manual = false } = {}) {
+  if (!supportsDirectUpdates()) return;
   const api = tauri();
   if (!api?.core?.invoke) return;
   let busy = false;
@@ -49,6 +55,7 @@ export async function checkForUpdate({ manual = false } = {}) {
 }
 
 export async function downloadUpdate() {
+  if (!supportsDirectUpdates()) return;
   const api = tauri();
   if (!api?.core?.invoke) return;
   update.update((state) => ({ ...state, phase: 'downloading', received: 0, total: 0, error: '', visible: true }));
@@ -67,6 +74,7 @@ export async function downloadUpdate() {
 }
 
 export async function installUpdate() {
+  if (!supportsDirectUpdates()) return;
   const api = tauri();
   if (!api?.core?.invoke) return;
   update.update((state) => ({ ...state, phase: 'installing', visible: true }));

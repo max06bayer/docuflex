@@ -198,12 +198,19 @@ async function complete({ key, model, messages, signal, onProgress, onReasoning,
 export async function compileLatex(tex, files, signal, onLog = () => {}) {
   const engine = await tectonicPath();
   if (!engine) throw new Error('The LaTeX engine is not installed.');
+  /** @type {string[]} */
+  const bundleArgs = [];
+  if (process.env.DOCUFLEX_DISTRIBUTION === 'app-store') {
+    const bundle = join(process.cwd(), 'runtime/tectonic/texlive-v33.zip');
+    await access(bundle, constants.R_OK).catch(() => { throw new Error('The bundled LaTeX resources are missing.'); });
+    bundleArgs.push('--bundle', bundle);
+  }
   const folder = await mkdtemp(join(tmpdir(), 'docuflex-latex-'));
   try {
     await writeFile(join(folder, 'main.tex'), tex);
     await Promise.all(files.map((file) => writeFile(join(folder, file.name), file.bytes)));
     const log = await new Promise((resolvePromise, reject) => {
-      const child = spawn(engine, ['-X', 'compile', '--untrusted', '--keep-logs', 'main.tex'], { cwd: folder, stdio: ['ignore', 'pipe', 'pipe'] });
+      const child = spawn(engine, ['-X', 'compile', '--untrusted', ...bundleArgs, '--keep-logs', 'main.tex'], { cwd: folder, stdio: ['ignore', 'pipe', 'pipe'] });
       let output = '';
       /** @param {Buffer} chunk */
       const collect = (chunk) => {
