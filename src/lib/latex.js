@@ -46,6 +46,7 @@ export function describeLatexStage(value) {
   if (!value) return '';
   const round = value.round ? ` ${value.round}` : '';
   if (value.stage === 'resetting') return 'Retrying with fresh context…';
+  if (value.stage === 'thinking') return 'AI is planning the document…';
   if (value.stage === 'reading') return `Reading page ${value.page ?? 1} of ${value.pages ?? 1}…`;
   if (value.stage === 'sending') return 'Uploading pages…';
   if (value.stage === 'writing') return value.characters ? `Writing LaTeX · ${formatCount(value.characters)}` : 'AI is studying the pages…';
@@ -61,7 +62,8 @@ export function describeLatexStage(value) {
 /** A sentence on what is happening right now, for the panel's info area. @param {LatexProgress | null} value */
 export function explainLatexStage(value) {
   if (!value) return '';
-  if (value.stage === 'resetting') return 'The local model reached its response limit. Discarding the unfinished draft and retrying with compact formatting.';
+  if (value.stage === 'resetting') return 'The model reached its response limit. Discarding the unfinished draft and retrying with compact formatting.';
+  if (value.stage === 'thinking') return 'The model is reasoning about the document before writing the LaTeX.';
   if (value.stage === 'reading') return 'Rendering each page and reading its text and fonts, so the AI sees exactly what you see.';
   if (value.stage === 'sending') return 'Sending the page images and text to the AI model.';
   if (value.stage === 'writing') return value.characters ? 'The AI is writing the full LaTeX source: text, formulas, tables and vector figures.' : 'The AI reads every page before it starts writing. Large documents take a while.';

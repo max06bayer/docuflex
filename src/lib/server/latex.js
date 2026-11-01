@@ -1,3 +1,4 @@
+import { documentCompletionOptions, readDocumentCompletion } from '#lib/server/latex-completion.js';
 import { applyLatexPatches, LATEX_REPAIR_RULES } from '#lib/server/latex-patches.js';
 import { QWEN_MODEL_ID, qwenChat } from '#lib/server/ollama.js';
 import { spawn } from 'node:child_process';
@@ -21,7 +22,6 @@ const MAX_ATTEMPTS = 12;
 const REVIEW_ROUNDS = 2;
 /** Pages compared per review round (original next to result). */
 const REVIEW_PAGES = 8;
-const MAX_OUTPUT_TOKENS = 32_000;
 /** Page renders sent to the model; later pages go as text only. */
 export const MAX_PAGE_IMAGES = 24;
 
@@ -114,6 +114,8 @@ function systemPrompt(translateTo = '', match = false) {
     translateTo ? `- Set up babel/polyglossia for ${translateTo}.` : '- Keep the document language of the source. Use babel/polyglossia accordingly.',
     '- Long tables must break across pages (longtable or tcolorbox breakable). Boxes holding long text must be breakable.',
     '- Make sure every figure fits the text width (\\linewidth) and every environment is closed. Escape special characters (% & $ # _ { } ~ ^ \\) in text.',
+    '- Load amsmath/amssymb before a replacement math-font package such as newtxmath or newpxmath. Do not reload amssymb after that package: it can redefine \\Bbbk and fail compilation.',
+    '- For reusable tcolorbox environments, prefer a plain optional key list: \\newtcolorbox{docbox}[1][]{colback=white,colframe=black,#1}, called as \\begin{docbox}[title={A title}]. Never pass a bare title as a key list. Put colours in coltext/colframe or an explicit \\color command, not a caption font key.',
     '- Prefer robust constructs over fragile hacks. The document must compile on the first try.'
   ].join('\n');
 }
@@ -157,9 +159,9 @@ export function extractLatex(reply) {
 
 /**
  * One streamed completion; reports the length of the answer as it grows.
- * @param {{ key: string; model: string; messages: any[]; signal: AbortSignal; onProgress: (characters: number) => void; repair?: boolean }} options
+ * @param {{ key: string; model: string; messages: any[]; signal: AbortSignal; onProgress: (characters: number) => void; onReasoning: (characters: number) => void; repair?: boolean; retry?: boolean }} options
  */
-async function complete({ key, model, messages, signal, onProgress, repair = false }) {
+async function complete({ key, model, messages, signal, onProgress, onReasoning, repair = false, retry = false }) {
   const chosen = AI_MODELS.some((candidate) => candidate.id === model) ? model : AI_MODEL;
   const response = model === QWEN_MODEL_ID ? await qwenChat(messages, [], signal, { document: true, repair }) : await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
@@ -173,8 +175,7 @@ async function complete({ key, model, messages, signal, onProgress, repair = fal
     body: JSON.stringify({
       ...modelRouting(chosen),
       stream: true,
-      max_tokens: repair ? 2048 : MAX_OUTPUT_TOKENS,
-      reasoning: { max_tokens: repair ? 1024 : 4096 },
+      ...documentCompletionOptions(chosen, repair, retry),
       messages
     })
   });
@@ -183,39 +184,10 @@ async function complete({ key, model, messages, signal, onProgress, repair = fal
     const message = details?.error?.message || `The AI service answered with HTTP ${response.status}.`;
     throw new Error(response.status === 401 ? 'OpenRouter rejected the API key. Check it in Settings.' : message);
   }
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let text = '';
-  let lastReport = 0;
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let newline;
-    while ((newline = buffer.indexOf('\n')) >= 0) {
-      const line = buffer.slice(0, newline).trim();
-      buffer = buffer.slice(newline + 1);
-      if (!line.startsWith('data:')) continue;
-      const data = line.slice(5).trim();
-      if (data === '[DONE]') continue;
-      try {
-        const event = JSON.parse(data);
-        if (event.error) throw new Error(event.error.message || 'The AI service failed.');
-        if (event.choices?.[0]?.finish_reason === 'length') throw new Error('The model reached its output limit before finishing.');
-        const delta = event.choices?.[0]?.delta?.content;
-        if (typeof delta === 'string') text += delta;
-      } catch (failure) {
-        if (failure instanceof Error && !(failure instanceof SyntaxError)) throw failure;
-      }
-    }
-    if (text.length - lastReport > 400) {
-      lastReport = text.length;
-      onProgress(text.length);
-    }
-  }
-  onProgress(text.length);
-  return text;
+  return readDocumentCompletion(response, onProgress, onReasoning, (summary) => {
+    // Counts and routing only: never log document text, reasoning or credentials.
+    console.info('[latex] completion', JSON.stringify(summary));
+  }, chosen.startsWith('xiaomi/mimo-') ? 64_000 : Infinity);
 }
 
 /**
@@ -327,6 +299,7 @@ export async function convertToLatex({ pages, model, style, instructions, name, 
     let tex = '';
     let compileLog = '';
     let rewriteAllowed = false;
+    let retriedOutputLimit = false;
     /** Failed versions must not cycle back into the compiler. */
     const failedSources = new Set();
     /** @param {string} feedback */
@@ -336,20 +309,22 @@ export async function convertToLatex({ pages, model, style, instructions, name, 
         { role: 'user', content: `Compiling the current source with Tectonic (XeTeX) failed:\n${compileLog}\n\n${feedback ? `The last patch was NOT applied: ${feedback}\nThe current source above is unchanged.\n\n` : ''}${rewriteAllowed ? 'A full rewrite is now authorized for this structural repair. Return the complete corrected document in one ```latex block, preserving all content and design.' : LATEX_REPAIR_RULES}` });
     };
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-      const writing = attempt === 1 ? stage : 'fixing';
+      const writing = tex ? 'fixing' : stage;
       onEvent({ stage: writing, attempt, round, characters: 0 });
       console.info('[latex] generation', JSON.stringify({ attempt, round, mode: tex ? (rewriteAllowed ? 'rewrite' : 'patch') : 'document' }));
       let reply;
       try {
-        reply = await complete({ key: apiKey ?? '', model, messages, signal, repair: Boolean(tex) && !rewriteAllowed, onProgress: (characters) => onEvent({ stage: writing, attempt, round, characters }) });
+        reply = await complete({ key: apiKey ?? '', model, messages, signal, repair: Boolean(tex) && !rewriteAllowed, retry: retriedOutputLimit, onProgress: (characters) => onEvent({ stage: writing, attempt, round, characters }), onReasoning: (characters) => onEvent({ stage: 'thinking', attempt, round, characters }) });
       } catch (error) {
-        if (tex && !rewriteAllowed && attempt < MAX_ATTEMPTS && error instanceof Error && error.message.includes('output limit')) {
+        if (tex && !rewriteAllowed && attempt < MAX_ATTEMPTS && error instanceof Error && /output limit|planning limit/.test(error.message)) {
+          retriedOutputLimit = true;
           repairMessages('The repair exceeded its small response budget. Return only the few broken lines and their replacements, or request REWRITE_REQUIRED with a short reason.');
           continue;
         }
         // One bounded recovery: forget generated drafts and compiler/review history.
         // Reasoning is never included in complete()'s messages in the first place.
-        if (model !== QWEN_MODEL_ID || attempt !== 1 || !(error instanceof Error) || !error.message.includes('output limit')) throw error;
+        if (tex || retriedOutputLimit || !(error instanceof Error) || !/output limit|planning limit/.test(error.message)) throw error;
+        retriedOutputLimit = true;
         messages.splice(0, messages.length, system, source, { role: 'user', content: 'The previous response exceeded the output limit and has been discarded. Write a compact but complete LaTeX document: preserve all source content, use concise markup and simple layouts, and avoid extra decorative graphics. Finish with \\end{document}.' });
         onEvent({ stage: 'resetting', attempt, round });
         continue;
@@ -396,6 +371,9 @@ export async function convertToLatex({ pages, model, style, instructions, name, 
       // Send only the current source and current diagnostic; no failed drafts accumulate.
       failedSources.add(tex);
       compileLog = result.log;
+      if (result.log.includes('Bbbk') && /already defined/.test(result.log) && /newtxmath|newpxmath/.test(tex)) {
+        compileLog += '\nDiagnosis: amssymb and the replacement math-font package define the same symbol. Move the amsmath/amssymb package load BEFORE newtxmath/newpxmath, or remove redundant amssymb if unused. A workaround AFTER the failing package load cannot help. Edit this document preamble, not the installed .sty file.';
+      }
       rewriteAllowed = false;
       repairMessages('');
     }
