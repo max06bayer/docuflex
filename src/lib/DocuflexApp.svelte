@@ -1514,15 +1514,15 @@
     <div class="error-toast update-toast model-download-toast" role="status" transition:scale={{ duration: 150, easing: cubicOut, start: 0.96, opacity: 0 }}>
       <div class="error-toast-body">
         {#if $qwenDownload.phase === 'downloading'}
-          <strong>Downloading Qwen 3.5 4B</strong>
+          <strong>{$qwenDownload.status?.startsWith('Downloading local runtime') || $qwenDownload.status?.startsWith('Installing the local') ? 'Preparing local GPU runtime' : 'Downloading Qwen 3.5 4B'}</strong>
           <div class="update-progress" role="progressbar" aria-label="Qwen download" aria-valuemin="0" aria-valuemax="100" aria-valuenow={$qwenDownload.total ? Math.round($qwenDownload.received / $qwenDownload.total * 100) : 0}><span style:width={`${$qwenDownload.total ? Math.min(100, $qwenDownload.received / $qwenDownload.total * 100) : 0}%`}></span></div>
           <span>{$qwenDownload.total ? `${($qwenDownload.received / 1048576).toFixed(0)} of ${($qwenDownload.total / 1048576).toFixed(0)} MB` : $qwenDownload.status || 'Starting…'}</span>
         {:else if $qwenDownload.phase === 'ready'}
-          <strong>Qwen is ready</strong><span>Saved on this Mac. The model loads when you send a message and unloads after five minutes idle.</span>
+          <strong>Qwen is ready</strong><span>Saved on this computer. The model loads when you use it and unloads when idle.</span><span>{$qwenDownload.acceleration?.label ?? 'GPU use is checked when Qwen loads.'}</span>
         {:else if $qwenDownload.phase === 'error'}
           <strong>Qwen download paused</strong><span>{$qwenDownload.error}</span>
         {:else}
-          <strong>Download Qwen 3.5 4B</strong><span>About 3.3 GB, one time. Runs entirely on this Mac. App updates keep the download; the model loads only when you use it.</span>
+          <strong>Download Qwen 3.5 4B</strong><span>About 3.3 GB for the model. {$qwenDownload.runtimeNeeded ? 'The graphics runtime will also be downloaded for this computer. ' : ''}Runs entirely locally. Downloads are kept across app updates.</span>
         {/if}
       </div>
       <div class="update-actions">

@@ -137,6 +137,7 @@ arch = x86_64
 license = custom
 depend = webkit2gtk-4.1
 depend = gtk3
+depend = vulkan-icd-loader
 depend = libayatana-appindicator
 depend = librsvg
 depend = poppler

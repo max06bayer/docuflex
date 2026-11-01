@@ -265,7 +265,7 @@
       <h3>Unavailable:</h3>
       <p>The LaTeX engine is <span>not installed</span> here. Use the Docuflex desktop app.</p>
     {:else if needsQwenDownload}
-      <h3>Local Model:</h3><p>Download <span>Qwen 3.5 4B</span> to enhance PDFs on this Mac.</p>
+      <h3>Local Model:</h3><p>Download <span>Qwen 3.5 4B</span> to enhance PDFs on this computer.</p>
     {:else if !hasKey}
       <h3>API Key Needed:</h3>
       <p>Uses <span>your OpenRouter key</span>, like the AI chat. Add it in Settings.</p>
@@ -277,7 +277,7 @@
       <p>Compiled <span>{result.file.name}</span>{result.attempts > 1 ? ` after ${result.attempts} attempts` : ''}.</p>
     {:else}
       <h3>How it Works:</h3>
-      <p>The AI reads your PDF or scan and redesigns it as a <span>professional LaTeX</span> document with charts, diagrams and tables. {selectedModel === QWEN_MODEL_ID ? 'Runs on this Mac with Qwen.' : 'Uses your API key.'}</p>
+      <p>The AI reads your PDF or scan and redesigns it as a <span>professional LaTeX</span> document with charts, diagrams and tables. {selectedModel === QWEN_MODEL_ID ? 'Runs on this computer with Qwen.' : 'Uses your API key.'}</p>
     {/if}
   </section>
 

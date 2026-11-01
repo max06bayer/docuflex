@@ -51,3 +51,12 @@ test('streams provider thinking separately from the final answer', async () => {
   assert.equal(chunks[1].choices[0].delta.content,'12');
   assert.ok(!chunks[0].choices[0].delta.content);
 });
+
+test('GPU placement is sampled once when inference actually starts, including thinking-only starts', async () => {
+  const events=[{message:{thinking:'Working'}},{message:{content:'Done'}},{done:true,done_reason:'stop'}];
+  const native=new Response(events.map(event=>JSON.stringify(event)).join('\n'));
+  let inspections=0;
+  const mapped=qwenCompletionStream(native,new AbortController().signal,()=>{},()=>{inspections++;});
+  await mapped.text();
+  assert.equal(inspections,1);
+});

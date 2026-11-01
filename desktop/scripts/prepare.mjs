@@ -249,6 +249,8 @@ async function copyApplicationResources() {
     if (file.endsWith('.py')) await cp(join(repositoryRoot, 'scripts', file), join(resourcesRoot, 'scripts', file));
   }
   await mkdir(join(resourcesRoot, 'runtime'), { recursive: true });
+  await mkdir(join(resourcesRoot, 'licenses'), { recursive: true });
+  await cp(join(desktopRoot, 'licenses', 'ollama-LICENSE.txt'), join(resourcesRoot, 'licenses', 'ollama-LICENSE.txt'));
   if (process.platform === 'win32') {
     await cp(join(desktopRoot, 'runtime', 'supervise.ps1'), join(resourcesRoot, 'runtime', 'supervise.ps1'));
   } else {

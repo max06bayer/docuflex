@@ -26,9 +26,9 @@ export async function readOllamaEvents(response, event) {
 
 /** Map native replies to the agent stream and reject incomplete/empty model turns.
  * Logs finish metadata only, never prompts, document text, images, or arguments.
- * @param {Response} response @param {AbortSignal} signal @param {() => void} [onCancel]
+ * @param {Response} response @param {AbortSignal} signal @param {() => void} [onCancel] @param {() => void} [onActivity]
  */
-export function qwenCompletionStream(response, signal, onCancel = () => {}) {
+export function qwenCompletionStream(response, signal, onCancel = () => {}, onActivity = () => {}) {
   const encoder = new TextEncoder();
   let cancelled = false;
   const stream = new ReadableStream({
@@ -36,10 +36,12 @@ export function qwenCompletionStream(response, signal, onCancel = () => {}) {
       let callsSeen = 0;
       let characters = 0;
       let completed = false;
+      let activity = false;
       const emit = (/** @type {any} */ value) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(value)}\n\n`));
       try {
         await readOllamaEvents(response, (event) => {
           const message = event.message ?? {};
+          if (!activity && (message.content || message.thinking || message.tool_calls?.length)) { activity = true; onActivity(); }
           if (typeof message.content === 'string') characters += message.content.trim().length;
           const calls = (message.tool_calls ?? []).map((/** @type {any} */ call) => ({ index: callsSeen++, id: `qwen_${crypto.randomUUID()}`, type: 'function', function: { name: call.function.name, arguments: JSON.stringify(call.function.arguments ?? {}) } }));
           if (event.done) {

@@ -48,6 +48,9 @@ jobs:
         run: |
           npm ci
           npm ci --prefix desktop
+      - name: Test local Qwen runtime management
+        shell: pwsh
+        run: node --test scripts/test-ollama-platform.mjs scripts/test-ollama-runtime.mjs scripts/test-ollama-stream.mjs
       - name: Install bundled Python conversion packages
         shell: pwsh
         run: python -m pip install --disable-pip-version-check -r scripts/requirements-conversion.txt
@@ -175,6 +178,8 @@ jobs:
         run: |
           npm ci
           npm ci --prefix desktop
+      - name: Test local Qwen runtime management
+        run: node --test scripts/test-ollama-platform.mjs scripts/test-ollama-runtime.mjs scripts/test-ollama-stream.mjs
       - name: Install bundled Python conversion packages
         run: python -m pip install --disable-pip-version-check -r scripts/requirements-conversion.txt
       - name: Verify GLib security backport

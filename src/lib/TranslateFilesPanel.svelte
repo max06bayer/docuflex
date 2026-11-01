@@ -431,7 +431,7 @@
         <h3>Unavailable:</h3>
         <p>The LaTeX engine is <span>not installed</span> here. Use the Docuflex desktop app.</p>
       {:else if needsQwenDownload}
-        <h3>Local Model:</h3><p>Download <span>Qwen 3.5 4B</span> to translate on this Mac.</p>
+        <h3>Local Model:</h3><p>Download <span>Qwen 3.5 4B</span> to translate on this computer.</p>
       {:else if !aiKeyReady}
         <h3>API Key Needed:</h3>
         <p>Uses <span>your OpenRouter key</span>, like the AI chat. Add it in Settings.</p>

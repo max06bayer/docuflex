@@ -1,3 +1,6 @@
+import { localQwenPlatform, accelerationFromModels } from '#lib/server/ollama-platform.js';
+import { downloadedRuntime, ensureDownloadedRuntime } from '#lib/server/ollama-runtime.js';
+import { execFileSync } from 'node:child_process';
 import { qwenOptions } from '#lib/server/ollama-options.js';
 import { readOllamaEvents, qwenCompletionStream } from '#lib/server/ollama-stream.js';
 import { spawn } from 'node:child_process';
@@ -14,7 +17,7 @@ export const QWEN_MODEL = { id: QWEN_MODEL_ID, name: 'Qwen 3.5 4B', short: 'Qwen
 const root = join(homedir(), '.docuflex', 'ollama');
 const modelsDirectory = join(root, 'models');
 const manifestPath = join(modelsDirectory, 'manifests', 'registry.ollama.ai', 'library', 'qwen3.5', '4b-q4_K_M');
-/** @type {{ child: import('node:child_process').ChildProcess | null; url: string; starting: Promise<string> | null; download: { phase: string; status: string; received: number; total: number; error: string }; task: Promise<void> | null; abort: AbortController | null; shutdownInstalled?: boolean }} */
+/** @type {{ child: import('node:child_process').ChildProcess | null; url: string; starting: Promise<string> | null; download: { phase: string; status: string; received: number; total: number; error: string }; task: Promise<void> | null; abort: AbortController | null; acceleration?: any; shutdownInstalled?: boolean }} */
 const state = /** @type {any} */ (globalThis).__docuflexOllama ??= { child: null, url: '', starting: null, download: { phase: 'available', status: '', received: 0, total: 0, error: '' }, task: null, abort: null };
 
 // SvelteKit closes its listener on SIGTERM but leaves the process alive while
@@ -22,7 +25,12 @@ const state = /** @type {any} */ (globalThis).__docuflexOllama ??= { child: null
 // cannot outlive the app or keep a model in memory across launches.
 if (!state.shutdownInstalled) {
   state.shutdownInstalled = true;
-  const stop = () => { state.abort?.abort(); state.child?.kill('SIGTERM'); };
+  const stop = () => {
+    state.abort?.abort();
+    if (process.platform === 'win32' && state.child?.pid) {
+      try { execFileSync('taskkill.exe', ['/PID',String(state.child.pid),'/T','/F'], {windowsHide:true,stdio:'ignore',timeout:5000}); } catch {}
+    } else state.child?.kill('SIGTERM');
+  };
   process.once('SIGTERM', stop);
   process.once('SIGINT', stop);
   process.once('exit', stop);
@@ -30,17 +38,18 @@ if (!state.shutdownInstalled) {
 }
 
 async function runtimePath() {
-  if (process.platform !== 'darwin' || process.arch !== 'arm64' || !mcpAvailable()) return null;
+  if (!localQwenPlatform() || !mcpAvailable()) return null;
+  if (process.platform !== 'darwin') return downloadedRuntime(root);
   for (const path of [resolve('runtime/ollama/ollama'), resolve('desktop/src-tauri/resources/runtime/ollama/ollama')]) {
     try { await access(path, constants.X_OK); return path; } catch {}
   }
   return null;
 }
-export async function qwenSupported() { return Boolean(await runtimePath()); }
+export async function qwenSupported() { return mcpAvailable() && localQwenPlatform() && (process.platform !== 'darwin' || Boolean(await runtimePath())); }
 
 /** Only inspect files. Status, opening a picker, and app startup never start Ollama or load a model. */
 export async function qwenInstalled() {
-  if (process.platform !== 'darwin' || !mcpAvailable()) return false;
+  if (!localQwenPlatform() || !mcpAvailable() || !(await runtimePath())) return false;
   try {
     const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
     const layers = [manifest.config, ...(manifest.layers ?? [])];
@@ -52,11 +61,23 @@ export async function qwenInstalled() {
     return true;
   } catch { return false; }
 }
+/** @param {string} base */
+async function inspectAcceleration(base) {
+  try {
+    const response=await fetch(`${base}/api/ps`,{signal:AbortSignal.timeout(2000)});
+    if(!response.ok)return {loaded:false,verified:false};
+    const result=accelerationFromModels((await response.json()).models);
+    if(result)state.acceleration=result;
+    return {loaded:Boolean(result),verified:true};
+  }catch{return {loaded:false,verified:false};}
+}
 export async function qwenStatus() {
   const supported = await qwenSupported();
-  const ready = supported && await qwenInstalled();
-  const loaded = state.url ? await fetch(`${state.url}/api/ps`, { signal: AbortSignal.timeout(1000) }).then((response) => response.json()).then((data) => Boolean(data.models?.length)).catch(() => false) : false;
-  return { supported, ready, runtimeRunning: Boolean(state.child), loaded, model: QWEN_TAG, ...state.download, phase: ready && !state.task ? 'ready' : state.download.phase };
+  const runtimeReady = supported && Boolean(await runtimePath());
+  const ready = runtimeReady && await qwenInstalled();
+  const current = state.url ? await inspectAcceleration(state.url) : {loaded:false,verified:true};
+  const acceleration = current.loaded ? state.acceleration : {mode:current.verified ? 'idle' : 'unknown',label:state.acceleration ? `Last run: ${state.acceleration.label}` : 'GPU use is checked when Qwen loads.'};
+  return { supported, ready, runtimeNeeded: supported && !runtimeReady, runtimeRunning: Boolean(state.child), loaded:current.loaded, acceleration, model: QWEN_TAG, ...state.download, phase: ready && !state.task ? 'ready' : state.download.phase };
 }
 
 /** Private, app-owned daemon on an ephemeral loopback port; it is never the user's Ollama service. */
@@ -76,13 +97,18 @@ export async function ensureOllama() {
       });
     });
     const base = `http://127.0.0.1:${port}`;
-    const supervisor = [resolve('runtime/supervise.sh'), resolve('desktop/runtime/supervise.sh')];
+    const windows = process.platform === 'win32';
+    const file = windows ? 'supervise.ps1' : 'supervise.sh';
+    const supervisor = [resolve(`runtime/${file}`), resolve(`desktop/runtime/${file}`)];
     let watch = '';
     for (const path of supervisor) { try { await access(path); watch = path; break; } catch {} }
     if (!watch) throw new Error('The local model process supervisor is missing.');
-    const child = spawn('/bin/sh', [watch, String(process.pid), binary, 'serve'], {
+    const executable = windows ? 'powershell.exe' : '/bin/sh';
+    const args = windows ? ['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',watch,String(process.pid),binary,'serve'] : [watch,String(process.pid),binary,'serve'];
+    const child = spawn(executable, args, {
+      windowsHide:true,
       cwd: resolve(binary, '..'), stdio: ['ignore', 'ignore', 'pipe'],
-      env: { ...process.env, OLLAMA_HOST: `127.0.0.1:${port}`, OLLAMA_MODELS: modelsDirectory, OLLAMA_NO_CLOUD: '1', OLLAMA_CONTEXT_LENGTH: '16384', OLLAMA_NUM_PARALLEL: '1', OLLAMA_MAX_LOADED_MODELS: '1', OLLAMA_KEEP_ALIVE: '5m' }
+      env: { ...process.env, OLLAMA_HOST: `127.0.0.1:${port}`, OLLAMA_MODELS: modelsDirectory, OLLAMA_NO_CLOUD: '1', OLLAMA_VULKAN: '1', OLLAMA_CONTEXT_LENGTH: '16384', OLLAMA_NUM_PARALLEL: '1', OLLAMA_MAX_LOADED_MODELS: '1', OLLAMA_KEEP_ALIVE: '5m' }
     });
     state.child = child;
     let launchError = '';
@@ -106,19 +132,24 @@ export async function ensureOllama() {
 /** One shared download; closing the popup does not cancel it. No inference during a pull. */
 export function startQwenDownload() {
   if (state.task) return;
-  state.abort = new AbortController();
+  const abort = new AbortController();
+  state.abort = abort;
   state.download = { phase: 'downloading', status: 'Starting the local runtime…', received: 0, total: 0, error: '' };
   state.task = (async () => {
     try {
+      if (process.platform !== 'darwin') {
+        await ensureDownloadedRuntime(root,abort.signal,progress=>{state.download={...state.download,...progress};});
+      }
+      const runtimeBytes=state.download.total;
       if (await qwenInstalled()) { state.download.phase = 'ready'; return; }
       const base = await ensureOllama();
       const layers = new Map();
-      const response = await fetch(`${base}/api/pull`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: QWEN_TAG, stream: true }), signal: state.abort?.signal });
+      const response = await fetch(`${base}/api/pull`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: QWEN_TAG, stream: true }), signal: abort.signal });
       await readOllamaEvents(response, (event) => {
         if (event.digest && event.total) layers.set(event.digest, { total: event.total, completed: event.completed ?? 0 });
         state.download.status = event.status || 'Downloading…';
-        state.download.total = [...layers.values()].reduce((sum, layer) => sum + layer.total, 0);
-        state.download.received = [...layers.values()].reduce((sum, layer) => sum + Math.min(layer.completed, layer.total), 0);
+        state.download.total = runtimeBytes + [...layers.values()].reduce((sum, layer) => sum + layer.total, 0);
+        state.download.received = runtimeBytes + [...layers.values()].reduce((sum, layer) => sum + Math.min(layer.completed, layer.total), 0);
       });
       if (!(await qwenInstalled())) throw new Error('The download did not finish. Try again to resume it.');
       state.download.phase = 'ready'; state.download.status = 'Downloaded. Loads when you send a message.';
@@ -160,5 +191,5 @@ export async function qwenChat(messages, tools, signal, settings = {}) {
     body: JSON.stringify({ model: QWEN_TAG, messages: localMessages, ...(tools.length ? { tools } : {}), stream: true, ...qwenOptions(tools.length, settings.document, settings.repair) })
   });
   if (!response.ok) { const error = await response.json().catch(() => null); throw new Error(error?.error || `Local Qwen failed (${response.status}).`); }
-  return qwenCompletionStream(response, signal, () => abort.abort());
+  return qwenCompletionStream(response, signal, () => abort.abort(), () => { void inspectAcceleration(base); });
 }

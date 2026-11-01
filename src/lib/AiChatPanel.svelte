@@ -1,7 +1,7 @@
 <script>
   import { readChatDocument, chatDocumentPrompt } from '#lib/chat-attachments.js';
   import ModelOption from '#lib/ModelOption.svelte';
-  import { QWEN_MODEL_ID, qwenDownload, openQwenDownload } from '#lib/qwen-download.js';
+  import { QWEN_MODEL_ID, qwenDownload, openQwenDownload, refreshQwenStatus } from '#lib/qwen-download.js';
   import { onDestroy, onMount, tick } from 'svelte';
   import { cubicOut } from 'svelte/easing';
   import { fade, fly, slide } from 'svelte/transition';
@@ -860,6 +860,7 @@
     } finally {
       if (signal.aborted) entries = [...entries, { id: nextId++, role: 'note', text: 'Stopped' }];
       busy = false;
+      if (selectedModel === QWEN_MODEL_ID) void refreshQwenStatus();
       controller = null;
       for (const resolve of approvals.values()) resolve(false);
       approvals.clear();
@@ -1205,7 +1206,10 @@
     clock = setInterval(() => {
       if (busy) now = Date.now();
       // Keep the document / page line under the input current.
-      if (open && (ticks += 1) % 4 === 0) refreshContext();
+      if (open && (ticks += 1) % 4 === 0) {
+        refreshContext();
+        if (busy && selectedModel === QWEN_MODEL_ID) void refreshQwenStatus();
+      }
     }, 250);
   });
 
@@ -1379,6 +1383,9 @@
   </div>
 
   <footer class="ai-composer">
+    {#if selectedModel === QWEN_MODEL_ID && $qwenDownload.acceleration?.mode === 'cpu'}
+      <p class="ai-note" role="status">Qwen is using the CPU. GPU acceleration needs a supported GPU and graphics driver.</p>
+    {/if}
     {#if readingAttachments}<p class="ai-note" role="status">Reading attachments…</p>{/if}
     {#if attachmentError}<p class="ai-note" role="alert">{attachmentError}</p>{/if}
     <div class="ai-input">
@@ -1432,6 +1439,7 @@
               {#each models as model (model.id)}
                 <ModelOption {model} selected={model.id === selectedModel} onSelect={chooseModel} />
               {/each}
+              {#if selectedModel === QWEN_MODEL_ID}<p class="ai-usage">{$qwenDownload.acceleration?.label ?? "GPU use is checked when Qwen loads."}</p>{/if}
               {#if usage.tokens}<p class="ai-usage">{usage.tokens.toLocaleString()} tokens · ${usage.cost.toFixed(usage.cost < 0.01 ? 4 : 3)}</p>{/if}
             </div>
           {/if}

@@ -340,7 +340,7 @@ export function subagentPrompt(scope, context) {
  */
 export async function streamCompletion(messages, context, signal, subagent = null, model = AI_MODEL, web = null) {
   if (model === QWEN_MODEL_ID) {
-    if (web) throw new Error('Local Qwen is only available in the macOS app.');
+    if (web) throw new Error('Local Qwen is only available in the desktop app.');
     const memories = await documentMemories(context);
     const system = subagent ? subagentPrompt(subagent, context) : systemPrompt(context, memories);
     return qwenChat([{ role: 'system', content: system }, ...messages], subagent ? SUBAGENT_FUNCTIONS : AI_TOOLS, signal);
