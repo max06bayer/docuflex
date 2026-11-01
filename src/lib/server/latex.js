@@ -187,7 +187,7 @@ async function complete({ key, model, messages, signal, onProgress, onReasoning,
   return readDocumentCompletion(response, onProgress, onReasoning, (summary) => {
     // Counts and routing only: never log document text, reasoning or credentials.
     console.info('[latex] completion', JSON.stringify(summary));
-  }, chosen.startsWith('xiaomi/mimo-') ? 64_000 : Infinity);
+  }, chosen.startsWith('xiaomi/mimo-') ? 24_000 : Infinity);
 }
 
 /**
