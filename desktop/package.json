@@ -11,7 +11,12 @@
     "build": "npm run stage && npm run smoke && npm run bundle",
     "dev": "npm run stage && tauri dev",
     "bundle:redesign": "DOCUFLEX_VARIANT=redesign node scripts/build.mjs",
-    "build:redesign": "npm run stage && npm run smoke && npm run bundle:redesign"
+    "build:redesign": "npm run stage && npm run smoke && npm run bundle:redesign",
+    "stage:appstore": "DOCUFLEX_DISTRIBUTION=app-store node scripts/prepare.mjs",
+    "build:appstore": "DOCUFLEX_DISTRIBUTION=app-store npm run build",
+    "build:appstore:qa": "DOCUFLEX_DISTRIBUTION=app-store DOCUFLEX_APP_STORE_LOCAL_QA=1 npm run build",
+    "bundle:appstore": "DOCUFLEX_DISTRIBUTION=app-store node scripts/build.mjs",
+    "check:appstore": "node scripts/check-app-store.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.12.4",

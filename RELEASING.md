@@ -63,3 +63,28 @@ laptop connection stall.
   failed job (`gh run rerun <id> --failed`). Don't publish a release with
   missing platforms.
 - The website deploys from `main` through Coolify; merging to `main` updates docuflex.eu.
+
+## Refresh an already existing draft during platform testing
+
+A manual run of `desktop-native-builds.yml` on the reviewed release branch can
+set `draft_release` to the existing version (for example `v0.9.6`). The workflow
+checks the source version and refuses to modify a published release. Windows,
+Linux and Arch assets go directly from the runners to that draft; the workflow
+also uploads source-commit provenance and refreshes checksums from GitHub's asset
+digests. It never publishes the release. This permits a draft refresh without
+merging/deploying the website or creating a public version tag prematurely.
+The final public release still follows the normal merge/tag process above.
+
+macOS builds now finish with `desktop/scripts/sign-macos-sandbox.mjs`. Validate
+the installed sandboxed app and its services, not only the unsigned pre-package
+runtime smoke tests. Preserve the existing app and local data until the new
+build has passed startup/document checks. Add the macOS artifact and its own
+source-commit provenance to the same draft, then recompute the complete checksum
+list. Never publish a mix of old and new platform binaries as the final release.
+
+## Mac App Store
+
+The separate Store build and its signing/submission gates are documented in
+[desktop/APP_STORE.md](desktop/APP_STORE.md). It does not replace the GitHub
+release workflow or publish the 0.9.6 draft. Local Store QA builds must not be
+installed over an existing Docuflex installation or uploaded as signed releases.

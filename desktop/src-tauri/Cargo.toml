@@ -11,6 +11,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
 side-by-side = []
+mac-app-store = []
 
 [build-dependencies]
 tauri-build = { version = "2.7.4", features = [] }
@@ -28,8 +29,8 @@ url = "2.5.7"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSButton", "NSControl", "NSPrintInfo", "NSPrintOperation", "NSResponder", "NSView", "NSWindow"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSURL"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSButton", "NSControl", "NSPrintInfo", "NSPrintOperation", "NSResponder", "NSView", "NSWindow", "NSWorkspace"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSURL", "NSPathUtilities", "NSData", "NSArray", "NSError"] }
 
 # Upstream security backport for GTK3: see vendor/glib/DOCUFLEX-SECURITY-PATCH.md.
 [patch.crates-io]

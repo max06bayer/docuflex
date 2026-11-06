@@ -3,7 +3,7 @@
   "identifier": "main-window",
   "description": "Allows the packaged desktop editor window to use its custom native drag regions.",
   "remote": {
-    "urls": ["http://127.0.0.1:43127/*"]
+    "urls": ["http://127.0.0.1:43127/*", "http://127.0.0.1:43137/*"]
   },
   "windows": ["main"],
   "permissions": [
@@ -11,9 +11,12 @@
     "core:window:allow-start-dragging",
     "allow-take-pending-pdf",
     "allow-start-window-drag",
+    "allow-macos-resize-window",
     "allow-docuflex-save-prompt",
     "allow-docuflex-save-overwrite",
     "allow-docuflex-print-pdf",
+    "allow-docuflex-import-local-data",
+    "allow-docuflex-read-local-file",
     "allow-docuflex-update-check",
     "allow-docuflex-update-download",
     "allow-docuflex-update-install"

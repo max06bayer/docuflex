@@ -1,3 +1,4 @@
+import { QWEN_MODEL, qwenSupported, qwenInstalled } from '#lib/server/ollama.js';
 import { openRouterKeyHint, visitorKey } from '#lib/server/ai.js';
 import { LATEX_STYLES, MATCH_STYLE, MAX_PAGE_IMAGES, convertToLatex, latexModels, tectonicPath } from '#lib/server/latex.js';
 import { isLocalRequest, mcpAvailable } from '#lib/server/mcp-bridge.js';
@@ -7,15 +8,21 @@ import { isLocalRequest, mcpAvailable } from '#lib/server/mcp-bridge.js';
 export async function GET({ request, url }) {
   const local = isLocalRequest(request, url) && mcpAvailable();
   const engine = Boolean(await tectonicPath());
+  const keyReady = local ? Boolean(await openRouterKeyHint()) : null;
+  const catalogue = latexModels();
+  const qwen = local && await qwenSupported();
+  const qwenReady = qwen && await qwenInstalled();
   return Response.json({
     engine,
+    qwenReady,
     local,
     // The website uses the visitor's key from their browser; the window knows whether it has one.
-    keyReady: local ? Boolean(await openRouterKeyHint()) : null,
+    keyReady,
     styles: LATEX_STYLES.map(({ id, label }) => ({ id, label })),
     matchStyle: MATCH_STYLE,
     maxPageImages: MAX_PAGE_IMAGES,
-    ...latexModels()
+    model: qwen && !keyReady ? QWEN_MODEL.id : catalogue.model,
+    models: [...(qwen ? [{ ...QWEN_MODEL, ready: qwenReady }] : []), ...(!local || keyReady || !qwen ? catalogue.models : [])]
   });
 }
 

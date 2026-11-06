@@ -1,3 +1,6 @@
+import { distributionProfile } from './distribution.mjs';
+import { prepareStoreNativeBackend, prepareStoreTexBundle } from './prepare-app-store.mjs';
+import { prepareOllamaRuntime } from './prepare-ollama.mjs';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { access, cp, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
@@ -9,7 +12,8 @@ const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const repositoryRoot = resolve(desktopRoot, '..');
 const tauriRoot = join(desktopRoot, 'src-tauri');
 const distRoot = join(desktopRoot, 'dist');
-const resourcesRoot = join(tauriRoot, 'resources');
+const profile = distributionProfile();
+const resourcesRoot = profile.resources;
 const cacheRoot = join(desktopRoot, '.cache');
 const nodeVersion = 'v24.18.0';
 const supportedTargets = new Set(['darwin-arm64', 'win32-x64', 'linux-x64']);
@@ -123,11 +127,11 @@ const macPython = {
 const conversionRequirements = join(repositoryRoot, 'scripts', 'requirements-conversion.txt');
 
 async function provisionMacPython() {
-  const root = join(cacheRoot, `python-${macPython.version}-${macPython.release}`);
+  const root = join(cacheRoot, `python-${macPython.version}-${macPython.release}${profile.store ? '-app-store' : ''}`);
   const python = join(root, 'python');
   const executable = join(python, 'bin', 'python3.12');
   const ready = join(root, '.packages-installed');
-  const requirements = await readFile(conversionRequirements, 'utf8');
+  const requirements = await readFile(conversionRequirements, 'utf8') + (profile.store ? '\nargostranslate==1.11.0\n' : '');
   if (await exists(ready) && await readFile(ready, 'utf8') === requirements) return python;
   await mkdir(root, { recursive: true });
   const archivePath = join(cacheRoot, macPython.archive);
@@ -142,7 +146,9 @@ async function provisionMacPython() {
     throw new Error(`Python checksum failed for ${macPython.archive}.`);
   }
   if (!(await exists(executable))) run('tar', ['-xzf', archivePath, '-C', root]);
-  run(executable, ['-m', 'pip', 'install', '--disable-pip-version-check', '--no-warn-script-location', '-r', conversionRequirements]);
+  const selectedRequirements = profile.store ? join(root, 'store-requirements.txt') : conversionRequirements;
+  if (profile.store) await writeFile(selectedRequirements, requirements);
+  run(executable, ['-m', 'pip', 'install', '--disable-pip-version-check', '--no-warn-script-location', '-r', selectedRequirements]);
   await writeFile(ready, requirements);
   return python;
 }
@@ -240,14 +246,18 @@ async function buildVisionOcr() {
 
 async function copyApplicationResources() {
   await cp(join(repositoryRoot, 'build'), join(resourcesRoot, 'frontend'), { recursive: true });
-  await cp(join(repositoryRoot, 'backend', 'out'), join(resourcesRoot, 'backend', 'out'), { recursive: true });
-  await cp(join(repositoryRoot, 'backend', 'lib'), join(resourcesRoot, 'backend', 'lib'), { recursive: true });
+  if (!profile.store) {
+    await cp(join(repositoryRoot, 'backend', 'out'), join(resourcesRoot, 'backend', 'out'), { recursive: true });
+    await cp(join(repositoryRoot, 'backend', 'lib'), join(resourcesRoot, 'backend', 'lib'), { recursive: true });
+  }
   await cp(join(repositoryRoot, 'backend', 'fonts'), join(resourcesRoot, 'backend', 'fonts'), { recursive: true });
   await mkdir(join(resourcesRoot, 'scripts'), { recursive: true });
   for (const file of await readdir(join(repositoryRoot, 'scripts'))) {
     if (file.endsWith('.py')) await cp(join(repositoryRoot, 'scripts', file), join(resourcesRoot, 'scripts', file));
   }
   await mkdir(join(resourcesRoot, 'runtime'), { recursive: true });
+  await mkdir(join(resourcesRoot, 'licenses'), { recursive: true });
+  await cp(join(desktopRoot, 'licenses', 'ollama-LICENSE.txt'), join(resourcesRoot, 'licenses', 'ollama-LICENSE.txt'));
   if (process.platform === 'win32') {
     await cp(join(desktopRoot, 'runtime', 'supervise.ps1'), join(resourcesRoot, 'runtime', 'supervise.ps1'));
   } else {
@@ -258,7 +268,7 @@ async function copyApplicationResources() {
   const macOcrRuntime = process.platform === 'darwin' ? join(desktopRoot, 'vendor', 'ocr-macos-arm64') : '';
   await copyRuntime('pdf2htmlEX', 'DOCUFLEX_PDF2HTMLEX_RUNTIME', macPdfRuntime);
   await copyRuntime('ocr', 'DOCUFLEX_OCR_RUNTIME', macOcrRuntime);
-  if (process.platform === 'darwin') await buildVisionOcr();
+  if (process.platform === 'darwin') { await buildVisionOcr(); await prepareOllamaRuntime(join(resourcesRoot, 'runtime', 'ollama')); }
 
   if (process.platform === 'darwin' && !process.env.DOCUFLEX_OFFICE_RUNTIME?.trim()) {
     const officeBin = join(resourcesRoot, 'runtime', 'office', 'bin');
@@ -298,7 +308,9 @@ async function writeRuntimeManifest() {
     target,
     generatedAt: new Date().toISOString(),
     node: nodeVersion,
-    java: '17 (jlink)',
+    distribution: profile.distribution,
+    pdfBackend: profile.store ? 'native-image' : 'jvm',
+    ...(profile.store ? {} : { java: '17 (jlink)' }),
     python: '3.12',
     pdf2htmlEX: process.platform === 'win32' ? '0.14.6 native static' : '0.18.8.rc1',
     ocr: 'Tesseract with eng, deu, and osd data',
@@ -359,18 +371,31 @@ async function main() {
   if (!supportedTargets.has(target)) throw new Error(`Unsupported desktop build target: ${target}`);
   await mkdir(cacheRoot, { recursive: true });
   await rm(resourcesRoot, { recursive: true, force: true });
-  await rm(join(tauriRoot, 'target', 'release', 'resources'), { recursive: true, force: true });
+  await rm(join(profile.target, 'release', 'resources'), { recursive: true, force: true });
   await mkdir(resourcesRoot, { recursive: true });
 
   runNpm(['run', 'build'], { env: {
-    DOCUFLEX_DESKTOP_ORIGIN: `http://127.0.0.1:${process.env.DOCUFLEX_VARIANT === 'redesign' ? 43137 : 43127}`
+    DOCUFLEX_DESKTOP_ORIGIN: `http://127.0.0.1:${profile.port}`
   } });
   runNpm(['run', 'backend:compile']);
   await copyApplicationResources();
+  if (profile.store) {
+    async function removeJavaFiles(directory) {
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        if (entry.isSymbolicLink()) continue;
+        const path = join(directory, entry.name);
+        if (entry.isDirectory()) await removeJavaFiles(path);
+        else if (/\.(jar|class)$/i.test(entry.name)) await rm(path);
+      }
+    }
+    await removeJavaFiles(resourcesRoot);
+  }
   await prepareNodeRuntime();
-  await prepareJavaRuntime();
+  if (!profile.store) await prepareJavaRuntime();
   await preparePythonRuntime();
+  if (profile.store) await prepareStoreNativeBackend(resourcesRoot);
   await prepareTectonicRuntime();
+  if (profile.store) await prepareStoreTexBundle(resourcesRoot);
   await generateIcons();
   await writeRuntimeManifest();
   await writeDesktopShell();

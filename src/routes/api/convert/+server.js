@@ -58,7 +58,8 @@ export async function POST({ request }) {
     await writeFile(inputPath, bytes);
     const officeProfile = `-env:UserInstallation=${pathToFileURL(join(directory, 'office-profile')).href}`;
     const officeConvert = async (/** @type {string} */ source, /** @type {string} */ format) => {
-      await runConverter(await converterBinary(), [officeProfile, '--headless', '--convert-to', format, '--outdir', directory, source], 'office');
+      const socket = process.env.DOCUFLEX_SANDBOX === '1' ? ['-env:OSL_SOCKET_PATH=.'] : [];
+      await runConverter(await converterBinary(), [officeProfile, ...socket, '--headless', '--convert-to', format, '--outdir', directory, source], 'office', directory);
       return convertedOutputPath(directory, source, format);
     };
     let outputPath;
@@ -176,11 +177,11 @@ function downloadResponse(bytes, name, format, warning = '') {
   });
 }
 
-/** @param {string} binary @param {string[]} args @param {'native' | 'office'} [profile] */
-function runConverter(binary, args, profile = 'native') {
+/** @param {string} binary @param {string[]} args @param {'native' | 'office'} [profile] @param {string} [workingDirectory] */
+function runConverter(binary, args, profile = 'native', workingDirectory = undefined) {
   return new Promise((resolve, reject) => {
     const command = boundedCommand(binary, args, profile);
-    const child = spawn(command.binary, command.args, { stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+    const child = spawn(command.binary, command.args, { cwd: workingDirectory, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
     let errorLog = '';
     let outputLog = '';
     const timeout = setTimeout(() => {

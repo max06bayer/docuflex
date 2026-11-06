@@ -78,7 +78,7 @@ Architecture: amd64
 Installed-Size: $SIZE_KIB
 Maintainer: Maximilian Bayer
 Priority: optional
-Depends: libgtk-3-0, libnss3, libgbm1, libasound2t64 | libasound2 (>= 1.1), libdrm2, libxkbcommon0
+Depends: libgtk-3-0, libnss3, libgbm1, libasound2t64 | libasound2 (>= 1.1), libdrm2, libxkbcommon0, libvulkan1
 Description: Docuflex offline PDF editor
 EOF
   (cd "$ROOT" && find usr -type f -print0 | sort -z | xargs -0 md5sum) > "$CONTROL/md5sums"
@@ -102,6 +102,7 @@ arch = x86_64
 license = custom
 depend = gtk3
 depend = nss
+depend = vulkan-icd-loader
 depend = alsa-lib
 depend = libayatana-appindicator
 depend = librsvg

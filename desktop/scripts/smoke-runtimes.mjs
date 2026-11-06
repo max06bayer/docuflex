@@ -1,3 +1,4 @@
+import { distributionProfile } from './distribution.mjs';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -5,7 +6,8 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const desktopRoot = resolve(import.meta.dirname, '..');
-const resources = join(desktopRoot, 'src-tauri', 'resources');
+const profile = distributionProfile();
+const resources = profile.resources;
 const windows = process.platform === 'win32';
 const executable = (runtime, name) => join(resources, 'runtime', runtime, 'bin', `${name}${windows ? '.exe' : ''}`);
 const ocrExecutable = (name) => windows && name !== 'tesseract'
@@ -52,7 +54,8 @@ function minimalPdf(text) {
 const temporary = await mkdtemp(join(tmpdir(), 'docuflex-runtime-smoke-'));
 try {
   run(executable('node', 'node'), ['--version']);
-  run(executable('java', 'java'), ['--version']);
+  if (!profile.store) run(executable('java', 'java'), ['--version']);
+  else run(python, ['-c', 'import argostranslate.translate, ctranslate2; print("translation-engine-ok")']);
   run(python, ['-c', 'import PIL, docx, lxml, openpyxl, pptx, xlsxwriter, pymupdf, fontTools; print("python-ok")']);
   if (process.platform === 'linux') {
     run(python, [join(resources, 'scripts', 'check-linux-office-dependencies.py'), join(resources, 'runtime', 'office')], { timeout: 120_000 });
@@ -105,9 +108,15 @@ try {
   const converted = await readFile(html, 'utf8');
   if (!/Docuflex/.test(converted)) throw new Error('Bundled pdf2htmlEX smoke test did not preserve text.');
 
-  // Compiling needs network for the TeX packages, so only the binary is checked here.
+  // Direct builds fetch TeX packages on demand; Store builds use a bundled ZIP.
   const tectonicVersion = run(join(resources, 'runtime', 'tectonic', `tectonic${windows ? '.exe' : ''}`), ['--version']);
   if (!/Tectonic/i.test(tectonicVersion)) throw new Error('Bundled Tectonic did not start.');
+  if (profile.store) {
+    const tex = join(temporary, 'offline.tex');
+    await writeFile(tex, '\\documentclass{article}\\usepackage{amsmath}\\begin{document}Docuflex offline $x^2$\\end{document}');
+    run(join(resources, 'runtime/tectonic/tectonic'), ['--bundle', join(resources, 'runtime/tectonic/texlive-v33.zip'), '--outdir', temporary, tex], {timeout: 120_000});
+    if (!(await readFile(join(temporary, 'offline.pdf'))).subarray(0,5).equals(Buffer.from('%PDF-'))) throw new Error('Offline TeX compilation failed.');
+  }
 
   run(office, ['--headless', '--version'], { timeout: 60_000 });
   run(python, [join(resources, 'scripts', 'test-editable-conversion.py')], {

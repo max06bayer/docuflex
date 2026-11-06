@@ -40,18 +40,6 @@
   const topFeatureCards = ['Merge', 'Convert', 'Sign', 'Translate', 'ORC'];
   const bottomFeatureCards = ['Split', 'Compress', 'Protect', 'Flatten', 'Watermark'];
   const emptyCards = Array(6).fill(emptyCard);
-  /** @type {typeof import('#lib/SettingsPanel.svelte').default | null} */
-  let SettingsPanel = null;
-  let legalPanelOpen = false;
-  let legalPanelSection = 'top';
-
-  // The settings panel is only needed after a click, so keep it (and its CSS)
-  // out of the landing page's initial load.
-  async function openLegalPanel(section = 'top') {
-    SettingsPanel ??= (await import('#lib/SettingsPanel.svelte')).default;
-    legalPanelSection = section;
-    legalPanelOpen = true;
-  }
 </script>
 
 <svelte:head>
@@ -329,9 +317,9 @@
     <div class="footer-bottom">
       <div class="footer-meta">
         <div class="footer-legal-links">
-          <button type="button" onclick={() => openLegalPanel('terms')}>Legal Notice</button>
-          <button type="button" onclick={() => openLegalPanel('privacy')}>Privacy</button>
-          <button type="button" onclick={() => openLegalPanel('cookies')}>Cookies</button>
+          <a data-sveltekit-reload href="/privacy#operator">Legal Notice</a>
+          <a data-sveltekit-reload href="/privacy#privacy">Privacy</a>
+          <a data-sveltekit-reload href="/privacy#cookies">Cookies</a>
           <a href="mailto:max06.bayer@gmail.com">Contact</a>
         </div>
         <p>© 2026 Maximilian Bayer</p>
@@ -348,9 +336,6 @@
     </div>
   </footer>
 
-  {#if legalPanelOpen && SettingsPanel}
-    <SettingsPanel legalOnly={true} legalSection={legalPanelSection} onClose={() => (legalPanelOpen = false)} />
-  {/if}
 </main>
 
 <style>
@@ -952,7 +937,6 @@
     gap: clamp(28px, 4vw, 72px);
   }
 
-  .footer-legal-links button,
   .footer-legal-links a {
     margin: 0;
     padding: 0;
@@ -965,7 +949,6 @@
     transition: color 180ms ease;
   }
 
-  .footer-legal-links button:hover,
   .footer-legal-links a:hover {
     color: #f0f0f0;
   }
@@ -1269,7 +1252,6 @@
       gap: 10px 20px;
     }
 
-    .footer-legal-links button,
     .footer-legal-links a,
     .footer-meta p {
       font-size: 13px;

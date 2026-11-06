@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import maxmind from 'maxmind';
+import { purgeAnalytics } from '#lib/server/retention.js';
 import * as env from '$app/env/private';
 
 /*
@@ -34,6 +35,14 @@ let geoReader;
 let secret;
 
 export const ANALYTICS_ENABLED = ENABLED;
+let retentionStarted = false;
+function startRetention() {
+  if (retentionStarted) return;
+  retentionStarted = true;
+  const cleanup = () => purgeAnalytics(DATA_DIR).catch(() => console.error('Analytics retention cleanup failed.'));
+  void cleanup();
+  setInterval(cleanup, 3_600_000).unref();
+}
 
 /** @param {string | null | undefined} userAgent */
 export function isBot(userAgent) {
@@ -159,6 +168,7 @@ export function describeUserAgent(userAgent) {
 /** @param {Record<string, any>} record */
 export async function writeRecord(record) {
   if (!ENABLED) return;
+  startRetention();
   if (!knownDirectories.has(DATA_DIR)) {
     await mkdir(DATA_DIR, { recursive: true });
     knownDirectories.add(DATA_DIR);

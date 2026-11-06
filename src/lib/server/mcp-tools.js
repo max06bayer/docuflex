@@ -240,6 +240,8 @@ export const MCP_TOOLS = [
         points: {
           type: 'array',
           minItems: 2,
+          maxItems: 10000,
+          description: 'An array of point objects, e.g. [{"x":100,"y":300},{"x":200,"y":300}]. Each coordinate must be a finite number. Never pass points as a string, coordinate pairs or a flat number array.',
           items: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } }, required: ['x', 'y'] }
         },
         color,
@@ -541,6 +543,10 @@ const IMAGE_TYPES = /** @type {Record<string, string>} */ ({
 
 /** @param {string} path @param {number} limit */
 async function readLimited(path, limit) {
+  if (process.env.DOCUFLEX_SANDBOX === '1') {
+    const base64 = await callApp('__sandbox_read_file', { path, limit });
+    return Buffer.from(base64, 'base64');
+  }
   const info = await stat(path).catch(() => null);
   if (!info?.isFile()) throw new Error(`File not found: ${path}`);
   if (info.size > limit) throw new Error(`File is too large: ${path}`);
@@ -663,9 +669,11 @@ async function runToolUnguarded(name, args) {
     const path = resolvePath(String(args.path ?? ''));
     const { path: _path, ...rest } = args;
     const result = await callApp(name, rest);
-    const bytes = await writePdf(path, result.base64);
+    const saved = process.env.DOCUFLEX_SANDBOX === '1'
+      ? await callApp('__sandbox_save_pdf', { path, base64: result.base64 })
+      : { path, bytes: await writePdf(path, result.base64) };
     const { base64: _base64, ...details } = result;
-    return text({ ...details, path, bytes });
+    return text({ ...details, ...saved });
   }
   if (name === 'render_page') {
     const result = await callApp('render_page', args);

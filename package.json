@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "backend:compile": "javac -cp backend/lib/pdfbox-app-3.0.8.jar -d backend/out backend/src/DocuflexPdfServer.java",
+    "backend:compile": "javac -cp backend/lib/pdfbox-app-3.0.8.jar -d backend/out backend/src/DocuflexPdfServer.java backend/src/NativeRasterBridge.java",
     "backend:dev": "npm run backend:compile && java -cp backend/out:backend/lib/pdfbox-app-3.0.8.jar DocuflexPdfServer",
     "backend:start": "java -cp backend/out:backend/lib/pdfbox-app-3.0.8.jar DocuflexPdfServer",
     "build": "vite build",

@@ -1,4 +1,7 @@
 <script>
+  import { translationDownload, downloadTranslationModel, dismissTranslationDownload } from '#lib/translation-download.js';
+  import { formatBytes } from '#lib/translate.js';
+  import { qwenDownload, downloadQwen, dismissQwenDownload, pauseQwenDownload } from '#lib/qwen-download.js';
   import { onDestroy, onMount, tick } from 'svelte';
   import { cubicOut } from 'svelte/easing';
   import { scale } from 'svelte/transition';
@@ -12,7 +15,7 @@
   import HomeProtectPanel from '#lib/HomeProtectPanel.svelte';
   import QuickToolPagesPanel from '#lib/QuickToolPagesPanel.svelte';
   import SettingsPanel from '#lib/SettingsPanel.svelte';
-  import { update, checkForUpdate, downloadUpdate, installUpdate, dismissUpdate, isDesktopApp } from '#lib/updater.js';
+  import { update, checkForUpdate, downloadUpdate, installUpdate, dismissUpdate, isDesktopApp, supportsDirectUpdates } from '#lib/updater.js';
   import McpPanel from '#lib/McpPanel.svelte';
   import AiChatPanel from '#lib/AiChatPanel.svelte';
   import TranslateFilesPanel from '#lib/TranslateFilesPanel.svelte';
@@ -44,6 +47,29 @@
   const MAX_RECENT_DOCUMENTS = 20;
   /** @type {Promise<IDBDatabase> | null} */
   let recentDatabasePromise = null;
+
+  /** Fade only while more tabs remain beyond the right edge. @param {HTMLElement} node */
+  function tabOverflowFade(node) {
+    const updateFade = () => {
+      node.dataset.overflowRight = String(node.scrollWidth - node.clientWidth - node.scrollLeft > 1);
+    };
+    const resize = new ResizeObserver(updateFade);
+    const observeTabs = () => {
+      resize.disconnect();
+      resize.observe(node);
+      for (const child of node.children) resize.observe(child);
+      updateFade();
+    };
+    const children = new MutationObserver(observeTabs);
+    children.observe(node, { childList: true });
+    node.addEventListener('scroll', updateFade, { passive: true });
+    observeTabs();
+    return { destroy() {
+      resize.disconnect();
+      children.disconnect();
+      node.removeEventListener('scroll', updateFade);
+    } };
+  }
 
   const quickTools = [
     { name: 'Merge', shortcut: 'M', icon: mergeIcon, description: 'Combine multiple PDFs into one document.' },
@@ -239,6 +265,22 @@
    */
   async function runMcpTool(name, args) {
     switch (name) {
+      case '__sandbox_read_file': {
+        const api = /** @type {any} */ (window).__TAURI__;
+        if (!api?.core?.invoke) throw new Error('Native file access is unavailable.');
+        return api.core.invoke('docuflex_read_local_file', { path: String(args.path), limit: Number(args.limit) });
+      }
+      case '__sandbox_save_pdf': {
+        const api = /** @type {any} */ (window).__TAURI__;
+        if (!api?.core?.invoke) throw new Error('Native file access is unavailable.');
+        let path = String(args.path);
+        try { await api.core.invoke('docuflex_save_overwrite', { path, base64: args.base64 }); }
+        catch (error) {
+          if (!/permission|permitted|denied/i.test(String(error))) throw error;
+          path = await api.core.invoke('docuflex_save_prompt', { suggestedName: path.split('/').pop(), base64: args.base64 });
+        }
+        return { path, bytes: Math.floor(String(args.base64).replace(/=+$/, '').length * 3 / 4) };
+      }
       case 'list_documents':
         return { documents: tabs.map((tab) => ({ documentId: tab.id, name: tab.name, active: tab.id === activeTab })) };
       case 'open_document': {
@@ -944,7 +986,7 @@
 
   onMount(() => {
     // The desktop app looks for a newer release on every start.
-    if (isDesktopApp()) void checkForUpdate();
+    if (supportsDirectUpdates()) void checkForUpdate();
     isWebsite = !document.documentElement.dataset.docuflexDesktop;
     const handleHistoryBack = () => {
       if (!isWebsite || !documentHistoryEntry) return;
@@ -971,6 +1013,7 @@
     window.addEventListener('drop', handleFileDrop);
     window.addEventListener('scroll', hideQuickTooltip, true);
     window.addEventListener('resize', hideQuickTooltip);
+    window.addEventListener('docuflex:qwen-ready', refreshAiStatus);
     window.addEventListener('docuflex:error', /** @type {EventListener} */ (handleNativeError));
     void refreshMcpStatus().then(() => {
       if (mcpStatus?.available) connectMcpBridge();
@@ -985,6 +1028,7 @@
       window.removeEventListener('keydown', handleQuickToolShortcut);
       window.removeEventListener('dragover', allowFileDrop);
       window.removeEventListener('drop', handleFileDrop);
+      window.removeEventListener('docuflex:qwen-ready', refreshAiStatus);
       window.removeEventListener('docuflex:error', /** @type {EventListener} */ (handleNativeError));
       window.removeEventListener('scroll', hideQuickTooltip, true);
       window.removeEventListener('resize', hideQuickTooltip);
@@ -1018,7 +1062,7 @@
     </div>
     <span class="topbar-backdrop" aria-hidden="true"><img src="/redesign/rectangle997.png" alt="" /></span>
 
-    <div class="tab-strip" role="tablist" aria-label="Open documents">
+    <div class="tab-strip" use:tabOverflowFade role="tablist" aria-label="Open documents">
       {#each tabs as tab (tab.id)}
         {@const tabLabel = tab.name.replace(/\.pdf$/i, '')}
         <button
@@ -1477,6 +1521,61 @@
     {/key}
   {/if}
 
+  {#if $translationDownload.visible}
+    <div class="error-toast update-toast model-download-toast" role="status" transition:scale={{ duration: 150, easing: cubicOut, start: 0.96, opacity: 0 }}>
+      <div class="error-toast-body">
+        {#if ['checking', 'preparing', 'downloading', 'installing'].includes($translationDownload.phase)}
+          <strong>{$translationDownload.phase === 'checking' ? 'Checking translation model…' : $translationDownload.phase === 'installing' ? 'Installing translation model…' : 'Downloading translation model'}</strong>
+          <span>{$translationDownload.label}</span>
+          <div class="update-progress" role="progressbar" aria-label="Translation model download" aria-valuemin="0" aria-valuemax="100" aria-valuenow={$translationDownload.total ? Math.round($translationDownload.received / $translationDownload.total * 100) : undefined}><span style:width={`${$translationDownload.total ? Math.min(100, $translationDownload.received / $translationDownload.total * 100) : 0}%`}></span></div>
+          <span>{$translationDownload.phase === 'installing' ? 'Installing…' : $translationDownload.total ? `${Math.round($translationDownload.received / 1e6)} MB of ${formatBytes($translationDownload.total)}${$translationDownload.speed ? ` · ${($translationDownload.speed / 1e6).toFixed(1)} MB/s` : ''}` : 'Preparing…'}</span>
+        {:else if $translationDownload.phase === 'ready'}
+          <strong>Translation model is ready</strong><span>{$translationDownload.label}. Saved for future translations.</span>
+        {:else if $translationDownload.phase === 'error'}
+          <strong>Translation model download failed</strong><span>{$translationDownload.error}</span>
+        {:else}
+          <strong>Download translation model</strong><span>{$translationDownload.label}{$translationDownload.size ? ` · about ${formatBytes($translationDownload.size)}` : ''}. One-time download.</span>
+        {/if}
+      </div>
+      <div class="update-actions">
+        {#if ['checking', 'preparing', 'downloading', 'installing'].includes($translationDownload.phase)}
+          <button type="button" onclick={dismissTranslationDownload}>Hide</button>
+        {:else if $translationDownload.phase === 'ready'}
+          <button type="button" onclick={dismissTranslationDownload}>Done</button>
+        {:else}
+          <button class="secondary" type="button" onclick={dismissTranslationDownload}>Later</button><button type="button" onclick={downloadTranslationModel}>{$translationDownload.phase === 'error' ? 'Try again' : 'Download'}</button>
+        {/if}
+      </div>
+    </div>
+  {/if}
+
+  {#if $qwenDownload.visible && !$translationDownload.visible}
+    <div class="error-toast update-toast model-download-toast" role="status" transition:scale={{ duration: 150, easing: cubicOut, start: 0.96, opacity: 0 }}>
+      <div class="error-toast-body">
+        {#if $qwenDownload.phase === 'downloading'}
+          <strong>{$qwenDownload.status?.startsWith('Downloading local runtime') || $qwenDownload.status?.startsWith('Installing the local') ? 'Preparing local GPU runtime' : 'Downloading Qwen 3.5 4B'}</strong>
+          <div class="update-progress" role="progressbar" aria-label="Qwen download" aria-valuemin="0" aria-valuemax="100" aria-valuenow={$qwenDownload.total ? Math.round($qwenDownload.received / $qwenDownload.total * 100) : 0}><span style:width={`${$qwenDownload.total ? Math.min(100, $qwenDownload.received / $qwenDownload.total * 100) : 0}%`}></span></div>
+          <span>{$qwenDownload.total ? `${($qwenDownload.received / 1048576).toFixed(0)} of ${($qwenDownload.total / 1048576).toFixed(0)} MB` : $qwenDownload.status || 'Starting…'}</span>
+        {:else if $qwenDownload.phase === 'ready'}
+          <strong>Qwen is ready</strong><span>Saved on this computer. The model loads when you use it and unloads when idle.</span><span>{$qwenDownload.acceleration?.label ?? 'GPU use is checked when Qwen loads.'}</span>
+        {:else if $qwenDownload.phase === 'error'}
+          <strong>Qwen download paused</strong><span>{$qwenDownload.error}</span>
+        {:else}
+          <strong>Download Qwen 3.5 4B</strong><span>About 3.3 GB for the model. {$qwenDownload.runtimeNeeded ? 'The graphics runtime will also be downloaded for this computer. ' : ''}Runs entirely locally. Downloads are kept across app updates.</span>
+        {/if}
+      </div>
+      <div class="update-actions">
+        {#if $qwenDownload.phase === 'downloading'}
+          <button class="secondary" type="button" onclick={pauseQwenDownload}>Pause</button><button type="button" onclick={dismissQwenDownload}>Hide</button>
+        {:else if $qwenDownload.phase === 'ready'}
+          <button type="button" onclick={dismissQwenDownload}>Done</button>
+        {:else}
+          <button class="secondary" type="button" onclick={dismissQwenDownload}>Later</button><button type="button" onclick={downloadQwen}>{$qwenDownload.phase === 'error' ? 'Resume' : 'Download'}</button>
+        {/if}
+      </div>
+    </div>
+  {/if}
+
   {#if $update.visible}
     <div class="error-toast update-toast" role="status" transition:scale={{ duration: 150, easing: cubicOut, start: 0.96, opacity: 0 }}>
       <div class="error-toast-body">
@@ -1497,10 +1596,10 @@
           <span>{$update.total ? `${($update.received / 1048576).toFixed(0)} of ${($update.total / 1048576).toFixed(0)} MB` : 'Starting…'}</span>
         {:else if $update.phase === 'ready'}
           <strong>Update ready</strong>
-          <span>Install restarts Docuflex with version {$update.info?.latest}.</span>
+          <span>{$update.info?.manualInstall ? 'Save and open the installer, then drag Docuflex to Applications.' : `Install restarts Docuflex with version ${$update.info?.latest}.`}</span>
         {:else if $update.phase === 'installing'}
-          <strong>Installing…</strong>
-          <span>Docuflex restarts in a moment.</span>
+          <strong>{$update.info?.manualInstall ? 'Opening installer…' : 'Installing…'}</strong>
+          <span>{$update.info?.manualInstall ? 'Choose where to save the verified installer.' : 'Docuflex restarts in a moment.'}</span>
         {:else if $update.phase === 'error'}
           <strong>Update failed</strong>
           <span>{$update.error}</span>
@@ -1518,7 +1617,7 @@
       {:else if $update.phase === 'ready'}
         <div class="update-actions">
           <button type="button" class="secondary" onclick={dismissUpdate}>Later</button>
-          <button type="button" onclick={installUpdate}>Install</button>
+          <button type="button" onclick={installUpdate}>{$update.info?.manualInstall ? 'Open Installer' : 'Install'}</button>
         </div>
       {:else if $update.phase === 'error'}
         <div class="update-actions">
@@ -1903,6 +2002,7 @@
     transform-origin: top right;
   }
 
+
   .error-toast-body {
     display: grid;
     gap: 3px;
@@ -1928,6 +2028,8 @@
   /* Half as far from the top right corner as the error box. */
   .update-toast { z-index: 1399; top: 72px; right: 12px; }
   .error-toast + .update-toast { top: 150px; }
+
+  .model-download-toast { right: calc(var(--ai-dock, 0px) + 12px); }
 
   .update-progress {
     height: 6px;
@@ -2982,6 +3084,11 @@
     height: 56px;
   }
 
+  .editor-shell .tab-strip:global([data-overflow-right="true"]) {
+    -webkit-mask-image: linear-gradient(to right, black calc(100% - 36px), transparent);
+    mask-image: linear-gradient(to right, black calc(100% - 36px), transparent);
+  }
+
   .editor-shell .document-tab {
     position: relative;
     gap: 11px;
@@ -3402,6 +3509,16 @@
   /* dark theme: end generated */
 
   /* dark theme: manual */
+  /* Notification cards keep their dark surface in both themes. */
+  :global(:root[data-theme="dark"]) .error-toast { background: #222222; border-color: rgba(255, 255, 255, 0.08); }
+  :global(:root[data-theme="dark"]) .error-toast-body,
+  :global(:root[data-theme="dark"]) .error-toast-body strong { color: #ffffff; }
+  :global(:root[data-theme="dark"]) .error-toast-body span { color: #aaaaaa; }
+  :global(:root[data-theme="dark"]) .update-progress { background: rgba(255, 255, 255, 0.14); }
+  :global(:root[data-theme="dark"]) .update-progress span { background: #ffffff; }
+  :global(:root[data-theme="dark"]) .update-actions button { background: #ffffff; color: #111111; }
+  :global(:root[data-theme="dark"]) .update-actions button.secondary { background: rgba(255, 255, 255, 0.1); color: #ffffff; }
+
   /* Shell, after the Figma dark frame (Docuflex › Redesign): black glass top bar and sidebar. */
   :global(:root[data-theme="dark"]) .topbar-backdrop img { filter: invert(1) brightness(0.6) contrast(1.2); }
   /* Dark window head: Figma's starry Rectangle 992 (node 801:1490) with its black fade, not the inverted marble. */
@@ -3436,5 +3553,7 @@
   :global(:root[data-theme="dark"]) .quick-tool-icon :global([stroke="#474747"]) { stroke: #2a2a2c; }
   :global(:root[data-theme="dark"]) .quick-tool:hover .quick-tool-icon :global([stroke]),
   :global(:root[data-theme="dark"]) .quick-tool.keyboard-active .quick-tool-icon :global([stroke]) { filter: brightness(1.35); }
+
+  /* dark theme: end manual */
 
 </style>
