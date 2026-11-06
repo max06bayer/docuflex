@@ -48,6 +48,29 @@
   /** @type {Promise<IDBDatabase> | null} */
   let recentDatabasePromise = null;
 
+  /** Fade only while more tabs remain beyond the right edge. @param {HTMLElement} node */
+  function tabOverflowFade(node) {
+    const updateFade = () => {
+      node.dataset.overflowRight = String(node.scrollWidth - node.clientWidth - node.scrollLeft > 1);
+    };
+    const resize = new ResizeObserver(updateFade);
+    const observeTabs = () => {
+      resize.disconnect();
+      resize.observe(node);
+      for (const child of node.children) resize.observe(child);
+      updateFade();
+    };
+    const children = new MutationObserver(observeTabs);
+    children.observe(node, { childList: true });
+    node.addEventListener('scroll', updateFade, { passive: true });
+    observeTabs();
+    return { destroy() {
+      resize.disconnect();
+      children.disconnect();
+      node.removeEventListener('scroll', updateFade);
+    } };
+  }
+
   const quickTools = [
     { name: 'Merge', shortcut: 'M', icon: mergeIcon, description: 'Combine multiple PDFs into one document.' },
     { name: 'Split', shortcut: 'L', icon: splitIcon, description: 'Separate PDF pages into individual files.' },
@@ -1039,7 +1062,7 @@
     </div>
     <span class="topbar-backdrop" aria-hidden="true"><img src="/redesign/rectangle997.png" alt="" /></span>
 
-    <div class="tab-strip" role="tablist" aria-label="Open documents">
+    <div class="tab-strip" use:tabOverflowFade role="tablist" aria-label="Open documents">
       {#each tabs as tab (tab.id)}
         {@const tabLabel = tab.name.replace(/\.pdf$/i, '')}
         <button
@@ -3059,6 +3082,11 @@
     position: relative;
     z-index: 1;
     height: 56px;
+  }
+
+  .editor-shell .tab-strip:global([data-overflow-right="true"]) {
+    -webkit-mask-image: linear-gradient(to right, black calc(100% - 36px), transparent);
+    mask-image: linear-gradient(to right, black calc(100% - 36px), transparent);
   }
 
   .editor-shell .document-tab {
