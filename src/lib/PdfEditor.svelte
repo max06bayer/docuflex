@@ -1,4 +1,5 @@
 <script>
+  import { mcpDrawing } from '#lib/mcp-drawing.js';
   import { onDestroy, onMount, tick } from 'svelte';
   import { cubicOut } from 'svelte/easing';
   import { flip } from 'svelte/animate';
@@ -850,7 +851,7 @@
     rasterPanelOpen = false;
     rasterAdjust = { ...RASTER_DEFAULTS };
     clearRasterPreview();
-    if (zoomLevel !== 1) scheduleSharpRender(0);
+    scheduleSharpRender(0);
   }
 
   function scheduleRasterPreview() {
@@ -942,6 +943,8 @@
     if (cached) return cached;
     const canvas = shell.querySelector('canvas:not(.raster-proxy)');
     if (!(canvas instanceof HTMLCanvasElement) || !canvas.width || !canvas.height) return null;
+    // Not painted yet (lazy): a snapshot would cache a white page.
+    if (Number(canvas.dataset.renderZoom ?? 0) === 0) return null;
     const fit = Math.min(1, Math.sqrt(RASTER_PREVIEW_MAX_PIXELS / (canvas.width * canvas.height)));
     const width = Math.max(1, Math.round(canvas.width * fit));
     const height = Math.max(1, Math.round(canvas.height * fit));
@@ -6226,18 +6229,22 @@
 
   function handleViewerScroll() {
     if (rasterPanelOpen) scheduleRasterPreview();
-    if (zoomLevel > 1) scheduleSharpRender(100);
+    // Pages are painted lazily, so scrolling also paints newly visible pages.
+    scheduleSharpRender(100);
   }
 
   /** @param {number} [delay] */
   function scheduleSharpRender(delay = 160) {
     // The raster preview snapshots page canvases; re-rendering them sharper at
-    // high zoom while it runs only costs memory and stalls the sliders.
-    if (!pdfReady || !pdfDocument || !viewer || rasterPanelOpen) return;
+    // high zoom while it runs only costs memory and stalls the sliders. Pages
+    // that were never painted (lazy, renderZoom 0) are still painted, or they
+    // would stay blank and the preview would show white pages.
+    if (!pdfReady || !pdfDocument || !viewer) return;
+    const blankOnly = rasterPanelOpen;
     if (sharpRenderTimer) clearTimeout(sharpRenderTimer);
     sharpRenderTimer = setTimeout(() => {
       sharpRenderTimer = undefined;
-      rerenderVisiblePages();
+      rerenderVisiblePages(blankOnly);
     }, delay);
   }
 
@@ -6249,7 +6256,8 @@
     sharpRenderTimer = undefined;
   }
 
-  async function rerenderVisiblePages() {
+  /** @param {boolean} [blankOnly] paint only pages that were never painted */
+  async function rerenderVisiblePages(blankOnly = false) {
     if (!pdfDocument || !viewer) return;
     const generation = ++sharpRenderGeneration;
     sharpRenderTasks.forEach((task) => task.cancel());
@@ -6259,7 +6267,6 @@
     const viewerRect = viewer.getBoundingClientRect();
     const shells = [...viewer.querySelectorAll('.pdf-page')].filter((shell) => {
       if (!(shell instanceof HTMLElement)) return false;
-      if (targetQuality === 1) return true;
       const rect = shell.getBoundingClientRect();
       return rect.bottom >= viewerRect.top - viewerRect.height && rect.top <= viewerRect.bottom + viewerRect.height;
     });
@@ -6268,6 +6275,7 @@
       if (generation !== sharpRenderGeneration || !pdfDocument) return;
       const canvas = shell.querySelector('canvas');
       if (!(shell instanceof HTMLElement) || !(canvas instanceof HTMLCanvasElement)) continue;
+      if (blankOnly && Number(canvas.dataset.renderZoom ?? 0) !== 0) continue;
       if (Math.abs(Number(canvas.dataset.renderZoom ?? 0) - targetQuality) < 0.01) continue;
 
       const pageIndex = [...viewer.querySelectorAll('.pdf-page')].indexOf(shell);
@@ -6309,6 +6317,11 @@
       canvas.style.height = `${baseViewport.height}px`;
       canvas.getContext('2d')?.drawImage(nextCanvas, 0, 0);
       canvas.dataset.renderZoom = `${targetQuality}`;
+      // A page painted while the raster panel is open gets its preview now.
+      if (rasterPanelOpen) {
+        rasterPreviewSources.delete(pageIndex);
+        scheduleRasterPreview();
+      }
     }
   }
 
@@ -6499,7 +6512,13 @@
       canvas.style.height = `${viewport.height}px`;
       canvas.width = Math.floor(viewport.width * outputScale);
       canvas.height = Math.floor(viewport.height * outputScale);
-      canvas.dataset.renderZoom = '1';
+      // Painting every page up front allocates a full-resolution canvas per
+      // page and freezes large documents; far pages are painted on scroll.
+      const viewerRect = viewer?.getBoundingClientRect();
+      const shellRect = shell.getBoundingClientRect();
+      const nearViewport = !viewerRect ||
+        (shellRect.bottom >= viewerRect.top - viewerRect.height && shellRect.top <= viewerRect.bottom + viewerRect.height);
+      canvas.dataset.renderZoom = nearViewport ? '1' : '0';
       const textLayerBuilder = new pdfViewer.TextLayerBuilder({
         pdfPage: page,
         abortSignal: textLayerAbortController?.signal,
@@ -6508,7 +6527,7 @@
       textLayerBuilders.push(textLayerBuilder);
 
       await Promise.all([
-        page.render({
+        nearViewport && page.render({
           canvas,
           canvasContext: context,
           viewport,
@@ -8547,21 +8566,19 @@
       }
 
       case 'draw': {
-        await mcpEnsureSelectTool();
+        const validated = mcpDrawing(args, toPx);
         const pageIndex = mcpPageIndex(args.page);
+        await mcpEnsureSelectTool();
         const type = args.tool === 'marker' ? 'marker' : 'pen';
-        const points = (Array.isArray(args.points) ? args.points : []).map((/** @type {any} */ point) => ({ x: toPx(Number(point.x)), y: toPx(Number(point.y)), pressure: 0.5 }));
-        if (points.length < 2) throw new Error('A drawing needs at least two points.');
-        /** @type {StrokePoint[]} */
-        const dense = points.reduce((/** @type {StrokePoint[]} */ line, /** @type {StrokePoint} */ point) => appendInterpolatedPoint(line, point), []);
+        const dense = validated.points;
         const stroke = /** @type {AnnotationStroke} */ ({
           id: nextAnnotationId++,
           type,
           points: dense,
           rawPoints: dense,
           color: mcpColor(args.color, type === 'marker' ? markerColor : penColor),
-          thickness: args.thickness ? toPx(Number(args.thickness)) : (type === 'marker' ? markerThickness : penThickness),
-          opacity: args.opacity !== undefined ? clamp(Number(args.opacity), 0.01, 1) : (type === 'marker' ? markerOpacity : penOpacity),
+          thickness: validated.thickness ?? (type === 'marker' ? markerThickness : penThickness),
+          opacity: validated.opacity ?? (type === 'marker' ? markerOpacity : penOpacity),
           falloff: type === 'marker' ? markerFalloff : 0,
           smoothing: type === 'pen' ? penSmoothing : 0
         });

@@ -437,10 +437,9 @@ public class DocuflexPdfServer {
       content.transform(displayToUser);
       content.beginText();
       content.setRenderingMode(org.apache.pdfbox.pdmodel.graphics.state.RenderingMode.NEITHER);
-      // One font size per line, chosen so the line's words fill their boxes
-      // at their natural proportions: a size taken from the (padded) box
-      // height alone needs so much negative spacing that viewers split the
-      // words into single letters.
+      // One font size per line, taken from the line's height, so selections
+      // (and blackouts made from them) cover the words' full height. Each
+      // word's width is then matched exactly with horizontal scaling below.
       List<List<FontRun>> wordRuns = new ArrayList<>();
       double[] naturals = new double[texts.size()];
       for (int index = 0; index < texts.size(); index += 1) {
@@ -452,15 +451,11 @@ public class DocuflexPdfServer {
       for (int start = 0; start < texts.size();) {
         int end = start + 1;
         while (end < texts.size() && sameOcrLine(geometry.get(end - 1), geometry.get(end))) end += 1;
-        double widths = 0, natural = 0, lineHeight = 0;
+        double lineHeight = 0;
         for (int index = start; index < end; index += 1) {
-          double[] points = geometry.get(index);
-          widths += Math.hypot(points[2] - points[0], points[3] - points[1]);
-          natural += naturals[index];
-          lineHeight = Math.max(lineHeight, Math.abs(ocrWordHeight(points)));
+          lineHeight = Math.max(lineHeight, Math.abs(ocrWordHeight(geometry.get(index))));
         }
-        double fit = natural > 0 ? widths / natural : lineHeight;
-        Arrays.fill(lineSizes, start, end, Math.max(lineHeight * 0.5, Math.min(lineHeight, fit)));
+        Arrays.fill(lineSizes, start, end, lineHeight);
         start = end;
       }
       for (int index = 0; index < texts.size(); index += 1) {
@@ -485,17 +480,18 @@ public class DocuflexPdfServer {
         boolean lineContinues = index + 1 < texts.size() && sameOcrLine(points, geometry.get(index + 1));
         double[] next = lineContinues ? geometry.get(index + 1) : null;
         double gap = next == null ? 0 : (next[0] - points[2]) * alongX + (next[1] - points[3]) * alongY;
-        // The glyphs keep their proportions (viewers such as pdf.js only
-        // follow rotated lines when text is not stretched) and character
-        // spacing between them makes the word as wide as its box.
         double size = lineSizes[index];
+        if (!(size > 0)) continue;
+        double boxWidth = width;
         // Viewers find word breaks from the gap after a word's last glyph; a
         // word that ends right where the next begins would run into it.
         if (next != null) width = Math.max(width * 0.5, Math.min(width, width + gap - size * 0.15));
-        int characters = word.codePointCount(0, word.length());
-        // Wider spacing than a fiftieth of the size reads as spaces inside the word.
-        double spacing = characters > 1 ? Math.min(size * 0.02, (width - natural * size) / (characters - 1)) : 0;
-        width = natural * size + spacing * Math.max(0, characters - 1);
+        // Horizontal scaling (Tz) stretches the invisible word along its
+        // baseline to exactly the width the engine found. The scanned font is
+        // rarely Helvetica's width, and a narrower word made selections and
+        // blackouts stop short of the real text. Scaling along the baseline
+        // keeps the text direction, so rotated and tilted words stay aligned.
+        double stretch = Math.max(0.2, Math.min(5, width / (natural * size)));
         // Helvetica sits about a fifth of its size below the baseline: lift the
         // baseline so the glyph cells line up with the word's box.
         double baseX = points[0] + upX * height * 0.2, baseY = points[1] + upY * height * 0.2;
@@ -503,30 +499,25 @@ public class DocuflexPdfServer {
             (float) alongX, (float) -alongY,
             (float) upX, (float) -upY,
             (float) baseX, (float) (display[1] - baseY)));
-        content.setCharacterSpacing((float) spacing);
-        for (int runIndex = 0; runIndex < runs.size(); runIndex += 1) {
-          FontRun run = runs.get(runIndex);
+        content.setHorizontalScaling((float) (stretch * 100));
+        content.setCharacterSpacing(0);
+        for (FontRun run : runs) {
           content.setFont(run.font(), (float) size);
-          if (runIndex + 1 < runs.size()) {
-            content.showText(run.text());
-            continue;
-          }
-          // No spacing after the last glyph: it would shift where the word ends.
-          int last = run.text().offsetByCodePoints(run.text().length(), -1);
-          if (last > 0) content.showText(run.text().substring(0, last));
-          content.setCharacterSpacing(0);
-          content.showText(run.text().substring(last));
+          content.showText(run.text());
         }
         // A space after each word (except at the end of a line) lets viewers
         // copy and search the text with its word breaks. It reaches exactly to
-        // the next word, which viewers read as one gap.
+        // the next word, which viewers read as one gap. Spacing is scaled by
+        // Tz too, so it is given in unscaled units.
         if (next != null) {
           content.setFont(base, (float) size);
-          content.setCharacterSpacing((float) (gap + (points[2] - points[0]) * alongX + (points[3] - points[1]) * alongY
-              - width - base.getStringWidth(" ") / 1000.0 * size));
+          content.setCharacterSpacing((float) ((gap + boxWidth - width) / stretch
+              - base.getStringWidth(" ") / 1000.0 * size));
           content.showText(" ");
+          content.setCharacterSpacing(0);
         }
       }
+      content.setHorizontalScaling(100);
       content.endText();
     }
   }
@@ -768,7 +759,7 @@ public class DocuflexPdfServer {
       throw new IllegalArgumentException("Invalid raster image data.", error);
     }
     if (imageBytes.length > 48 * 1024 * 1024) throw new IllegalArgumentException("Raster image is too large.");
-    PDImageXObject image = JPEGFactory.createFromByteArray(document, imageBytes);
+    PDImageXObject image = NativeRasterBridge.enabled() ? NativeRasterBridge.decode(imageBytes).embed(document) : JPEGFactory.createFromByteArray(document, imageBytes);
 
     List<PDAnnotation> widgets = new ArrayList<>();
     for (PDAnnotation annotation : page.getAnnotations()) {
@@ -1059,8 +1050,8 @@ public class DocuflexPdfServer {
     }
 
     Set<COSBase> redactedWidgets = Collections.newSetFromMap(new IdentityHashMap<>());
-    PDFRenderer renderer = new PDFRenderer(document);
-    renderer.setSubsamplingAllowed(false);
+    PDFRenderer renderer = NativeRasterBridge.enabled() ? null : new PDFRenderer(document);
+    if (renderer != null) renderer.setSubsamplingAllowed(false);
     for (Map.Entry<Integer, List<AnnotationStroke>> entry : redactionsByPage.entrySet()) {
       int pageIndex = entry.getKey();
       PDPage page = document.getPage(pageIndex);
@@ -1102,13 +1093,20 @@ public class DocuflexPdfServer {
         }
       }
 
-      BufferedImage rendered = renderer.renderImageWithDPI(pageIndex, REDACTION_DPI, ImageType.RGB);
-      paintRedactions(rendered, display, polygons, black);
-      PDImageXObject pageImage = LosslessFactory.createFromImage(document, rendered);
-      if (pageImage.getCOSObject().getLength() > REDACTION_LOSSLESS_LIMIT) {
-        pageImage = JPEGFactory.createFromImage(document, rendered, 0.9f);
+      PDImageXObject pageImage;
+      if (NativeRasterBridge.enabled()) {
+        NativeRasterBridge.Image raster = NativeRasterBridge.render(document, pageIndex, REDACTION_DPI, display, polygons, black, true);
+        boxes.addAll(raster.redactionBounds());
+        pageImage = raster.embed(document);
+      } else {
+        BufferedImage rendered = renderer.renderImageWithDPI(pageIndex, REDACTION_DPI, ImageType.RGB);
+        paintRedactions(rendered, display, polygons, black);
+        pageImage = LosslessFactory.createFromImage(document, rendered);
+        if (pageImage.getCOSObject().getLength() > REDACTION_LOSSLESS_LIMIT) {
+          pageImage = JPEGFactory.createFromImage(document, rendered, 0.9f);
+        }
+        rendered.flush();
       }
-      rendered.flush();
 
       List<PageGlyph> kept = new ArrayList<>();
       for (PageGlyph glyph : glyphs) {
@@ -1892,9 +1890,11 @@ public class DocuflexPdfServer {
       int pageIndex,
       PDPage page,
       List<AnnotationStroke> shapes) throws IOException {
-    BufferedImage blurSource = shapes.stream().anyMatch(shape -> styleFlag(shape, 18, false) && styleFlag(shape, 19, false))
-        ? new PDFRenderer(document).renderImageWithDPI(pageIndex, 144, ImageType.RGB)
-        : null;
+    boolean needsBlur = shapes.stream().anyMatch(shape -> styleFlag(shape, 18, false) && styleFlag(shape, 19, false));
+    BufferedImage blurSource = needsBlur && !NativeRasterBridge.enabled()
+        ? new PDFRenderer(document).renderImageWithDPI(pageIndex, 144, ImageType.RGB) : null;
+    NativeRasterBridge.Image nativeBlurSource = needsBlur && NativeRasterBridge.enabled()
+        ? NativeRasterBridge.render(document, pageIndex, 144, displaySize(page), List.of(), List.of(), false) : null;
     try (PDPageContentStream content = new PDPageContentStream(
         document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
       content.setNonStrokingColor(1f, 0.302f, 0.333f);
@@ -1904,8 +1904,9 @@ public class DocuflexPdfServer {
 
       for (AnnotationStroke shape : shapes) {
         if (shape.width <= 0 || shape.height <= 0) continue;
-        if (blurSource != null && styleFlag(shape, 18, false) && styleFlag(shape, 19, false)) {
-          drawBackgroundBlur(document, content, page, shape, blurSource);
+        if ((blurSource != null || nativeBlurSource != null) && styleFlag(shape, 18, false) && styleFlag(shape, 19, false)) {
+          if (nativeBlurSource != null) drawNativeBackgroundBlur(document, content, page, shape, nativeBlurSource);
+          else drawBackgroundBlur(document, content, page, shape, blurSource);
         }
         drawObjectShadow(content, page, shape);
         applyObjectStyle(content, shape);
@@ -2019,6 +2020,27 @@ public class DocuflexPdfServer {
         topLeft.y - bottomLeft.y,
         bottomLeft.x,
         bottomLeft.y));
+    content.restoreGraphicsState();
+  }
+
+  private static void drawNativeBackgroundBlur(
+      PDDocument document, PDPageContentStream content, PDPage page, AnnotationStroke shape,
+      NativeRasterBridge.Image source) throws IOException {
+    int left = Math.max(0, Math.min(source.width() - 1, (int) Math.floor(shape.x * source.width())));
+    int top = Math.max(0, Math.min(source.height() - 1, (int) Math.floor(shape.y * source.height())));
+    int right = Math.max(left + 1, Math.min(source.width(), (int) Math.ceil((shape.x + shape.width) * source.width())));
+    int bottom = Math.max(top + 1, Math.min(source.height(), (int) Math.ceil((shape.y + shape.height) * source.height())));
+    int radius = Math.max(1, Math.min(15, (int) Math.round(styleValue(shape, 20, 8) * 0.75)));
+    PDImageXObject image = NativeRasterBridge.blur(source, left, top, right, bottom, radius).embed(document);
+    content.saveGraphicsState();
+    PDExtendedGraphicsState graphicsState = new PDExtendedGraphicsState();
+    float opacity = (float) Math.max(0, Math.min(1, styleValue(shape, 6, 1)));
+    graphicsState.setNonStrokingAlphaConstant(opacity); graphicsState.setStrokingAlphaConstant(opacity);
+    content.setGraphicsStateParameters(graphicsState);
+    appendClosedObjectPath(content, page, shape); content.clip();
+    PdfPoint bottomLeft = shapePoint(page, shape, 0, 1), bottomRight = shapePoint(page, shape, 1, 1), topLeft = shapePoint(page, shape, 0, 0);
+    content.drawImage(image, new Matrix(bottomRight.x-bottomLeft.x, bottomRight.y-bottomLeft.y,
+        topLeft.x-bottomLeft.x, topLeft.y-bottomLeft.y, bottomLeft.x, bottomLeft.y));
     content.restoreGraphicsState();
   }
 
@@ -2211,7 +2233,7 @@ public class DocuflexPdfServer {
     if (imageBytes.length > 12 * 1024 * 1024) {
       throw new IOException("Placed image is too large.");
     }
-    PDImageXObject image = PDImageXObject.createFromByteArray(document, imageBytes, "placed-image.png");
+    PDImageXObject image = NativeRasterBridge.enabled() ? NativeRasterBridge.decode(imageBytes).embed(document) : PDImageXObject.createFromByteArray(document, imageBytes, "placed-image.png");
     PdfPoint bottomLeft = shapePoint(page, shape, 0, 1);
     PdfPoint bottomRight = shapePoint(page, shape, 1, 1);
     PdfPoint topLeft = shapePoint(page, shape, 0, 0);

@@ -19,6 +19,38 @@
         }
       } catch {}
     </script>
+    <script>
+      // WebKitGTK (Linux desktop app) re-blurs everything behind a
+      // backdrop-filter on every scroll frame, which makes the editor lag.
+      if (/Linux/.test(navigator.userAgent) && !/Android|Chrome|Firefox/.test(navigator.userAgent)) {
+        document.documentElement.classList.add('docuflex-webkitgtk');
+      }
+    </script>
+    <style>
+      html.docuflex-webkitgtk *,
+      html.docuflex-webkitgtk *::before,
+      html.docuflex-webkitgtk *::after {
+        -webkit-backdrop-filter: none !important;
+        backdrop-filter: none !important;
+      }
+      /* Animating the toolbar's width and the tool menu's scale re-lays out
+         and repaints it over the PDF canvas every frame in WebKitGTK. */
+      html.docuflex-webkitgtk .editor-toolbar-wrap,
+      html.docuflex-webkitgtk .editor-toolbar-wrap *,
+      html.docuflex-webkitgtk .toolbar-tooltip {
+        transition: none !important;
+        animation: none !important;
+      }
+      html.docuflex-webkitgtk .editor-toolbar-wrap {
+        will-change: transform;
+      }
+      html.docuflex-webkitgtk .tool-menu {
+        background: #fff !important;
+      }
+      html.docuflex-webkitgtk[data-theme='dark'] .tool-menu {
+        background: #181818 !important;
+      }
+    </style>
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">

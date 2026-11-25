@@ -18,7 +18,12 @@ use tauri::{webview::DownloadEvent, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri::{LogicalPosition, TitleBarStyle};
 use url::Url;
 
+#[cfg(not(feature = "mac-app-store"))]
 mod updater;
+#[cfg(all(feature = "mac-app-store", not(target_os = "macos")))]
+compile_error!("The mac-app-store feature is only supported on macOS.");
+#[cfg(target_os = "macos")]
+mod sandbox;
 
 // The side-by-side build ("Docuflex Redesign") uses its own ports so it can run next to the regular app.
 #[cfg(not(feature = "side-by-side"))]
@@ -78,12 +83,20 @@ fn take_pending_pdf(
     let Some(path) = path else {
         return Ok(None);
     };
+    #[cfg(target_os = "macos")]
+    let access = sandbox::Access::open(&path);
+    #[cfg(target_os = "macos")]
+    let actual_path = &access.path;
+    #[cfg(not(target_os = "macos"))]
+    let actual_path = &path;
     let metadata =
-        fs::metadata(&path).map_err(|error| format!("Could not inspect the PDF: {error}"))?;
+        fs::metadata(actual_path).map_err(|error| format!("Could not inspect the PDF: {error}"))?;
     if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_OPEN_PDF_BYTES {
         return Err("The selected PDF is empty or too large.".to_string());
     }
-    let bytes = fs::read(&path).map_err(|error| format!("Could not read the PDF: {error}"))?;
+    let bytes = fs::read(actual_path).map_err(|error| format!("Could not read the PDF: {error}"))?;
+    #[cfg(target_os = "macos")]
+    access.remember(&path);
     if !bytes.starts_with(b"%PDF-") {
         return Err("The selected file is not a valid PDF.".to_string());
     }
@@ -109,6 +122,57 @@ fn start_window_drag(app: tauri::AppHandle) -> Result<(), String> {
     window
         .start_dragging()
         .map_err(|error| format!("Could not drag the Docuflex window: {error}"))
+}
+
+/// Atomic AppKit frame updates for the wider in-window resize grips. Tauri's
+/// start_resize_dragging is unsupported on macOS; keep all AppKit work on its main thread.
+#[tauri::command]
+async fn macos_resize_window(
+    app: tauri::AppHandle,
+    direction: String,
+    start: Option<[f64; 4]>,
+    delta_x: f64,
+    delta_y: f64,
+) -> Result<[f64; 4], String> {
+    #[cfg(target_os = "macos")]
+    {
+        if !["n", "s", "e", "w", "ne", "nw", "se", "sw"].contains(&direction.as_str())
+            || !delta_x.is_finite() || !delta_y.is_finite()
+            || start.is_some_and(|frame| frame.iter().any(|value| !value.is_finite())) {
+            return Err("Invalid resize coordinates.".into());
+        }
+        let window = app.get_webview_window("main").ok_or("Window unavailable.")?;
+        if window.is_fullscreen().unwrap_or(false) { return Err("Full-screen windows cannot be resized.".into()); }
+        let (tx, mut rx) = tauri::async_runtime::channel(1);
+        let native_window = window.clone();
+        window.run_on_main_thread(move || {
+            use objc2_app_kit::NSWindow;
+            use objc2_foundation::{NSPoint, NSRect, NSSize};
+            let result = (|| {
+                let pointer = native_window.ns_window().map_err(|error| error.to_string())?;
+                // SAFETY: live Tauri window, accessed on AppKit's main thread.
+                let native = unsafe { &*(pointer as *const NSWindow) };
+                let mut frame = native.frame();
+                if let Some([x, y, width, height]) = start {
+                    let minimum = native.minSize();
+                    let new_width = if direction.contains('w') { width - delta_x } else if direction.contains('e') { width + delta_x } else { width };
+                    let new_height = if direction.contains('n') { height - delta_y } else if direction.contains('s') { height + delta_y } else { height };
+                    let new_width = new_width.clamp(minimum.width.max(960.0), 16_384.0);
+                    let new_height = new_height.clamp(minimum.height.max(640.0), 16_384.0);
+                    frame = NSRect::new(
+                        NSPoint::new(if direction.contains('w') { x + width - new_width } else { x }, if direction.contains('s') { y + height - new_height } else { y }),
+                        NSSize::new(new_width, new_height),
+                    );
+                    native.setFrame_display(frame, true);
+                }
+                Ok([frame.origin.x, frame.origin.y, frame.size.width, frame.size.height])
+            })();
+            let _ = tx.try_send(result);
+        }).map_err(|error| error.to_string())?;
+        rx.recv().await.ok_or_else(|| "Window resize did not complete.".to_string())?
+    }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = (app, direction, start, delta_x, delta_y); Err("macOS only.".into()) }
 }
 
 #[cfg(target_os = "windows")]
@@ -300,26 +364,49 @@ fn spawn_services(
     resource_root: &Path,
     log_directory: &Path,
 ) -> Result<Vec<Child>, Box<dyn std::error::Error>> {
-    let java = runtime_executable(resource_root, "java", "java");
+    #[cfg(not(feature = "mac-app-store"))]
+    let backend_binary = runtime_executable(resource_root, "java", "java");
+    #[cfg(feature = "mac-app-store")]
+    let backend_binary = runtime_executable(resource_root, "pdf-backend", "docuflex-pdf-backend");
     let node = runtime_executable(resource_root, "node", "node");
     let pdf2html = resource_root.join("runtime/pdf2htmlEX");
     let ocr = resource_root.join("runtime/ocr");
     let python = python_executable(resource_root);
     let document_converter = office_executable(resource_root);
     let parent_pid = std::process::id().to_string();
-    #[cfg(target_os = "windows")]
+    #[cfg(all(target_os = "windows", not(feature = "mac-app-store")))]
     let classpath = "backend/out;backend/lib/pdfbox-app-3.0.8.jar";
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(all(not(target_os = "windows"), not(feature = "mac-app-store")))]
     let classpath = "backend/out:backend/lib/pdfbox-app-3.0.8.jar";
-    let backend_arguments = [
+    let mut backend_arguments = Vec::new();
+    #[cfg(feature = "mac-app-store")]
+    // Native Image signal dispatch uses a named semaphore forbidden by the
+    // App Sandbox. The app supervisor owns termination; raster children also
+    // watch their parent and exit if it disappears.
+    backend_arguments.push(OsString::from("-XX:-EnableSignalHandling"));
+    #[cfg(target_os = "macos")]
+    {
+        backend_arguments.push(OsString::from(format!("-Duser.home={}", sandbox::home().display())));
+        backend_arguments.push(OsString::from(format!("-Djava.io.tmpdir={}", sandbox::temporary_directory().display())));
+    }
+    #[cfg(not(feature = "mac-app-store"))]
+    backend_arguments.extend([
         OsString::from("-cp"),
         OsString::from(classpath),
         OsString::from("DocuflexPdfServer"),
-    ];
+    ]);
     let (backend_stdout, backend_stderr) = log_file(log_directory, "pdf-backend")?;
     let mut backend_command =
-        supervised_command(resource_root, &parent_pid, &java, &backend_arguments);
+        supervised_command(resource_root, &parent_pid, &backend_binary, &backend_arguments);
     isolate_service_environment(&mut backend_command);
+    #[cfg(target_os = "macos")]
+    sandbox::configure_service(&mut backend_command);
+    #[cfg(feature = "mac-app-store")]
+    backend_command
+        .env("DOCUFLEX_NATIVE_RASTER_PYTHON", &python)
+        .env("DOCUFLEX_NATIVE_RASTER_SCRIPT", resource_root.join("scripts/pdf-native-raster.py"))
+        .env("PYTHONPATH", resource_root.join("scripts"))
+        .env("PYTHONDONTWRITEBYTECODE", "1");
     let backend = backend_command
         .current_dir(resource_root)
         .env("PDF_BACKEND_HOST", "127.0.0.1")
@@ -356,7 +443,8 @@ fn spawn_services(
         .env("DOCUFLEX_MCP", "1")
         // The bundle leaves out the ~1 GB translation engine; the server
         // downloads it into ~/.cache/docuflex the first time Translate runs.
-        .env("DOCUFLEX_TRANSLATE_AUTO_INSTALL", "1")
+        .env("DOCUFLEX_TRANSLATE_AUTO_INSTALL", if cfg!(feature = "mac-app-store") { "0" } else { "1" })
+        .env("DOCUFLEX_DISTRIBUTION", if cfg!(feature = "mac-app-store") { "app-store" } else { "direct" })
         // The desktop invokes only its checksum-pinned bundled tools. Linux's
         // RLIMIT_NPROC counts every process owned by the logged-in user, so the
         // server profile's limit can prevent pdf2htmlEX from forking on a
@@ -385,6 +473,11 @@ fn spawn_services(
         .env("FONTCONFIG_FILE", "fonts.conf")
         // OCR with Apple Vision; Tesseract stays as the fallback.
         .env("VISION_OCR_BIN", ocr.join("bin/docuflex-vision-ocr"));
+    #[cfg(target_os = "macos")]
+    {
+        sandbox::configure_service(&mut frontend_command);
+        frontend_command.env("PYTHONPATH", resource_root.join("scripts"));
+    }
     let frontend = frontend_command
         .stdin(Stdio::null())
         .stdout(frontend_stdout)
@@ -536,8 +629,9 @@ fn set_native_window_buttons_hidden(window: &tauri::WebviewWindow, hidden: bool)
     });
 }
 
-fn editor_initialization_script() -> &'static str {
-    include_str!("../../runtime/chrome.js")
+fn editor_initialization_script() -> String {
+    let distribution = if cfg!(feature = "mac-app-store") { "app-store" } else { "direct" };
+    format!("window.__DOCUFLEX_DISTRIBUTION__ = '{distribution}';\n{}", include_str!("../../runtime/chrome.js"))
 }
 
 /// Always shows the native save dialog, then writes the decoded bytes to
@@ -551,7 +645,11 @@ async fn docuflex_save_prompt(suggested_name: String, base64: String) -> Result<
         .map_err(|error| error.to_string())?;
     let destination = choose_download_destination(&PathBuf::from(suggested_name))
         .ok_or_else(|| "cancelled".to_string())?;
+    #[cfg(target_os = "macos")]
+    let access = sandbox::Access::open(&destination);
     fs::write(&destination, &bytes).map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    access.remember(&destination);
     Ok(destination.to_string_lossy().into_owned())
 }
 
@@ -562,7 +660,53 @@ async fn docuflex_save_overwrite(path: String, base64: String) -> Result<(), Str
     let bytes = BASE64_STANDARD
         .decode(base64)
         .map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    {
+        let access = sandbox::Access::open(Path::new(&path));
+        fs::write(&access.path, &bytes).map_err(|error| error.to_string())?;
+        access.remember(Path::new(&path));
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
     fs::write(&path, &bytes).map_err(|error| error.to_string())
+}
+
+/// Read a requested local file through its bookmark or a fresh native selection.
+#[tauri::command]
+async fn docuflex_read_local_file(path: String, limit: u64) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    return tauri::async_runtime::spawn_blocking(move || {
+        let requested = PathBuf::from(path);
+        let mut access = sandbox::Access::open(&requested);
+        let probe = fs::metadata(&access.path);
+        if matches!(&probe, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied) {
+            let selected = rfd::FileDialog::new().set_title("Choose the file requested by the AI")
+                .set_file_name(requested.file_name().and_then(|name| name.to_str()).unwrap_or(""))
+                .pick_file().ok_or_else(|| "cancelled".to_string())?;
+            if selected != requested { return Err("The selected file differs from the requested path. Ask the AI to use the file you selected.".into()); }
+            access = sandbox::Access::open(&selected);
+        }
+        let metadata = fs::metadata(&access.path).map_err(|error| error.to_string())?;
+        if !metadata.is_file() || metadata.len() > limit.min(MAX_OPEN_PDF_BYTES) { return Err("The selected file is too large or is not a regular file.".into()); }
+        let data = fs::read(&access.path).map_err(|error| error.to_string())?;
+        access.remember(&requested);
+        Ok(BASE64_STANDARD.encode(data))
+    }).await.map_err(|error| error.to_string())?;
+    #[cfg(not(target_os = "macos"))]
+    { let _ = (path, limit); Err("This file broker is only used by the macOS sandbox.".into()) }
+}
+
+/// Copies old local data into the container only after the user selects it.
+#[tauri::command]
+async fn docuflex_import_local_data() -> Result<u64, String> {
+    #[cfg(target_os = "macos")]
+    return tauri::async_runtime::spawn_blocking(|| {
+        let source = rfd::FileDialog::new().set_title("Choose previous .docuflex or translation cache folder")
+            .pick_folder().ok_or_else(|| "cancelled".to_string())?;
+        sandbox::import_previous_data(&source)
+    }).await.map_err(|error| error.to_string())?;
+    #[cfg(not(target_os = "macos"))]
+    Err("Local data import is only needed for the macOS sandbox.".into())
 }
 
 /// Prints a PDF through the system print dialog. On macOS PDFKit prints the
@@ -588,6 +732,9 @@ extern "C" {}
 #[cfg(target_os = "macos")]
 fn print_pdf(window: &tauri::WebviewWindow, name: &str, bytes: Vec<u8>) -> Result<(), String> {
     // PDFKit reads pages lazily, so the file stays until the next print job.
+    #[cfg(target_os = "macos")]
+    let directory = sandbox::temporary_directory().join("docuflex-print");
+    #[cfg(not(target_os = "macos"))]
     let directory = std::env::temp_dir().join("docuflex-print");
     let _ = fs::remove_dir_all(&directory);
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
@@ -671,7 +818,7 @@ pub fn run() {
     let services_for_setup = Arc::clone(&services);
     let services_for_exit = Arc::clone(&services);
 
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .manage(Arc::clone(&pending_pdf))
         .on_window_event(|window, event| {
             #[cfg(target_os = "macos")]
@@ -693,19 +840,36 @@ pub fn run() {
                     notify_pending_pdf(window.app_handle());
                 }
             }
-        })
+        });
+    // Store binaries do not contain or register the GitHub updater.
+    #[cfg(not(feature = "mac-app-store"))]
+    let builder = builder
         .manage(updater::UpdateState::default())
         .invoke_handler(tauri::generate_handler![
             take_pending_pdf,
             start_window_drag,
+            macos_resize_window,
             docuflex_save_prompt,
             docuflex_save_overwrite,
             docuflex_print_pdf,
+            docuflex_import_local_data,
+            docuflex_read_local_file,
             updater::docuflex_update_check,
             updater::docuflex_update_download,
             updater::docuflex_update_install
-        ])
-        .plugin(tauri_plugin_single_instance::init(
+        ]);
+    #[cfg(feature = "mac-app-store")]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        take_pending_pdf,
+        start_window_drag,
+        macos_resize_window,
+        docuflex_save_prompt,
+        docuflex_save_overwrite,
+        docuflex_print_pdf,
+        docuflex_import_local_data,
+        docuflex_read_local_file
+    ]);
+    let app = builder.plugin(tauri_plugin_single_instance::init(
             move |app, arguments, cwd| {
                 if let Some(path) = pdf_path_from_arguments(arguments, Path::new(&cwd)) {
                     if let Ok(mut pending) = pending_pdf_for_instance.lock() {
@@ -722,6 +886,9 @@ pub fn run() {
         ))
         .setup(move |app| {
             let resource_root = native_tool_path(app.path().resource_dir()?.join("resources"));
+            #[cfg(target_os = "macos")]
+            let log_directory = sandbox::home().join("Library/Logs/com.docuflex.editor");
+            #[cfg(not(target_os = "macos"))]
             let log_directory = app.path().app_log_dir()?;
             let children = match spawn_services(&resource_root, &log_directory) {
                 Ok(children) => children,
@@ -748,6 +915,8 @@ pub fn run() {
             let page_load_marker = std::env::var_os("DOCUFLEX_PAGE_LOAD_MARKER").map(PathBuf::from);
             let window_builder =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::External(editor_url))
+                    // Let HTML drop targets route files to chat or the PDF editor.
+                    .disable_drag_drop_handler()
                     .title("Docuflex")
                     .inner_size(1440.0, 920.0)
                     .min_inner_size(960.0, 640.0)

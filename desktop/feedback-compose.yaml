@@ -1,0 +1,33 @@
+# On the Docuflex server: docker compose -f feedback-compose.yaml up -d
+# Copy scripts/feedback-server.mjs and src/lib/server/feedback.js into ./receiver/ first.
+services:
+  feedback:
+    image: node:24-alpine
+    container_name: docuflex-feedback
+    restart: unless-stopped
+    user: '65532:65532'
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 128m
+    pids_limit: 64
+    working_dir: /app
+    command: [node, scripts/feedback-server.mjs]
+    environment:
+      DOCUFLEX_FEEDBACK_DIR: /data
+    volumes:
+      - ./receiver:/app:ro
+      - /var/lib/docuflex/feedback:/data
+    networks: [coolify]
+    labels:
+      traefik.enable: 'true'
+      traefik.docker.network: coolify
+      traefik.http.routers.docuflex-feedback.rule: Host(`docuflex.eu`) && Path(`/api/feedback`)
+      traefik.http.routers.docuflex-feedback.entrypoints: https
+      traefik.http.routers.docuflex-feedback.priority: '200'
+      traefik.http.routers.docuflex-feedback.tls: 'true'
+      traefik.http.routers.docuflex-feedback.tls.certresolver: letsencrypt
+      traefik.http.services.docuflex-feedback.loadbalancer.server.port: '3000'
+networks:
+  coolify:
+    external: true

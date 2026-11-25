@@ -4,3 +4,7 @@ src-tauri/resources/
 src-tauri/target/
 src-tauri/gen/
 src-tauri/icons/
+
+# Isolated Mac App Store staging and signing inputs
+.app-store/
+src-tauri/target-app-store/

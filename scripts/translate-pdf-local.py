@@ -10,6 +10,7 @@ proportion to their length so each line keeps its position and styling.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import traceback
@@ -35,6 +36,9 @@ def installed_translation(source: str, target: str):
 def install_language_path(source: str, target: str) -> None:
     if installed_translation(source, target) is not None:
         return
+
+    if os.environ.get("DOCUFLEX_DISTRIBUTION") == "app-store":
+        raise RuntimeError("Download the required language model from the Translate panel first.")
 
     try:
         argostranslate.package.update_package_index()

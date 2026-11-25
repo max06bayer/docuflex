@@ -72,7 +72,7 @@ export async function translatePdf(pdf, source, target, signal) {
 }
 
 /**
- * @typedef {{ phase: 'preparing' | 'downloading' | 'installing' | 'done' | 'failed'; received: number; total: number; bytesPerSecond: number; error: string }} ModelDownload
+ * @typedef {{ pair?: string; phase: 'preparing' | 'downloading' | 'installing' | 'done' | 'failed'; received: number; total: number; bytesPerSecond: number; error: string }} ModelDownload
  * @typedef {{ engineReady: boolean; modelReady: boolean; canDownload: boolean; local: boolean; downloadBytes: number | null; download: ModelDownload | null }} TranslationStatus
  */
 

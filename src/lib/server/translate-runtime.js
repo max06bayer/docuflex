@@ -1,10 +1,11 @@
+import { localCacheDirectory } from '#lib/server/local-storage.js';
 import * as env from '$app/env/private';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants, createWriteStream, existsSync } from 'node:fs';
 import { access, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { logPrivateError } from '#lib/server/request-security.js';
@@ -12,7 +13,7 @@ import { logPrivateError } from '#lib/server/request-security.js';
 export const TRANSLATION_LANGUAGE_CODES = new Set(['en', 'de', 'es', 'fr', 'it', 'pt', 'nl', 'pl', 'ru', 'uk', 'ar', 'zh', 'ja', 'ko']);
 
 /** Argos models, caches and the downloaded engine live here, outside the (read-only) app bundle. */
-export const TRANSLATE_CACHE = join(homedir(), '.cache', 'docuflex');
+export const TRANSLATE_CACHE = localCacheDirectory;
 const USER_RUNTIME = join(TRANSLATE_CACHE, 'translate-python');
 /**
  * Where the language models live. The hosted server installs every model at build
@@ -47,7 +48,7 @@ let speedSamples = [];
  * never installs the engine at runtime (scripts/install-python-document-tools.sh does).
  */
 export function autoInstallEnabled() {
-  return env.DOCUFLEX_TRANSLATE_AUTO_INSTALL === '1';
+  return process.env.DOCUFLEX_DISTRIBUTION !== 'app-store' && env.DOCUFLEX_TRANSLATE_AUTO_INSTALL === '1';
 }
 
 /** @param {string} directory */
@@ -63,6 +64,10 @@ async function hasRuntime(directory) {
 
 /** @returns {Promise<string | null>} */
 export async function findRuntime() {
+  if (process.env.DOCUFLEX_DISTRIBUTION === 'app-store') {
+    const bundled = join(process.cwd(), 'runtime/python/lib/python3.12/site-packages');
+    return await hasRuntime(bundled) ? bundled : null;
+  }
   const configured = env.LOCAL_TRANSLATE_PYTHONPATH?.trim();
   if (configured) return configured;
   for (const candidate of [join(process.cwd(), '.document-python'), USER_RUNTIME]) {
@@ -129,7 +134,7 @@ export async function translationStatus(source, target) {
     engineReady: Boolean(runtime),
     modelReady,
     // The desktop translates on the user's own computer; the hosted build on its server.
-    local: autoInstallEnabled(),
+    local: process.env.DOCUFLEX_DISTRIBUTION === 'app-store' || autoInstallEnabled(),
     downloadBytes: modelReady ? 0 : await estimatedDownloadBytes(missing, !runtime),
     // Without the engine only the desktop can fetch it; models can be fetched wherever the engine exists.
     canDownload: Boolean(runtime) || autoInstallEnabled(),
@@ -247,7 +252,10 @@ async function runDownload(state, source, target) {
   }
   for (const file of files.filter((item) => item.path.endsWith('.argosmodel'))) {
     await mkdir(PACKAGE_DIRECTORY, { recursive: true });
-    await run(python, ['-c', 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])', file.path, PACKAGE_DIRECTORY]);
+    const unpack = process.env.DOCUFLEX_DISTRIBUTION === 'app-store'
+      ? [join(process.cwd(), 'scripts/install-model-data.py'), file.path, PACKAGE_DIRECTORY]
+      : ['-c', 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])', file.path, PACKAGE_DIRECTORY];
+    await run(python, unpack);
     await rm(file.path, { force: true });
   }
   if ((await missingModels(source, target)).length) throw new DownloadError('The language model was downloaded but could not be installed.');
@@ -315,8 +323,14 @@ async function resolveEngineWheels(python) {
   await mkdir(wheels, { recursive: true });
   await run(python, ['-m', 'venv', installer]);
   const installerPython = process.platform === 'win32' ? join(installer, 'Scripts', 'python.exe') : join(installer, 'bin', 'python');
+  // The desktop's Linux python3 is a wrapper that sets LD_LIBRARY_PATH for its
+  // libpython; the venv links the real interpreter and skips that wrapper.
+  const pythonLibrary = join(dirname(dirname(python)), 'lib');
+  const installerEnv = process.platform === 'linux'
+    ? { ...process.env, LD_LIBRARY_PATH: [pythonLibrary, process.env.LD_LIBRARY_PATH].filter(Boolean).join(delimiter) }
+    : process.env;
   const pipOptions = ['--disable-pip-version-check', '--no-input', '--only-binary=:all:'];
-  await run(installerPython, ['-m', 'pip', 'install', ...pipOptions, '--dry-run', '--ignore-installed', '--quiet', '--report', report, ...ENGINE_PACKAGES]);
+  await run(installerPython, ['-m', 'pip', 'install', ...pipOptions, '--dry-run', '--ignore-installed', '--quiet', '--report', report, ...ENGINE_PACKAGES], installerEnv);
   const resolved = JSON.parse(await readFile(report, 'utf8'));
   const files = resolved.install.map((/** @type {any} */ item) => {
     const url = item.download_info.url;
@@ -328,7 +342,7 @@ async function resolveEngineWheels(python) {
       const staging = `${USER_RUNTIME}.partial`;
       await rm(staging, { recursive: true, force: true });
       try {
-        await run(installerPython, ['-m', 'pip', 'install', ...pipOptions, '--no-index', '--find-links', wheels, '--target', staging, ...ENGINE_PACKAGES]);
+        await run(installerPython, ['-m', 'pip', 'install', ...pipOptions, '--no-index', '--find-links', wheels, '--target', staging, ...ENGINE_PACKAGES], installerEnv);
         if (!(await hasRuntime(staging))) throw new DownloadError('The translation engine install is incomplete. Try again.');
         await rm(USER_RUNTIME, { recursive: true, force: true });
         await rename(staging, USER_RUNTIME);
@@ -345,9 +359,9 @@ async function resolveEngineWheels(python) {
 }
 
 /** @param {string} binary @param {string[]} args */
-function run(binary, args) {
+function run(binary, args, env = process.env) {
   return new Promise((resolve, reject) => {
-    const child = spawn(binary, args, { env: process.env, stdio: ['ignore', 'ignore', 'pipe'] });
+    const child = spawn(binary, args, { env, stdio: ['ignore', 'ignore', 'pipe'] });
     let errorLog = '';
     const timeout = setTimeout(() => child.kill('SIGKILL'), STEP_TIMEOUT_MS);
     child.stderr.setEncoding('utf8');

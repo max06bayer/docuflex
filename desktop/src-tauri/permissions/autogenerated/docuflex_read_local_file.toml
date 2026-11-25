@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-docuflex-read-local-file"
+description = "Enables the docuflex_read_local_file command without any pre-configured scope."
+commands.allow = ["docuflex_read_local_file"]
+
+[[permission]]
+identifier = "deny-docuflex-read-local-file"
+description = "Denies the docuflex_read_local_file command without any pre-configured scope."
+commands.deny = ["docuflex_read_local_file"]

@@ -5,7 +5,7 @@ The desktop package runs the existing `/editor` application and its Java backend
 ## Native packages
 
 - macOS Apple Silicon: `npm run build` in `desktop/` creates `Docuflex.app`.
-- Windows x64: the `Desktop native builds` workflow creates a current-user NSIS installer and embeds the offline WebView2 installer.
+- Windows x64: the `Desktop native builds` workflow creates a current-user NSIS installer around the Electron shell (`desktop/electron`). Locally: `npm run build:windows` in `desktop/` (see `scripts/prepare-windows-runtimes.ps1` for the native runtimes; `-TesseractRoot`/`-OfficeRoot` accept unpacked copies so nothing is installed system-wide). The installer replaces an older Tauri install in `%LOCALAPPDATA%\Docuflex`.
 - Linux x64: the same workflow creates an AppImage and a Debian package on Ubuntu 22.04.
 
 Windows and Linux are deliberately compiled on native GitHub runners. Tauri recommends native CI for installers, and this also ensures that every bundled helper executable matches the target operating system.
@@ -27,7 +27,7 @@ The relocatable macOS converter and OCR inputs remain under `vendor/pdf2htmlEX-m
 ## Window chrome
 
 - macOS retains the integrated traffic lights and desktop-specific sidebar/header alignment.
-- Windows uses the web header with a draggable native window frame and Windows controls on the right; the utility area reserves the corresponding space.
+- Windows and Linux use the web header with the window controls grouped in the header's utility area. On Windows, Ctrl+= / Ctrl+- / Ctrl+0 change the interface size (remembered; default 90 % because Chromium already follows the display scale).
 - Linux uses the normal desktop window decoration and the web header unchanged.
 
 ## Editable file conversion
@@ -79,3 +79,45 @@ For API tests, start the local server with the staged `DOCUMENT_CONVERTER_PYTHON
 `DOCUMENT_CONVERTER_BIN`, `TESSERACT_BIN`, and `TESSDATA_PREFIX` paths, then run
 `node scripts/test-conversion-api.mjs`. It creates synthetic fixtures in
 `tmp/conversion/`; `DOCUFLEX_TEST_ORIGIN` selects the server (default port 5178).
+
+## macOS App Sandbox (0.9.6)
+
+macOS bundles enable App Sandbox with user-selected read/write document access,
+app-scoped bookmarks, client/server networking for the private loopback services,
+camera access for signature capture, and printing. No arbitrary home-folder or
+filesystem temporary exceptions are granted. Embedded Mach-O executables inherit
+the app sandbox; libraries/frameworks are signed from the inside out after
+restoring the runtime symlinks dereferenced by Tauri's resource copier.
+
+The native shell obtains its container home/temporary directories from Foundation
+and passes them explicitly to Node/Java/Python. Keys, AI notes/chats and model files
+use `.docuflex` inside that container; translation data uses its private cache.
+`Settings → Import Existing AI Data…` lets the user choose an old `.docuflex` folder
+or `.cache/docuflex` translation folder. Import preserves existing destination
+files and rejects links/special files. Old installation data is not deleted.
+
+Document reads/writes initiated through AI/MCP use the native file broker in a
+sandboxed build. Existing bookmarks are resolved; new external access requires a
+normal system file selection. The broker transfers bytes to the already-running
+services, since a new user-selected grant is not assumed to propagate to an
+existing child process. Native Save As remembers app-scoped bookmarks.
+
+Python's optional system MIME scan is disabled only in sandboxed helper processes;
+standard MIME mappings remain available. LibreOffice uses a relative IPC socket
+inside each conversion's private working directory, avoiding forbidden `/tmp`
+and Unix socket pathname-length limits. Its UNO bridge, Node and Java retain the
+specific hardened-runtime code-generation permissions they require. Debugger and
+`get-task-allow` entitlements are removed. Ad-hoc test signatures additionally
+need library-validation exceptions because they have no common Apple Team ID;
+real-identity builds sign nested code with that identity. Downloaded Python native
+extensions still need their scoped library-validation exception.
+
+For direct DMG distribution, the verified update image is saved through a native
+Save dialog and opened using NSWorkspace. The user installs it with the standard
+macOS disk-image flow; the app does not try to overwrite `/Applications` or leave
+an unsandboxed installer running after quit. A future Mac App Store distribution
+must remove the separate GitHub updater entirely and use store updates.
+
+Sandboxing does not supply an Apple distribution identity, notarization,
+provisioning, a privacy manifest/metadata assessment, or App Review approval.
+See `docs/PRIVACY-AND-APP-STORE-REVIEW.md` in the repository for remaining gates.

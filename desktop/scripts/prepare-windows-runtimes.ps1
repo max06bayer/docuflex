@@ -1,6 +1,12 @@
 param(
   [Parameter(Mandatory = $true)]
-  [string]$RuntimeRoot
+  [string]$RuntimeRoot,
+  # Already-unpacked Tesseract-OCR and LibreOffice folders. When empty,
+  # Tesseract comes from Chocolatey and LibreOffice from the pinned official
+  # MSI. A local build can pass portable copies (the Tesseract installer
+  # unpacked with 7-Zip) so nothing is installed system-wide.
+  [string]$TesseractRoot = '',
+  [string]$OfficeRoot = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -41,8 +47,12 @@ Archive SHA-256: e92aa55699c3e9d9b4b4954bea157e59b5c3363cbe9a7713495c55354402635
 '@ | Set-Content -Path (Join-Path $pdfRuntime 'SOURCE.txt') -Encoding UTF8
 Remove-Item -LiteralPath $pdfArchive, $pdfExtract -Recurse -Force
 
-choco install tesseract --yes --no-progress
-$tesseractRoot = Join-Path $env:ProgramFiles 'Tesseract-OCR'
+if ($TesseractRoot) {
+  $tesseractRoot = [IO.Path]::GetFullPath($TesseractRoot)
+} else {
+  choco install tesseract --yes --no-progress
+  $tesseractRoot = Join-Path $env:ProgramFiles 'Tesseract-OCR'
+}
 if (-not (Test-Path (Join-Path $tesseractRoot 'tesseract.exe'))) { throw 'Tesseract installation was not found.' }
 
 $popplerArchive = Join-Path $RuntimeRoot 'poppler.zip'
@@ -52,7 +62,7 @@ Expand-Archive -LiteralPath $popplerArchive -DestinationPath $popplerExtract
 $popplerBin = Join-Path $popplerExtract 'poppler-26.02.0/Library/bin'
 $ocrRuntime = Join-Path $RuntimeRoot 'ocr'
 New-Item -ItemType Directory -Force -Path (Join-Path $ocrRuntime 'bin'), (Join-Path $ocrRuntime 'poppler/bin'), (Join-Path $ocrRuntime 'share/tessdata') | Out-Null
-Copy-Item (Join-Path $tesseractRoot '*') (Join-Path $ocrRuntime 'bin') -Recurse -Force
+Copy-Item (Join-Path $tesseractRoot '*') (Join-Path $ocrRuntime 'bin') -Recurse -Force -Exclude '$PLUGINSDIR'
 Copy-Item (Join-Path $tesseractRoot 'tessdata/*') (Join-Path $ocrRuntime 'share/tessdata') -Recurse -Force
 Copy-Item (Join-Path $popplerBin '*') (Join-Path $ocrRuntime 'poppler/bin') -Recurse -Force
 Copy-Item (Join-Path $popplerExtract 'poppler-26.02.0/Library/share') (Join-Path $ocrRuntime 'share/poppler') -Recurse -Force
@@ -74,11 +84,37 @@ Poppler 26.02.0: https://github.com/oschwartz10612/poppler-windows/releases/tag/
 Tesseract fast language data 4.1.0: https://github.com/tesseract-ocr/tessdata_fast/tree/4.1.0
 '@ | Set-Content -Path (Join-Path $ocrRuntime 'SOURCE.txt') -Encoding UTF8
 
-choco install libreoffice-fresh --yes --no-progress
-$officeSource = Join-Path $env:ProgramFiles 'LibreOffice'
+if ($OfficeRoot) {
+  $officeSource = [IO.Path]::GetFullPath($OfficeRoot)
+} else {
+  # The same pinned LibreOffice as macOS and Linux, from the archive (which,
+  # unlike "stable", keeps every release). An administrative image unpacks the
+  # MSI without installing anything.
+  $officeMsi = Join-Path $RuntimeRoot 'libreoffice.msi'
+  Get-VerifiedArchive -Url 'https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.6.3/win/x86_64/LibreOffice_26.2.6.3_Win_x86-64.msi' -Path $officeMsi -Sha256 'f9877032fd908beb9c0ddf06df4af5c2e85f419c42e14876c4cce5aae5fb2660'
+  $officeSource = Join-Path $RuntimeRoot 'office-image'
+  $unpack = Start-Process msiexec.exe -ArgumentList '/a', "`"$officeMsi`"", '/qn', "TARGETDIR=`"$officeSource`"" -Wait -PassThru
+  if ($unpack.ExitCode -ne 0) { throw "Could not unpack the LibreOffice MSI (exit $($unpack.ExitCode))." }
+  Remove-Item -LiteralPath $officeMsi -Force
+}
 if (-not (Test-Path (Join-Path $officeSource 'program/soffice.com'))) { throw 'LibreOffice console launcher was not found.' }
-Copy-Item $officeSource (Join-Path $RuntimeRoot 'office') -Recurse
+$officeRuntime = Join-Path $RuntimeRoot 'office'
+New-Item -ItemType Directory -Force -Path $officeRuntime | Out-Null
+# An administrative MSI image also holds the .msi itself and the installer's
+# System/System64 folders; only the application folders are needed.
+Get-ChildItem -LiteralPath $officeSource |
+  Where-Object { $_.Name -notmatch '\.msi$' -and $_.Name -notin @('System', 'System64') } |
+  ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $officeRuntime -Recurse }
+# The MSI installs the Visual C++ runtime system-wide; ship it next to
+# soffice instead so Office works on PCs that don't have it.
+$vcRuntime = Join-Path $officeSource 'System64'
+if (Test-Path $vcRuntime) {
+  Copy-Item (Join-Path $vcRuntime '*.dll') (Join-Path $officeRuntime 'program') -Force
+}
 @'
-Windows x64 native LibreOffice runtime from the libreoffice-fresh Chocolatey package.
-https://community.chocolatey.org/packages/libreoffice-fresh
-'@ | Set-Content -Path (Join-Path $RuntimeRoot 'office/SOURCE.txt') -Encoding UTF8
+Windows x64 LibreOffice 26.2.6 (administrative image of the official MSI).
+https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.6.3/win/x86_64/
+MSI SHA-256: f9877032fd908beb9c0ddf06df4af5c2e85f419c42e14876c4cce5aae5fb2660
+'@ | Set-Content -Path (Join-Path $officeRuntime 'SOURCE.txt') -Encoding UTF8
+$officeImage = Join-Path $RuntimeRoot 'office-image'
+if (Test-Path $officeImage) { Remove-Item -LiteralPath $officeImage -Recurse -Force }

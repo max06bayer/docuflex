@@ -1,5 +1,5 @@
+import { localDataDirectory } from '#lib/server/local-storage.js';
 import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 /**
@@ -8,7 +8,7 @@ import { join } from 'node:path';
  * saving; the window does that, and this module only stores and lists.
  */
 
-const CHAT_DIRECTORY = join(homedir(), '.docuflex', 'ai-chats');
+const CHAT_DIRECTORY = join(localDataDirectory, 'ai-chats');
 const MAX_CHAT_BYTES = 8 * 1024 * 1024;
 const MAX_CHATS = 200;
 const ID_PATTERN = /^[a-zA-Z0-9-]{8,64}$/;

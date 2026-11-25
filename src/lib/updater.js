@@ -4,7 +4,7 @@ import { writable } from 'svelte/store';
  * Desktop updates from the GitHub releases, driven by the native updater
  * (desktop/src-tauri/src/updater.rs). The website has no updater.
  *
- * @typedef {{ current: string; latest: string; available: boolean; releaseUrl: string }} UpdateInfo
+ * @typedef {{ current: string; latest: string; available: boolean; releaseUrl: string; manualInstall?: boolean }} UpdateInfo
  * @typedef {{ phase: 'idle' | 'checking' | 'current' | 'available' | 'downloading' | 'ready' | 'installing' | 'error'; info: UpdateInfo | null; received: number; total: number; error: string; visible: boolean }} UpdateState
  */
 
@@ -19,6 +19,11 @@ export function isDesktopApp() {
   return Boolean(tauri()?.core?.invoke);
 }
 
+/** Native distribution identity is injected before the editor loads. */
+export function supportsDirectUpdates() {
+  return isDesktopApp() && /** @type {any} */ (window).__DOCUFLEX_DISTRIBUTION__ !== 'app-store';
+}
+
 /** @param {unknown} error */
 function message(error) {
   return typeof error === 'string' ? error : error instanceof Error ? error.message : 'Something went wrong.';
@@ -31,6 +36,7 @@ function message(error) {
  * @param {{ manual?: boolean }} [options]
  */
 export async function checkForUpdate({ manual = false } = {}) {
+  if (!supportsDirectUpdates()) return;
   const api = tauri();
   if (!api?.core?.invoke) return;
   let busy = false;
@@ -49,6 +55,7 @@ export async function checkForUpdate({ manual = false } = {}) {
 }
 
 export async function downloadUpdate() {
+  if (!supportsDirectUpdates()) return;
   const api = tauri();
   if (!api?.core?.invoke) return;
   update.update((state) => ({ ...state, phase: 'downloading', received: 0, total: 0, error: '', visible: true }));
@@ -67,14 +74,17 @@ export async function downloadUpdate() {
 }
 
 export async function installUpdate() {
+  if (!supportsDirectUpdates()) return;
   const api = tauri();
   if (!api?.core?.invoke) return;
   update.update((state) => ({ ...state, phase: 'installing', visible: true }));
   try {
-    // Docuflex quits here; the helper installs the new version and opens it.
+    // macOS saves/opens a verified installer; other platforms may quit here.
     await api.core.invoke('docuflex_update_install');
+    update.update((state) => ({ ...state, phase: 'idle', visible: false }));
   } catch (error) {
-    update.update((state) => ({ ...state, phase: 'error', error: message(error), visible: true }));
+    const cancelled = message(error) === 'cancelled';
+    update.update((state) => ({ ...state, phase: cancelled ? 'ready' : 'error', error: cancelled ? '' : message(error), visible: true }));
   }
 }
 

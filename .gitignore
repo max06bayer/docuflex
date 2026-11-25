@@ -18,6 +18,8 @@ data/
 .ocr/
 .document-python/
 desktop/.native-runtime/
+desktop/.electron-app/
+desktop/electron-dist/
 
 # Environment files
 .env

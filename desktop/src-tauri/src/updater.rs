@@ -1,6 +1,6 @@
 //! Updates from the GitHub releases: check for a newer version, download this
 //! platform's installer (verified against the release's SHA256SUMS.txt), then
-//! install it and restart once Docuflex has quit.
+//! open the macOS installer or install/restart on other desktop platforms.
 //!
 //! Downloads go through the system `curl` (macOS, Windows 10+ and Linux ship
 //! it), so the app needs no HTTP or TLS stack of its own.
@@ -28,6 +28,8 @@ pub struct UpdateInfo {
     available: bool,
     #[serde(rename = "releaseUrl")]
     release_url: String,
+    #[serde(rename = "manualInstall")]
+    manual_install: bool,
 }
 
 #[derive(Clone)]
@@ -51,7 +53,11 @@ struct Progress {
 }
 
 fn curl() -> Command {
-    let mut command = Command::new(if cfg!(target_os = "windows") { "curl.exe" } else { "curl" });
+    // PATH may point at MacPorts/Homebrew binaries outside the app sandbox.
+    // Use Apple's platform curl on macOS; never request wider filesystem access.
+    let binary = if cfg!(target_os = "macos") { "/usr/bin/curl" }
+        else if cfg!(target_os = "windows") { "curl.exe" } else { "curl" };
+    let mut command = Command::new(binary);
     command.stdin(Stdio::null());
     #[cfg(target_os = "windows")]
     {
@@ -143,7 +149,7 @@ pub async fn docuflex_update_check(app: tauri::AppHandle) -> Result<UpdateInfo, 
         .filter(|asset| asset.url.starts_with(DOWNLOAD_PREFIX));
     let available = !latest.is_empty() && is_newer(&latest, &current) && asset.is_some();
     *app.state::<UpdateState>().asset.lock().map_err(|_| "Update state is unavailable.")? = asset;
-    Ok(UpdateInfo { current, latest, available, release_url })
+    Ok(UpdateInfo { current, latest, available, release_url, manual_install: cfg!(target_os = "macos") })
 }
 
 fn sha256_of(path: &Path) -> Result<String, String> {
@@ -171,6 +177,9 @@ pub async fn docuflex_update_download(app: tauri::AppHandle) -> Result<(), Strin
         .map_err(|_| "Update state is unavailable.")?
         .clone()
         .ok_or("Check for updates first.")?;
+    #[cfg(target_os = "macos")]
+    let directory = crate::sandbox::temporary_directory().join("docuflex-update");
+    #[cfg(not(target_os = "macos"))]
     let directory = std::env::temp_dir().join("docuflex-update");
     let _ = fs::remove_dir_all(&directory);
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
@@ -220,7 +229,7 @@ pub async fn docuflex_update_download(app: tauri::AppHandle) -> Result<(), Strin
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn quote(path: &Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
 }
@@ -236,35 +245,29 @@ pub fn docuflex_update_install(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|_| "Update state is unavailable.")?
         .clone()
         .ok_or("Download the update first.")?;
-    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-    let pid = std::process::id();
-    let directory = installer.parent().unwrap_or(Path::new(".")).to_path_buf();
-
+    // A sandboxed app cannot replace /Applications or leave an installer
+    // helper outside its container. Export the verified DMG through Powerbox
+    // and let the user install it with the standard macOS disk-image flow.
     #[cfg(target_os = "macos")]
     {
-        let bundle = executable
-            .ancestors()
-            .nth(3)
-            .filter(|path| path.extension().is_some_and(|extension| extension == "app"))
-            .ok_or("Docuflex is not running from an app bundle.")?
-            .to_path_buf();
-        let parent = bundle.parent().ok_or("Unknown install location.")?;
-        if fs::metadata(parent).map(|metadata| metadata.permissions().readonly()).unwrap_or(true) {
-            return Err(format!("Docuflex cannot write to {}.", parent.display()));
+        use objc2_app_kit::NSWorkspace;
+        use objc2_foundation::{NSString, NSURL};
+        let destination = rfd::FileDialog::new().set_title("Save Docuflex installer")
+            .set_file_name(installer.file_name().and_then(|name| name.to_str()).unwrap_or("Docuflex.dmg"))
+            .save_file().ok_or_else(|| "cancelled".to_string())?;
+        fs::copy(&installer, &destination).map_err(|error| error.to_string())?;
+        let url = NSURL::fileURLWithPath(&NSString::from_str(&destination.to_string_lossy()));
+        if !NSWorkspace::sharedWorkspace().openURL(&url) {
+            return Err("The installer was saved. Open the saved DMG in Finder to install it.".into());
         }
-        let script = format!(
-            "#!/bin/sh\nwhile kill -0 {pid} 2>/dev/null; do sleep 0.2; done\n\
-             MNT=$(mktemp -d) || exit 1\n\
-             hdiutil attach -nobrowse -readonly -mountpoint \"$MNT\" {dmg} >/dev/null || exit 1\n\
-             rm -rf {new} && ditto \"$MNT/Docuflex.app\" {new} && rm -rf {app} && mv {new} {app}\n\
-             hdiutil detach \"$MNT\" -quiet\n\
-             open {app}\n",
-            dmg = quote(&installer),
-            app = quote(&bundle),
-            new = quote(&bundle.with_extension("app.new")),
-        );
-        spawn_shell_script(&directory, &script)?;
+        return Ok(());
     }
+    #[cfg(not(target_os = "macos"))]
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    #[cfg(not(target_os = "macos"))]
+    let pid = std::process::id();
+    #[cfg(not(target_os = "macos"))]
+    let directory = installer.parent().unwrap_or(Path::new(".")).to_path_buf();
 
     #[cfg(target_os = "linux")]
     {
@@ -312,11 +315,11 @@ pub fn docuflex_update_install(app: tauri::AppHandle) -> Result<(), String> {
             .map_err(|error| format!("Could not start the installer: {error}"))?;
     }
 
-    app.exit(0);
-    Ok(())
+    #[cfg(not(target_os = "macos"))]
+    { app.exit(0); Ok(()) }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn spawn_shell_script(directory: &Path, script: &str) -> Result<(), String> {
     use std::os::unix::process::CommandExt;
     let path = directory.join("install-update.sh");

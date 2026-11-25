@@ -290,6 +290,82 @@
       transform: rotate(-45deg);
     }
 
+    /* Linux and Windows: the window controls share one frame styled like the header's
+       utility buttons (.editor-shell .utility-button in DocuflexApp.svelte). */
+    html:is([data-docuflex-desktop="linux"], [data-docuflex-desktop="windows"]) .utilities .docuflex-window-controls {
+      align-items: center;
+      background: rgba(0, 0, 0, 0.05);
+      border: 1px solid rgba(0, 0, 0, 0.05);
+      border-radius: 15px;
+      box-sizing: border-box;
+      flex: none;
+      gap: 0;
+      height: 40px;
+      margin-left: 6px;
+      overflow: hidden;
+      padding: 0;
+      position: static;
+    }
+
+    html:is([data-docuflex-desktop="linux"], [data-docuflex-desktop="windows"]) .utilities .docuflex-window-control {
+      border: 1px solid transparent;
+      border-radius: 14px;
+      box-sizing: border-box;
+      color: #818181;
+      cursor: pointer;
+      height: 38px;
+      transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
+      width: 44px;
+    }
+
+    html:is([data-docuflex-desktop="linux"], [data-docuflex-desktop="windows"]) .utilities .docuflex-window-control::before,
+    html:is([data-docuflex-desktop="linux"], [data-docuflex-desktop="windows"]) .utilities .docuflex-window-control::after {
+      content: none;
+    }
+
+    html:is([data-docuflex-desktop="linux"], [data-docuflex-desktop="windows"]) .utilities .docuflex-window-control svg {
+      display: block;
+      height: 24px;
+      width: 24px;
+    }
+
+    html:is([data-docuflex-desktop="linux"], [data-docuflex-desktop="windows"]) .utilities .docuflex-window-control:hover {
+      background: rgba(0, 0, 0, 0.05);
+      border-color: rgba(0, 0, 0, 0.04);
+      color: #5f5f5f;
+    }
+
+    html:is([data-docuflex-desktop="linux"], [data-docuflex-desktop="windows"]) .utilities .docuflex-window-control.close:hover {
+      background: rgba(229, 72, 77, 0.12);
+      border-color: rgba(229, 72, 77, 0.55);
+      color: #e5484d;
+    }
+
+    html:is([data-docuflex-desktop="linux"], [data-docuflex-desktop="windows"]) .utilities:has(.docuflex-window-controls) {
+      padding-right: 9px !important;
+    }
+
+    html:is([data-docuflex-desktop="linux"], [data-docuflex-desktop="windows"])[data-theme="dark"] .utilities .docuflex-window-controls {
+      background: rgba(255, 255, 255, 0.065);
+      border-color: rgba(255, 255, 255, 0.04);
+    }
+
+    html:is([data-docuflex-desktop="linux"], [data-docuflex-desktop="windows"])[data-theme="dark"] .utilities .docuflex-window-control {
+      color: #cfcfcf;
+    }
+
+    html:is([data-docuflex-desktop="linux"], [data-docuflex-desktop="windows"])[data-theme="dark"] .utilities .docuflex-window-control:hover {
+      background: rgba(255, 255, 255, 0.05);
+      border-color: rgba(255, 255, 255, 0.05);
+      color: #fff;
+    }
+
+    html:is([data-docuflex-desktop="linux"], [data-docuflex-desktop="windows"])[data-theme="dark"] .utilities .docuflex-window-control.close:hover {
+      background: rgba(229, 72, 77, 0.18);
+      border-color: rgba(229, 72, 77, 0.6);
+      color: #ff6b6f;
+    }
+
     .docuflex-desktop-export-menu {
       -webkit-backdrop-filter: blur(18px);
       animation: docuflex-desktop-export-menu-in 125ms cubic-bezier(0.215, 0.61, 0.355, 1);
@@ -334,7 +410,93 @@
 
   `;
 
+  // Wider targets inside the window supplement AppKit's narrow outside border.
+  // Pointer capture keeps a corner drag attached when the pointer leaves the webview.
+  const installMacResizeGrips = () => {
+    if (desktopPlatform !== 'macos' || document.querySelector('.docuflex-resize-grip')) return;
+    const style = document.createElement('style');
+    style.textContent = `
+      .docuflex-resize-grip { position: fixed; z-index: 2147483647; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-app-region: no-drag; }
+      .docuflex-resize-grip.n { left: 20px; right: 20px; top: 0; height: 8px; cursor: ns-resize; }
+      .docuflex-resize-grip.s { left: 20px; right: 20px; bottom: 0; height: 8px; cursor: ns-resize; }
+      .docuflex-resize-grip.e { top: 20px; bottom: 20px; right: 0; width: 8px; cursor: ew-resize; }
+      .docuflex-resize-grip.w { top: 20px; bottom: 20px; left: 0; width: 8px; cursor: ew-resize; }
+      .docuflex-resize-grip.ne, .docuflex-resize-grip.nw, .docuflex-resize-grip.se, .docuflex-resize-grip.sw { width: 20px; height: 20px; }
+      .docuflex-resize-grip.ne { top: 0; right: 0; cursor: nesw-resize; }
+      .docuflex-resize-grip.nw { top: 0; left: 0; cursor: nwse-resize; clip-path: polygon(0 0, 100% 0, 0 100%); }
+      .docuflex-resize-grip.se { bottom: 0; right: 0; cursor: nwse-resize; }
+      .docuflex-resize-grip.sw { bottom: 0; left: 0; cursor: nesw-resize; }
+    `;
+    document.head.append(style);
+    for (const direction of ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']) {
+      const grip = document.createElement('div');
+      grip.className = `docuflex-resize-grip ${direction}`;
+      grip.setAttribute('aria-hidden', 'true');
+      grip.addEventListener('pointerdown', async (event) => {
+        if (event.button !== 0 || !globalThis.__TAURI__?.core?.invoke) return;
+        event.preventDefault();
+        event.stopPropagation();
+        grip.setPointerCapture(event.pointerId);
+        const invoke = globalThis.__TAURI__.core.invoke;
+        const origin = { x: event.screenX, y: event.screenY };
+        let latest = { x: event.screenX, y: event.screenY };
+        let start = null;
+        let running = false;
+        let dirty = false;
+        let ended = false;
+        const pump = async () => {
+          if (running || !start) return;
+          running = true;
+          try {
+            while (dirty) {
+              dirty = false;
+              await invoke('macos_resize_window', { direction, start, deltaX: latest.x - origin.x, deltaY: latest.y - origin.y });
+            }
+          } catch (error) { console.warn('Window resize stopped:', error); finish(); }
+          finally { running = false; }
+        };
+        const move = (next) => {
+          if (next.pointerId !== event.pointerId || ended) return;
+          latest = { x: next.screenX, y: next.screenY };
+          dirty = true;
+          void pump();
+        };
+        const finish = (next) => {
+          if (next && next.pointerId !== undefined && next.pointerId !== event.pointerId) return;
+          ended = true;
+          grip.removeEventListener('pointermove', move);
+          grip.removeEventListener('pointerup', finish);
+          grip.removeEventListener('pointercancel', finish);
+          grip.removeEventListener('lostpointercapture', finish);
+          window.removeEventListener('blur', finish);
+          if (grip.hasPointerCapture(event.pointerId)) grip.releasePointerCapture(event.pointerId);
+          void pump();
+        };
+        grip.addEventListener('pointermove', move);
+        grip.addEventListener('pointerup', finish);
+        grip.addEventListener('pointercancel', finish);
+        grip.addEventListener('lostpointercapture', finish);
+        window.addEventListener('blur', finish);
+        try {
+          start = await invoke('macos_resize_window', { direction, start: null, deltaX: 0, deltaY: 0 });
+          void pump();
+        } catch (error) { console.warn('Window cannot be resized:', error); finish(); }
+      });
+      document.body.append(grip);
+    }
+  };
+
+  // Drawn like the header's 24 px utility icons (1.5 stroke, round caps).
+  const windowControlIcon = (paths) =>
+    `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+  const windowControlIcons = {
+    minimize: windowControlIcon('<path d="M5 12h14"/>'),
+    maximize: windowControlIcon('<rect x="6.5" y="6.5" width="11" height="11" rx="2.5"/>'),
+    close: windowControlIcon('<path d="M18 6 6 18"/><path d="m6 6 12 12"/>'),
+  };
+
   const installDesktopChrome = () => {
+    installMacResizeGrips();
     document.documentElement.dataset.docuflexDesktop = desktopPlatform;
 
     if (!document.getElementById('docuflex-desktop-chrome')) {
@@ -355,8 +517,21 @@
       });
     };
 
+    // The header is re-rendered between pages, so keep the controls in it.
+    const placeWindowControls = () => {
+      if (desktopPlatform === 'macos') return;
+      const controls = document.querySelector('.docuflex-window-controls');
+      const utilities = document.querySelector('.utilities');
+      if (!controls) return;
+      if (utilities && controls.parentElement !== utilities) utilities.append(controls);
+      else if (!utilities && controls.parentElement !== document.body) document.body.append(controls);
+    };
+
     markDragRegion();
-    new MutationObserver(markDragRegion).observe(document.documentElement, {
+    new MutationObserver(() => {
+      markDragRegion();
+      placeWindowControls();
+    }).observe(document.documentElement, {
       childList: true,
       subtree: true,
     });
@@ -374,12 +549,14 @@
         button.className = `docuflex-window-control ${action}`;
         button.type = 'button';
         button.setAttribute('aria-label', label);
+        button.innerHTML = windowControlIcons[action];
         button.addEventListener('click', () => {
           window.location.assign(`/__docuflex/window/${action}`);
         });
         controls.append(button);
       }
       document.body.append(controls);
+      placeWindowControls();
     }
   };
 

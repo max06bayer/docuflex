@@ -85,7 +85,8 @@ done
 # Ubuntu rewrites LibreOffice's bootstrap configuration to absolute /usr and
 # /etc paths. Use the relocatable vendor build, matching the macOS version.
 OFFICE_ARCHIVE="$RUNTIME_ROOT/libreoffice.tar.gz"
-OFFICE_URL=https://download.documentfoundation.org/libreoffice/stable/26.2.6/deb/x86_64/LibreOffice_26.2.6_Linux_x86-64_deb.tar.gz
+# The archive keeps every release; "stable" drops a version once the next one ships.
+OFFICE_URL=https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.6.3/deb/x86_64/LibreOffice_26.2.6.3_Linux_x86-64_deb.tar.gz
 curl -L --fail --retry 3 "$OFFICE_URL" -o "$OFFICE_ARCHIVE"
 echo "fd0e8f8f2408dd2e5b90286e60f3f97cf566ba441cd48cfc5bcc68067303e0bc  $OFFICE_ARCHIVE" | sha256sum --check --strict
 OFFICE_EXTRACT="$RUNTIME_ROOT/office-extract"
@@ -122,6 +123,6 @@ OCR: Ubuntu native Tesseract and Poppler packages with English, German, and OSD 
 EOF
 cat > "$RUNTIME_ROOT/office/SOURCE.txt" <<'EOF'
 Linux x86_64 official LibreOffice 26.2.6, including Writer, Calc and Impress.
-Source: https://download.documentfoundation.org/libreoffice/stable/26.2.6/deb/x86_64/LibreOffice_26.2.6_Linux_x86-64_deb.tar.gz
+Source: https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.6.3/deb/x86_64/LibreOffice_26.2.6.3_Linux_x86-64_deb.tar.gz
 Archive SHA-256: fd0e8f8f2408dd2e5b90286e60f3f97cf566ba441cd48cfc5bcc68067303e0bc
 EOF
