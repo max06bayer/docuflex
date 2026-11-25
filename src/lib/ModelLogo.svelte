@@ -1,12 +1,13 @@
 <script>
   export let id = '';
   export let selected = false;
+  const gradientId = `qwen-local-${Math.random().toString(36).slice(2, 10)}`;
   $: provider = id.split('/')[0];
   $: known = ['xiaomi', 'google', 'anthropic', 'openai', 'moonshotai', 'openrouter', 'dots-studio', 'minimax', 'nvidia'].includes(provider);
 </script>
 
 <span class="model-logo" class:selected aria-hidden="true">
-  {#if provider === 'ollama'}<svg viewBox="0 0 24 24" fill="none"><path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M5.6 18.4 18.4 5.6" stroke="url(#qwen-local)" stroke-width="2.5" stroke-linecap="round"/><defs><linearGradient id="qwen-local" x1="3" y1="3" x2="21" y2="21"><stop stop-color="#30c5ff"/><stop offset=".5" stop-color="#ac6bff"/><stop offset="1" stop-color="#ff6ea9"/></linearGradient></defs></svg>
+  {#if provider === 'ollama'}<svg viewBox="0 0 24 24" fill="none"><path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M5.6 18.4 18.4 5.6" stroke={`url(#${gradientId})`} stroke-width="2.5" stroke-linecap="round"/><defs><linearGradient id={gradientId} x1="3" y1="3" x2="21" y2="21"><stop stop-color="#30c5ff"/><stop offset=".5" stop-color="#ac6bff"/><stop offset="1" stop-color="#ff6ea9"/></linearGradient></defs></svg>
   {:else if known}<img src={`/model-logos/${provider}.svg`} alt="" width="17" height="17" />
   {:else}<svg viewBox="0 0 24 24" fill="none"><path d="m12 3 9 9-9 9-9-9Z" stroke="currentColor" stroke-width="1.5" /></svg>{/if}
 </span>
