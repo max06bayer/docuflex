@@ -1,6 +1,7 @@
 import { distributionProfile } from './distribution.mjs';
 import { inspectStoreResources, assertStoreSigning } from './check-app-store.mjs';
 import { signSandboxApp } from './sign-macos-sandbox.mjs';
+import { buildStorePackage, identityTeam, prepareStoreSigning, readProvisioningProfile } from './app-store-package.mjs';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
@@ -15,6 +16,14 @@ if (profile.store) {
   const issues = await inspectStoreResources(profile.resources);
   if (issues.length) throw new Error(issues.map(issue => issue.message).join('\n'));
   signingIdentity = profile.localQa ? '-' : assertStoreSigning();
+  if (!profile.localQa) {
+    // Check the upload requirements before the long build, not after it.
+    const provisioning = process.env.DOCUFLEX_PROVISIONING_PROFILE;
+    if (!provisioning) throw new Error('Set DOCUFLEX_PROVISIONING_PROFILE to the Mac App Store provisioning profile for com.docuflex.editor.');
+    const {team} = readProvisioningProfile(provisioning);
+    if (identityTeam(signingIdentity) !== team) throw new Error('The signing identity and provisioning profile belong to different teams.');
+    if (!/^\d+(\.\d+){0,2}$/.test(process.env.DOCUFLEX_STORE_BUILD_NUMBER || '')) throw new Error('Set DOCUFLEX_STORE_BUILD_NUMBER to a number higher than every earlier upload.');
+  }
   // tauri-build copies resources next to the executable before bundling. Clear
   // the previous copy so replaced runtime notices cannot leave read-only files.
   await rm(join(profile.target, 'release/resources'), {recursive: true, force: true});
@@ -76,6 +85,18 @@ execFileSync(process.execPath, [tauriCli, 'build', '--verbose', '--bundles', bun
 if (process.platform === 'darwin') {
   const product = process.env.DOCUFLEX_VARIANT === 'redesign' ? 'Docuflex Redesign' : 'Docuflex';
   const target = profile.target;
-  await signSandboxApp(join(target, 'release/bundle/macos', `${product}.app`), signingIdentity, {resourcesRoot: profile.resources, appStore: profile.store});
+  const app = join(target, 'release/bundle/macos', `${product}.app`);
+  const store = profile.store && !profile.localQa
+    ? await prepareStoreSigning(app, process.env.DOCUFLEX_PROVISIONING_PROFILE, signingIdentity, join(desktopRoot, 'src-tauri/Entitlements.plist'))
+    : null;
+  try {
+    await signSandboxApp(app, signingIdentity, {resourcesRoot: profile.resources, appStore: profile.store, entitlements: store?.entitlements});
+  } finally { await store?.cleanup(); }
   if (profile.localQa) console.log('Local Store QA build only: ad-hoc signed, not suitable for App Store upload.');
+  else if (store) {
+    const version = JSON.parse(readFileSync(join(desktopRoot, 'src-tauri/tauri.conf.json'), 'utf8')).version;
+    const output = join(target, 'release/bundle/macos', `Docuflex_${version}_${process.env.DOCUFLEX_STORE_BUILD_NUMBER}_AppStore.pkg`);
+    buildStorePackage(app, output, process.env.APPLE_INSTALLER_IDENTITY || '');
+    console.log(`App Store upload package: ${output}`);
+  }
 }

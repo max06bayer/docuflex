@@ -111,7 +111,7 @@ export async function signSandboxApp(appPath, identity = process.env.APPLE_SIGNI
         sign(bundle, await helperEntitlements(join(bundle, 'Contents/MacOS', executable)), true);
       }
     }
-    sign(app, join(desktop, 'src-tauri/Entitlements.plist'), true);
+    sign(app, options.entitlements || join(desktop, 'src-tauri/Entitlements.plist'), true);
     execFileSync('codesign', ['--verify', '--deep', '--strict', app], { stdio: 'inherit' });
     console.log(`Sandbox signed and verified: ${files.length} Mach-O files, ${bundles.length} nested bundles.`);
   } finally { await rm(temporary, { recursive: true, force: true }); }
