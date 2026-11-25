@@ -204,7 +204,7 @@ async function prepareMacOffice() {
   const ready = join(dirname(cachedApp), '.runtime-ready');
   if (!(await exists(ready))) {
     await rm(dirname(cachedApp), { recursive: true, force: true });
-    if (!(await exists(image))) await download(`https://download.documentfoundation.org/libreoffice/stable/26.2.6/mac/aarch64/${archive}`, image);
+    if (!(await exists(image))) await download(`https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.6.3/mac/aarch64/LibreOffice_26.2.6.3_MacOS_aarch64.dmg`, image);
     if (createHash('sha256').update(await readFile(image)).digest('hex') !== checksum) {
       await rm(image, { force: true });
       throw new Error('LibreOffice archive checksum failed.');
