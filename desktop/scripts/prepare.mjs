@@ -221,7 +221,11 @@ async function prepareMacOffice() {
       await rm(mount, { recursive: true, force: true });
     }
   }
-  await cp(cachedApp, join(resourcesRoot, 'runtime', 'office', 'LibreOffice.app'), { recursive: true, verbatimSymlinks: true });
+  const office = join(resourcesRoot, 'runtime', 'office', 'LibreOffice.app');
+  await cp(cachedApp, office, { recursive: true, verbatimSymlinks: true });
+  // LibreOffice's Quick Look extensions are only Finder previews. App Store
+  // Connect requires every nested extension to carry Docuflex's own version.
+  if (profile.store) await rm(join(office, 'Contents', 'PlugIns'), { recursive: true, force: true });
 }
 
 async function copyRuntime(name, environmentName, fallback) {
