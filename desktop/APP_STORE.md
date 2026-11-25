@@ -73,6 +73,15 @@ upload, including re-uploads of the same version. The Info.plist declares
 `ITSAppUsesNonExemptEncryption = false` (only standard HTTPS/TLS), so uploads
 do not ask the export-compliance question. Never upload the ad-hoc QA build.
 
+The distribution-signed app cannot be launched locally: macOS refuses it
+("Launchd job spawn failed", error 163) until Apple re-signs it. Test the
+signed candidate through TestFlight for Mac (an internal testing group needs no
+App Review), or use the ad-hoc QA build for local sandbox checks.
+
+App Store Connect rejects nested app extensions whose version differs from
+Docuflex's (ITMS-90473). The Store staging removes LibreOffice's Quick Look
+extensions, and `check:appstore` refuses any `.appex` in the Store resources.
+
 ## Submission gates still requiring completion
 
 A successful local build is not App Store approval. Before upload/review:
