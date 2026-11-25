@@ -4,8 +4,8 @@ The Store profile is separate from the GitHub download profile. It uses the
 public Docuflex bundle identity for production. Local QA uses the separate
 `com.docuflex.editor.storeqa` identity, container and ports, while retaining the
 Docuflex name. It can run alongside the installed app; do not replace an
-existing installation with the QA bundle. Version 0.9.6 remains a draft;
-preparing this profile does not publish or upload anything.
+existing installation with the QA bundle. Preparing this
+profile does not publish or upload anything.
 
 ## Build and local verification
 
@@ -38,29 +38,49 @@ The native compiler and complete TeX bundle are large build-time downloads.
 They are checksum verified and cached under `.cache/`. Store staging and
 build products are ignored by Git.
 
-## Signing after enrollment
+## Signing and upload
 
-Enroll in the Apple Developer Program as an individual if no company exists.
-Create the Mac App Store application signing certificate and installer signing
-certificate in the developer account, register `com.docuflex.editor`, and
-create the macOS app record in App Store Connect. Keep certificate private keys
-and account credentials outside this repository.
+The account is an individual Apple Developer Program membership. One-time setup
+in the developer account (keys and profiles stay outside this repository):
+
+1. **Identifiers:** register the App ID `com.docuflex.editor` (explicit, macOS).
+   No extra capabilities are needed; App Sandbox is set by the entitlements.
+2. **Certificates:** on the Mac, create an **Apple Distribution** certificate
+   and a **Mac Installer Distribution** certificate (Keychain Access →
+   Certificate Assistant → Request a Certificate from a Certificate Authority),
+   download both and open them so they land in the login keychain.
+3. **Profiles:** create a **Mac App Store Connect** distribution profile for
+   `com.docuflex.editor` with the Apple Distribution certificate and download
+   it, e.g. to `~/Documents/Docuflex_App_Store.provisionprofile`.
+4. **App Store Connect:** create the macOS app record with the same bundle ID
+   and SKU `docuflex`, and complete Agreements, Tax and Banking (the free app
+   agreement is enough) and the EU trader status.
+
+Each upload, from `desktop/`:
 
 ```sh
-APPLE_SIGNING_IDENTITY='Apple Distribution: YOUR LEGAL NAME (TEAMID)' \
-DOCUFLEX_STORE_BUILD_NUMBER=1 npm run build:appstore
+APPLE_SIGNING_IDENTITY='Apple Distribution: YOUR NAME (TEAMID)' APPLE_INSTALLER_IDENTITY='3rd Party Mac Developer Installer: YOUR NAME (TEAMID)' DOCUFLEX_PROVISIONING_PROFILE=~/Documents/Docuflex_App_Store.provisionprofile DOCUFLEX_STORE_BUILD_NUMBER=1 npm run build:appstore
 ```
 
-Use an increasing numeric build number for every upload. The production build
-refuses an absent or ad-hoc application signing identity. Configure any required
-provisioning profile and team entitlements for the actual account before
-submission; those cannot be fabricated before enrollment.
+`security find-identity -v` lists the exact identity names (the installer
+certificate may be listed as "Mac Installer Distribution" or "3rd Party Mac
+Developer Installer"; use the name shown). The build checks the profile, the
+team and the build number before compiling, embeds the profile, adds the Team
+ID entitlements to the app, signs everything and writes
+`target-app-store/release/bundle/macos/Docuflex_<version>_<build>_AppStore.pkg`.
+Upload that package with Transporter. Use a higher build number for every
+upload, including re-uploads of the same version. The Info.plist declares
+`ITSAppUsesNonExemptEncryption = false` (only standard HTTPS/TLS), so uploads
+do not ask the export-compliance question. Never upload the ad-hoc QA build.
 
-Once the distribution-signed app is verified, create the upload package with
-`productbuild --sign '3rd Party Mac Developer Installer: …' --component
-'/absolute/path/Docuflex.app' /Applications '/absolute/path/Docuflex.pkg'`.
-Verify with `pkgutil --check-signature` and upload using Transporter or Xcode.
-Do not upload the ad-hoc local QA build.
+The distribution-signed app cannot be launched locally: macOS refuses it
+("Launchd job spawn failed", error 163) until Apple re-signs it. Test the
+signed candidate through TestFlight for Mac (an internal testing group needs no
+App Review), or use the ad-hoc QA build for local sandbox checks.
+
+App Store Connect rejects nested app extensions whose version differs from
+Docuflex's (ITMS-90473). The Store staging removes LibreOffice's Quick Look
+extensions, and `check:appstore` refuses any `.appex` in the Store resources.
 
 ## Submission gates still requiring completion
 
