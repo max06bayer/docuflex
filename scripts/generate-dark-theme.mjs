@@ -236,6 +236,25 @@ function generate(css) {
     if (/tooltip|error-toast|update-(toast|progress|actions)|comment-(card|pin|tether|quote-layer)/i.test(rule.selector)) return;
     // Handles and the size badge are drawn on the white page, so they keep the light look too.
     if (/(shape|crop|linear)-[a-z-]*handle|shape-size-badge/.test(rule.selector)) return;
+    // Things drawn on the white page keep their light colors. They are restated under the
+    // dark selector so generic dark rules (e.g. `.annotation-layer path { fill: none }`) do
+    // not override them: the crop shade, frame and grid; the watermark and its thumbnail
+    // label (multiply blend: a lightened color vanishes); and fillable form fields.
+    if (/crop-(shade|edge|grid)|(^|[^\w-])(watermark-layer|thumbnail-watermark)(?![\w-])|pdf-(input|checkbox)-field/.test(rule.selector)) {
+      const kept = [];
+      rule.each((node) => {
+        if (node.type === 'decl' && /^(fill|stroke|color|background(-color)?|border(-color)?|opacity|mix-blend-mode|box-shadow|outline)$/.test(node.prop)) kept.push(`${node.prop}: ${node.value}${node.important ? ' !important' : ''};`);
+      });
+      if (kept.length) {
+        let block = `${darkSelector(rule.selector)} { ${kept.join(' ')} }`;
+        for (let parent = rule.parent; parent && parent.type === 'atrule'; parent = parent.parent) {
+          const at = /** @type {import('postcss').AtRule} */ (parent);
+          block = `@${at.name} ${at.params} { ${block} }`;
+        }
+        out.push(`  ${block}`);
+      }
+      return;
+    }
     // Blackout and whiteout boxes are part of the page and show the color they paint.
     if (/redaction-layer/.test(rule.selector)) return;
     // PDF pages and their thumbnails are paper: they stay white.
@@ -322,7 +341,7 @@ for (const path of await listSvgs(publicRoot)) {
   const svg = await readFile(path, 'utf8');
   if (/<image\b/.test(svg)) continue;
   // Blackout/whiteout show the color they paint, so they keep it in dark mode.
-  if (/\/(blackout|whiteout)\.svg$/.test(path)) continue;
+  if (/\/(blackout|whiteout)(-dark)?\.svg$/.test(path)) continue;
   const colors = [...svg.matchAll(/(?:fill|stroke|stop-color|color)\s*[=:]\s*"?\s*(#[0-9a-fA-F]{3,8}|rgba?\([^)]*\)|white|black)/g)].map((match) => parseColor(match[1]));
   if (!colors.length || !colors.every(isNeutral)) continue;
   // Light-only icons (white glyphs meant for dark buttons) stay as they are.

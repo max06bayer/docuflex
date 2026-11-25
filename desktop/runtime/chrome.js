@@ -408,6 +408,22 @@
       outline: none;
     }
 
+    /* Same dark look as the editor's tool menus. */
+    html[data-theme="dark"] .docuflex-desktop-export-menu {
+      background: rgba(24, 24, 24, 0.95);
+      border-color: rgba(255, 255, 255, 0.144);
+      box-shadow: 0 7px 18px rgba(0, 0, 0, 0.33), 0 2px 5px rgba(0, 0, 0, 0.15);
+    }
+
+    html[data-theme="dark"] .docuflex-desktop-export-option {
+      color: rgba(255, 255, 255, 0.753);
+    }
+
+    html[data-theme="dark"] .docuflex-desktop-export-option:hover,
+    html[data-theme="dark"] .docuflex-desktop-export-option:focus-visible {
+      color: rgba(255, 255, 255, 0.92);
+    }
+
   `;
 
   // Wider targets inside the window supplement AppKit's narrow outside border.
