@@ -437,10 +437,9 @@ public class DocuflexPdfServer {
       content.transform(displayToUser);
       content.beginText();
       content.setRenderingMode(org.apache.pdfbox.pdmodel.graphics.state.RenderingMode.NEITHER);
-      // One font size per line, chosen so the line's words fill their boxes
-      // at their natural proportions: a size taken from the (padded) box
-      // height alone needs so much negative spacing that viewers split the
-      // words into single letters.
+      // One font size per line, taken from the line's height, so selections
+      // (and blackouts made from them) cover the words' full height. Each
+      // word's width is then matched exactly with horizontal scaling below.
       List<List<FontRun>> wordRuns = new ArrayList<>();
       double[] naturals = new double[texts.size()];
       for (int index = 0; index < texts.size(); index += 1) {
@@ -452,15 +451,11 @@ public class DocuflexPdfServer {
       for (int start = 0; start < texts.size();) {
         int end = start + 1;
         while (end < texts.size() && sameOcrLine(geometry.get(end - 1), geometry.get(end))) end += 1;
-        double widths = 0, natural = 0, lineHeight = 0;
+        double lineHeight = 0;
         for (int index = start; index < end; index += 1) {
-          double[] points = geometry.get(index);
-          widths += Math.hypot(points[2] - points[0], points[3] - points[1]);
-          natural += naturals[index];
-          lineHeight = Math.max(lineHeight, Math.abs(ocrWordHeight(points)));
+          lineHeight = Math.max(lineHeight, Math.abs(ocrWordHeight(geometry.get(index))));
         }
-        double fit = natural > 0 ? widths / natural : lineHeight;
-        Arrays.fill(lineSizes, start, end, Math.max(lineHeight * 0.5, Math.min(lineHeight, fit)));
+        Arrays.fill(lineSizes, start, end, lineHeight);
         start = end;
       }
       for (int index = 0; index < texts.size(); index += 1) {
@@ -485,17 +480,18 @@ public class DocuflexPdfServer {
         boolean lineContinues = index + 1 < texts.size() && sameOcrLine(points, geometry.get(index + 1));
         double[] next = lineContinues ? geometry.get(index + 1) : null;
         double gap = next == null ? 0 : (next[0] - points[2]) * alongX + (next[1] - points[3]) * alongY;
-        // The glyphs keep their proportions (viewers such as pdf.js only
-        // follow rotated lines when text is not stretched) and character
-        // spacing between them makes the word as wide as its box.
         double size = lineSizes[index];
+        if (!(size > 0)) continue;
+        double boxWidth = width;
         // Viewers find word breaks from the gap after a word's last glyph; a
         // word that ends right where the next begins would run into it.
         if (next != null) width = Math.max(width * 0.5, Math.min(width, width + gap - size * 0.15));
-        int characters = word.codePointCount(0, word.length());
-        // Wider spacing than a fiftieth of the size reads as spaces inside the word.
-        double spacing = characters > 1 ? Math.min(size * 0.02, (width - natural * size) / (characters - 1)) : 0;
-        width = natural * size + spacing * Math.max(0, characters - 1);
+        // Horizontal scaling (Tz) stretches the invisible word along its
+        // baseline to exactly the width the engine found. The scanned font is
+        // rarely Helvetica's width, and a narrower word made selections and
+        // blackouts stop short of the real text. Scaling along the baseline
+        // keeps the text direction, so rotated and tilted words stay aligned.
+        double stretch = Math.max(0.2, Math.min(5, width / (natural * size)));
         // Helvetica sits about a fifth of its size below the baseline: lift the
         // baseline so the glyph cells line up with the word's box.
         double baseX = points[0] + upX * height * 0.2, baseY = points[1] + upY * height * 0.2;
@@ -503,30 +499,25 @@ public class DocuflexPdfServer {
             (float) alongX, (float) -alongY,
             (float) upX, (float) -upY,
             (float) baseX, (float) (display[1] - baseY)));
-        content.setCharacterSpacing((float) spacing);
-        for (int runIndex = 0; runIndex < runs.size(); runIndex += 1) {
-          FontRun run = runs.get(runIndex);
+        content.setHorizontalScaling((float) (stretch * 100));
+        content.setCharacterSpacing(0);
+        for (FontRun run : runs) {
           content.setFont(run.font(), (float) size);
-          if (runIndex + 1 < runs.size()) {
-            content.showText(run.text());
-            continue;
-          }
-          // No spacing after the last glyph: it would shift where the word ends.
-          int last = run.text().offsetByCodePoints(run.text().length(), -1);
-          if (last > 0) content.showText(run.text().substring(0, last));
-          content.setCharacterSpacing(0);
-          content.showText(run.text().substring(last));
+          content.showText(run.text());
         }
         // A space after each word (except at the end of a line) lets viewers
         // copy and search the text with its word breaks. It reaches exactly to
-        // the next word, which viewers read as one gap.
+        // the next word, which viewers read as one gap. Spacing is scaled by
+        // Tz too, so it is given in unscaled units.
         if (next != null) {
           content.setFont(base, (float) size);
-          content.setCharacterSpacing((float) (gap + (points[2] - points[0]) * alongX + (points[3] - points[1]) * alongY
-              - width - base.getStringWidth(" ") / 1000.0 * size));
+          content.setCharacterSpacing((float) ((gap + boxWidth - width) / stretch
+              - base.getStringWidth(" ") / 1000.0 * size));
           content.showText(" ");
+          content.setCharacterSpacing(0);
         }
       }
+      content.setHorizontalScaling(100);
       content.endText();
     }
   }
