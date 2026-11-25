@@ -21,7 +21,7 @@
     "build:windows": "npm run stage && npm run smoke && npm run package:windows"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "2.12.4",
+    "@tauri-apps/cli": "2.12.6",
     "pngjs": "7.0.0"
   }
 }
