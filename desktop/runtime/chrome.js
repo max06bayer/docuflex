@@ -290,9 +290,9 @@
       transform: rotate(-45deg);
     }
 
-    /* Linux: the window controls share one frame styled like the header's
+    /* Linux and Windows: the window controls share one frame styled like the header's
        utility buttons (.editor-shell .utility-button in DocuflexApp.svelte). */
-    html[data-docuflex-desktop="linux"] .utilities .docuflex-window-controls {
+    html:is([data-docuflex-desktop="linux"], [data-docuflex-desktop="windows"]) .utilities .docuflex-window-controls {
       align-items: center;
       background: rgba(0, 0, 0, 0.05);
       border: 1px solid rgba(0, 0, 0, 0.05);
@@ -307,7 +307,7 @@
       position: static;
     }
 
-    html[data-docuflex-desktop="linux"] .utilities .docuflex-window-control {
+    html:is([data-docuflex-desktop="linux"], [data-docuflex-desktop="windows"]) .utilities .docuflex-window-control {
       border: 1px solid transparent;
       border-radius: 14px;
       box-sizing: border-box;
@@ -318,49 +318,49 @@
       width: 44px;
     }
 
-    html[data-docuflex-desktop="linux"] .utilities .docuflex-window-control::before,
-    html[data-docuflex-desktop="linux"] .utilities .docuflex-window-control::after {
+    html:is([data-docuflex-desktop="linux"], [data-docuflex-desktop="windows"]) .utilities .docuflex-window-control::before,
+    html:is([data-docuflex-desktop="linux"], [data-docuflex-desktop="windows"]) .utilities .docuflex-window-control::after {
       content: none;
     }
 
-    html[data-docuflex-desktop="linux"] .utilities .docuflex-window-control svg {
+    html:is([data-docuflex-desktop="linux"], [data-docuflex-desktop="windows"]) .utilities .docuflex-window-control svg {
       display: block;
       height: 24px;
       width: 24px;
     }
 
-    html[data-docuflex-desktop="linux"] .utilities .docuflex-window-control:hover {
+    html:is([data-docuflex-desktop="linux"], [data-docuflex-desktop="windows"]) .utilities .docuflex-window-control:hover {
       background: rgba(0, 0, 0, 0.05);
       border-color: rgba(0, 0, 0, 0.04);
       color: #5f5f5f;
     }
 
-    html[data-docuflex-desktop="linux"] .utilities .docuflex-window-control.close:hover {
+    html:is([data-docuflex-desktop="linux"], [data-docuflex-desktop="windows"]) .utilities .docuflex-window-control.close:hover {
       background: rgba(229, 72, 77, 0.12);
       border-color: rgba(229, 72, 77, 0.55);
       color: #e5484d;
     }
 
-    html[data-docuflex-desktop="linux"] .utilities:has(.docuflex-window-controls) {
+    html:is([data-docuflex-desktop="linux"], [data-docuflex-desktop="windows"]) .utilities:has(.docuflex-window-controls) {
       padding-right: 9px !important;
     }
 
-    html[data-docuflex-desktop="linux"][data-theme="dark"] .utilities .docuflex-window-controls {
+    html:is([data-docuflex-desktop="linux"], [data-docuflex-desktop="windows"])[data-theme="dark"] .utilities .docuflex-window-controls {
       background: rgba(255, 255, 255, 0.065);
       border-color: rgba(255, 255, 255, 0.04);
     }
 
-    html[data-docuflex-desktop="linux"][data-theme="dark"] .utilities .docuflex-window-control {
+    html:is([data-docuflex-desktop="linux"], [data-docuflex-desktop="windows"])[data-theme="dark"] .utilities .docuflex-window-control {
       color: #cfcfcf;
     }
 
-    html[data-docuflex-desktop="linux"][data-theme="dark"] .utilities .docuflex-window-control:hover {
+    html:is([data-docuflex-desktop="linux"], [data-docuflex-desktop="windows"])[data-theme="dark"] .utilities .docuflex-window-control:hover {
       background: rgba(255, 255, 255, 0.05);
       border-color: rgba(255, 255, 255, 0.05);
       color: #fff;
     }
 
-    html[data-docuflex-desktop="linux"][data-theme="dark"] .utilities .docuflex-window-control.close:hover {
+    html:is([data-docuflex-desktop="linux"], [data-docuflex-desktop="windows"])[data-theme="dark"] .utilities .docuflex-window-control.close:hover {
       background: rgba(229, 72, 77, 0.18);
       border-color: rgba(229, 72, 77, 0.6);
       color: #ff6b6f;
@@ -519,7 +519,7 @@
 
     // The header is re-rendered between pages, so keep the controls in it.
     const placeWindowControls = () => {
-      if (desktopPlatform !== 'linux') return;
+      if (desktopPlatform === 'macos') return;
       const controls = document.querySelector('.docuflex-window-controls');
       const utilities = document.querySelector('.utilities');
       if (!controls) return;
@@ -549,7 +549,7 @@
         button.className = `docuflex-window-control ${action}`;
         button.type = 'button';
         button.setAttribute('aria-label', label);
-        if (desktopPlatform === 'linux') button.innerHTML = windowControlIcons[action];
+        button.innerHTML = windowControlIcons[action];
         button.addEventListener('click', () => {
           window.location.assign(`/__docuflex/window/${action}`);
         });

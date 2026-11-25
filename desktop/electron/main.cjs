@@ -1,14 +1,18 @@
-// Linux desktop shell. Tauri uses WebKitGTK on Linux, which renders the editor
-// far slower than Chromium; this shell runs the same local services and editor
-// in Electron and answers the same commands as desktop/src-tauri.
+// Linux and Windows desktop shell. Tauri's system web views (WebKitGTK on
+// Linux, WebView2 on Windows) render the editor slower and less predictably
+// than a pinned Chromium; this shell runs the same local services and editor in
+// Electron and answers the same commands as desktop/src-tauri.
 const { app, BrowserWindow, dialog, ipcMain } = require('electron');
 const { spawn, spawnSync } = require('node:child_process');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const http = require('node:http');
+const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
+const { fileURLToPath } = require('node:url');
 
+const isWindows = process.platform === 'win32';
 const FRONTEND_PORT = 43_127;
 const BACKEND_PORT = 43_128;
 const MAX_OPEN_PDF_BYTES = 230 * 1024 * 1024;
@@ -19,8 +23,11 @@ const DOWNLOAD_PREFIX = 'https://github.com/max06bayer/docuflex/releases/downloa
 
 const resourceRoot = process.env.DOCUFLEX_RESOURCES
   ?? path.join(process.resourcesPath, 'docuflex', 'resources');
+// Same log folders as the Tauri builds, so support instructions stay valid.
 const logDirectory = path.join(
-  process.env.XDG_DATA_HOME ?? path.join(os.homedir(), '.local', 'share'),
+  isWindows
+    ? process.env.LOCALAPPDATA ?? path.join(os.homedir(), 'AppData', 'Local')
+    : process.env.XDG_DATA_HOME ?? path.join(os.homedir(), '.local', 'share'),
   'com.docuflex.editor',
   'logs'
 );
@@ -40,14 +47,46 @@ let downloadedUpdate = null;
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
 app.setName('Docuflex');
+if (isWindows) {
+  // Taskbar grouping and pinning use the installer's identity.
+  app.setAppUserModelId('com.docuflex.editor');
+}
+
+// Interface size on top of the editor's own --ui-scale. Chromium already
+// follows the Windows display scale (150 % on a typical 4K screen), which made
+// the editor look larger than other Windows apps; start a step smaller there.
+// Ctrl+= / Ctrl+- / Ctrl+0 change it and the choice is remembered.
+const DEFAULT_INTERFACE_ZOOM = isWindows ? 0.9 : 1;
+const settingsFile = () => path.join(app.getPath('userData'), 'shell-settings.json');
+
+function readShellSettings() {
+  try { return JSON.parse(fs.readFileSync(settingsFile(), 'utf8')) ?? {}; } catch { return {}; }
+}
+
+/** @param {number} zoom */
+function saveInterfaceZoom(zoom) {
+  try {
+    fs.mkdirSync(path.dirname(settingsFile()), { recursive: true });
+    fs.writeFileSync(settingsFile(), `${JSON.stringify({ ...readShellSettings(), interfaceZoom: zoom }, null, 2)}\n`);
+  } catch {}
+}
+
+function interfaceZoom() {
+  const saved = Number(readShellSettings().interfaceZoom);
+  return Number.isFinite(saved) && saved >= 0.5 && saved <= 2 ? saved : DEFAULT_INTERFACE_ZOOM;
+}
+
+/** Blocks the main thread briefly; only used while quitting. @param {number} milliseconds */
+function sleepSync(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
 
 /** @param {string[]} argv @param {string} cwd */
 function pdfPathFromArguments(argv, cwd) {
   for (const argument of argv.slice(1)) {
     let candidate;
     if (argument.startsWith('file://')) {
-      try { candidate = new URL(argument).pathname; } catch { continue; }
-      candidate = decodeURIComponent(candidate);
+      try { candidate = fileURLToPath(argument); } catch { continue; }
     } else if (argument.startsWith('-')) {
       continue;
     } else {
@@ -80,6 +119,13 @@ function supervised(executable, args, env, log) {
     delete environment[key];
   }
   const output = logStream(log);
+  if (isWindows) {
+    // No console windows for the services. Quitting ends their process trees
+    // (stopServices); leftovers of a crashed shell are cleared on next start.
+    return spawn(executable, args, {
+      cwd: resourceRoot, env: environment, stdio: ['ignore', output, output], windowsHide: true
+    });
+  }
   return spawn(
     '/bin/sh',
     [path.join(resourceRoot, 'runtime/supervise.sh'), String(process.pid), executable, ...args],
@@ -87,11 +133,70 @@ function supervised(executable, args, env, log) {
   );
 }
 
-function spawnServices() {
+/** Bundled tool paths. Windows keeps Poppler apart from Tesseract and uses .exe names. */
+function toolPaths() {
   const runtime = (/** @type {string} */ ...parts) => path.join(resourceRoot, 'runtime', ...parts);
+  if (isWindows) {
+    return {
+      runtime,
+      java: runtime('java/bin/java.exe'),
+      node: runtime('node/bin/node.exe'),
+      python: runtime('python/python.exe'),
+      office: runtime('office/program/soffice.com'),
+      pdf2htmlEX: runtime('pdf2htmlEX/bin/pdf2htmlEX.exe'),
+      pdftoppm: runtime('ocr/poppler/bin/pdftoppm.exe'),
+      pdfunite: runtime('ocr/poppler/bin/pdfunite.exe'),
+      tesseract: runtime('ocr/bin/tesseract.exe')
+    };
+  }
+  return {
+    runtime,
+    java: runtime('java/bin/java'),
+    node: runtime('node/bin/node'),
+    python: runtime('python/bin/python3'),
+    office: runtime('office/program/soffice'),
+    pdf2htmlEX: runtime('pdf2htmlEX/bin/pdf2htmlEX'),
+    pdftoppm: runtime('ocr/bin/pdftoppm'),
+    pdfunite: runtime('ocr/bin/pdfunite'),
+    tesseract: runtime('ocr/bin/tesseract')
+  };
+}
+
+/** @param {number} port @returns {Promise<boolean>} */
+function portInUse(port) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: '127.0.0.1', port });
+    socket.setTimeout(300);
+    socket.once('connect', () => { socket.destroy(); resolve(true); });
+    socket.once('timeout', () => { socket.destroy(); resolve(false); });
+    socket.once('error', () => resolve(false));
+  });
+}
+
+/**
+ * Windows has no parent-death signal: if Docuflex crashed or was ended from
+ * Task Manager, its Java and Node services keep running and hold the ports.
+ * End only processes started from this installation's runtime folder.
+ */
+async function clearStaleWindowsServices() {
+  if (!(await portInUse(BACKEND_PORT)) && !(await portInUse(FRONTEND_PORT))) return;
+  const runtimeFolder = path.join(resourceRoot, 'runtime').replaceAll("'", "''");
+  spawnSync('powershell.exe', [
+    '-NoProfile', '-NonInteractive', '-Command',
+    `Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith('${runtimeFolder}', [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`
+  ], { windowsHide: true, timeout: 15_000, stdio: 'ignore' });
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline && ((await portInUse(BACKEND_PORT)) || (await portInUse(FRONTEND_PORT)))) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+function spawnServices() {
+  const tools = toolPaths();
+  const runtime = tools.runtime;
   const backend = supervised(
-    runtime('java/bin/java'),
-    ['-cp', 'backend/out:backend/lib/pdfbox-app-3.0.8.jar', 'DocuflexPdfServer'],
+    tools.java,
+    ['-cp', ['backend/out', 'backend/lib/pdfbox-app-3.0.8.jar'].join(path.delimiter), 'DocuflexPdfServer'],
     {
       PDF_BACKEND_HOST: '127.0.0.1',
       PDF_BACKEND_PORT: String(BACKEND_PORT),
@@ -100,7 +205,7 @@ function spawnServices() {
     'pdf-backend'
   );
   const frontend = supervised(
-    runtime('node/bin/node'),
+    tools.node,
     ['frontend/index.js'],
     {
       HOST: '127.0.0.1',
@@ -112,22 +217,23 @@ function spawnServices() {
       SHUTDOWN_TIMEOUT: '1',
       DOCUFLEX_MCP: '1',
       DOCUFLEX_TRANSLATE_AUTO_INSTALL: '1',
+      DOCUFLEX_DISTRIBUTION: 'direct',
       // RLIMIT_NPROC counts every process of the KDE session user.
       DISABLE_DOCUMENT_PRLIMIT: '1',
       ADDRESS_HEADER: '',
       PROTOCOL_HEADER: '',
       HOST_HEADER: '',
-      PDF2HTMLEX_BIN: runtime('pdf2htmlEX/bin/pdf2htmlEX'),
+      PDF2HTMLEX_BIN: tools.pdf2htmlEX,
       PDF2HTMLEX_DATA_DIR: runtime('pdf2htmlEX/share/pdf2htmlEX'),
-      PDFTOPPM_BIN: runtime('ocr/bin/pdftoppm'),
-      PDFUNITE_BIN: runtime('ocr/bin/pdfunite'),
-      TESSERACT_BIN: runtime('ocr/bin/tesseract'),
+      PDFTOPPM_BIN: tools.pdftoppm,
+      PDFUNITE_BIN: tools.pdfunite,
+      TESSERACT_BIN: tools.tesseract,
       TESSDATA_PREFIX: runtime('ocr/share/tessdata'),
-      PDF_RENDER_BIN: runtime('ocr/bin/pdftoppm'),
+      PDF_RENDER_BIN: tools.pdftoppm,
       PYTHONDONTWRITEBYTECODE: '1',
       ANALYTICS_ENABLED: 'false',
-      DOCUMENT_CONVERTER_PYTHON: runtime('python/bin/python3'),
-      DOCUMENT_CONVERTER_BIN: runtime('office/program/soffice')
+      DOCUMENT_CONVERTER_PYTHON: tools.python,
+      DOCUMENT_CONVERTER_BIN: tools.office
     },
     'frontend'
   );
@@ -135,6 +241,16 @@ function spawnServices() {
 }
 
 function stopServices() {
+  if (isWindows) {
+    // /T also ends their children (Office, Python and pdf2htmlEX conversions).
+    for (const child of services) {
+      if (child.pid && child.exitCode === null) {
+        spawnSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+      }
+    }
+    services = [];
+    return;
+  }
   for (const child of services) {
     try { process.kill(/** @type {number} */ (child.pid), 'SIGTERM'); } catch {}
   }
@@ -142,7 +258,7 @@ function stopServices() {
   const deadline = Date.now() + 3000;
   for (const child of services) {
     while (child.exitCode === null && child.signalCode === null && Date.now() < deadline) {
-      spawnSync('/bin/sleep', ['0.025']);
+      sleepSync(25);
     }
     if (child.exitCode === null && child.signalCode === null) {
       spawnSync('/usr/bin/pkill', ['-KILL', '-P', String(child.pid)]);
@@ -219,6 +335,12 @@ function isNewer(latest, current) {
 const shellQuote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
 const isArch = () => fs.existsSync('/usr/bin/pacman');
 
+/** The release file this copy installs from. @param {string} name */
+function wantedAsset(name) {
+  if (isWindows) return name.endsWith('-setup.exe');
+  return isArch() ? name.endsWith('.pkg.tar.zst') : name.endsWith('.deb');
+}
+
 /** @type {Record<string, (event: Electron.IpcMainInvokeEvent, args: any) => unknown>} */
 const commands = {
   take_pending_pdf() {
@@ -244,7 +366,7 @@ const commands = {
     fs.writeFileSync(destination, Buffer.from(base64, 'base64'));
   },
   docuflex_print_pdf() {
-    // The frontend prints through the web view, as with Tauri on Linux.
+    // The frontend prints through the web view, as with Tauri on Linux and Windows.
     throw new Error('unsupported');
   },
   async docuflex_update_check() {
@@ -253,8 +375,7 @@ const commands = {
     const latest = String(release.tag_name ?? '').replace(/^v/, '');
     const assets = Array.isArray(release.assets) ? release.assets : [];
     const checksums = assets.find((/** @type {any} */ asset) => asset.name === 'SHA256SUMS.txt');
-    const wanted = (/** @type {string} */ name) => (isArch() ? name.endsWith('.pkg.tar.zst') : name.endsWith('.deb'));
-    const asset = assets.find((/** @type {any} */ candidate) => wanted(String(candidate.name)));
+    const asset = assets.find((/** @type {any} */ candidate) => wantedAsset(String(candidate.name)));
     updateAsset = asset && String(asset.browser_download_url).startsWith(DOWNLOAD_PREFIX)
       ? {
           name: asset.name,
@@ -312,6 +433,13 @@ const commands = {
   },
   docuflex_update_install() {
     if (!downloadedUpdate) throw new Error('Download the update first.');
+    if (isWindows) {
+      // The installer waits for Docuflex to close, installs silently and
+      // starts the new version (--force-run).
+      spawn(downloadedUpdate, ['/S', '--updated', '--force-run'], { detached: true, stdio: 'ignore' }).unref();
+      app.quit();
+      return;
+    }
     const install = isArch()
       ? `pkexec pacman -U --noconfirm ${shellQuote(downloadedUpdate)}`
       : `pkexec apt-get install -y ${shellQuote(downloadedUpdate)}`;
@@ -353,9 +481,12 @@ function createWindow() {
     minHeight: 640,
     center: true,
     frame: false,
+    // Windows: keeps the native border, shadow, Snap layouts and edge
+    // resizing while the web header draws the title bar.
+    thickFrame: true,
     show: false,
     backgroundColor: '#f8f8f8',
-    icon: path.join(__dirname, 'icon.png'),
+    icon: path.join(__dirname, isWindows ? 'icon.ico' : 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -366,14 +497,32 @@ function createWindow() {
     }
   });
   mainWindow.setMenu(null);
+  // The taskbar and Alt+Tab show "Docuflex", not the website's page title.
+  mainWindow.on('page-title-updated', (event) => event.preventDefault());
 
   const contents = mainWindow.webContents;
+  // Ctrl+wheel and pinch zoom the PDF (PdfEditor.svelte), never the interface.
+  void contents.setVisualZoomLevelLimits(1, 1);
+  contents.on('did-finish-load', () => contents.setZoomFactor(interfaceZoom()));
+  contents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown' || !(input.control || input.meta) || input.alt) return;
+    const current = contents.getZoomFactor();
+    let next = null;
+    if (input.key === '=' || input.key === '+') next = current + 0.05;
+    else if (input.key === '-' || input.key === '_') next = current - 0.05;
+    else if (input.key === '0' && !input.shift) next = DEFAULT_INTERFACE_ZOOM;
+    if (next === null) return;
+    event.preventDefault();
+    next = Math.round(Math.min(1.5, Math.max(0.6, next)) * 100) / 100;
+    contents.setZoomFactor(next);
+    saveInterfaceZoom(next);
+  });
   contents.on('will-navigate', (event, url) => {
     const target = new URL(url);
     if (target.protocol === 'file:' && /\.pdf$/i.test(target.pathname)) {
       // A PDF dropped onto the window.
       event.preventDefault();
-      pendingPdf = decodeURIComponent(target.pathname);
+      pendingPdf = fileURLToPath(target);
       notifyPendingPdf();
       return;
     }
@@ -424,6 +573,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(async () => {
     try {
+      if (isWindows) await clearStaleWindowsServices();
       spawnServices();
       await waitForServices();
     } catch (error) {

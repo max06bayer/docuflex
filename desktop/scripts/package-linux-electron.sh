@@ -15,7 +15,7 @@ OUTPUT_DIR=${3:?Pass the output directory.}
 VERSION=${4:?Pass the version, for example 0.9.6.}
 FRONTEND_BUILD=${5:-}
 REPOSITORY_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-SHELL_SOURCE="$REPOSITORY_ROOT/desktop/electron-linux"
+SHELL_SOURCE="$REPOSITORY_ROOT/desktop/electron"
 WORK=$(mktemp -d)
 trap 'rm -rf -- "$WORK"' EXIT
 ROOT="$WORK/root"
