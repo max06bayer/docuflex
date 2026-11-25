@@ -3,7 +3,8 @@ import { inspectStoreResources, assertStoreSigning } from './check-app-store.mjs
 import { signSandboxApp } from './sign-macos-sandbox.mjs';
 import { assertInstallerIdentity, buildStorePackage, identityTeam, prepareStoreSigning, readProvisioningProfile } from './app-store-package.mjs';
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { rm } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -87,6 +88,7 @@ if (process.platform === 'darwin') {
   const product = process.env.DOCUFLEX_VARIANT === 'redesign' ? 'Docuflex Redesign' : 'Docuflex';
   const target = profile.target;
   const app = join(target, 'release/bundle/macos', `${product}.app`);
+  installLayeredIcon(app);
   const store = profile.store && !profile.localQa
     ? await prepareStoreSigning(app, process.env.DOCUFLEX_PROVISIONING_PROFILE, signingIdentity, join(desktopRoot, 'src-tauri/Entitlements.plist'))
     : null;
@@ -99,5 +101,32 @@ if (process.platform === 'darwin') {
     const output = join(target, 'release/bundle/macos', `Docuflex_${version}_${process.env.DOCUFLEX_STORE_BUILD_NUMBER}_AppStore.pkg`);
     buildStorePackage(app, output, process.env.APPLE_INSTALLER_IDENTITY || '');
     console.log(`App Store upload package: ${output}`);
+  }
+}
+
+/**
+ * Tauri only bundles the flat icon.icns. The Icon Composer icon
+ * (src-tauri/Docuflex.icon) is compiled with actool into Assets.car so macOS
+ * 26 draws it with Liquid Glass and its dark, tinted and clear variants; the .icns
+ * actool writes beside it stays the fallback. Runs before signing.
+ * @param {string} app
+ */
+function installLayeredIcon(app) {
+  const source = join(desktopRoot, 'src-tauri/Docuflex.icon');
+  if (!existsSync(source)) return;
+  const output = mkdtempSync(join(tmpdir(), 'docuflex-icon-'));
+  try {
+    execFileSync('xcrun', ['actool', source, '--compile', output, '--app-icon', 'Docuflex',
+      '--platform', 'macosx', '--target-device', 'mac', '--minimum-deployment-target', '26.0',
+      '--output-partial-info-plist', join(output, 'partial.plist')], { stdio: ['ignore', 'ignore', 'inherit'] });
+    const resources = join(app, 'Contents/Resources');
+    copyFileSync(join(output, 'Assets.car'), join(resources, 'Assets.car'));
+    copyFileSync(join(output, 'Docuflex.icns'), join(resources, 'Docuflex.icns'));
+    const plist = join(app, 'Contents/Info.plist');
+    execFileSync('plutil', ['-replace', 'CFBundleIconFile', '-string', 'Docuflex', plist]);
+    execFileSync('plutil', ['-replace', 'CFBundleIconName', '-string', 'Docuflex', plist]);
+    rmSync(join(resources, 'icon.icns'), { force: true });
+  } finally {
+    rmSync(output, { recursive: true, force: true });
   }
 }
