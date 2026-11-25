@@ -8,13 +8,19 @@ export const STORE_BUNDLE_ID='com.docuflex.editor';
 /** Decode a Mac App Store provisioning profile and check it fits this app. */
 export function readProvisioningProfile(path,bundleId=STORE_BUNDLE_ID){
  const plist=execFileSync('security',['cms','-D','-i',resolve(path)]);
- const profile=JSON.parse(execFileSync('plutil',['-convert','json','-o','-','-'],{input:plist,encoding:'utf8'}));
- const team=profile.TeamIdentifier?.[0];
- const appId=profile.Entitlements?.['com.apple.application-identifier'];
+ // The profile holds <date> and <data> values that plutil cannot turn into
+ // JSON as a whole, so read only the keys that are checked.
+ const read=(key,format='raw')=>{
+  try{return execFileSync('plutil',['-extract',key,format,'-o','-','-'],{input:plist,encoding:'utf8',stdio:['pipe','pipe','ignore']}).trim();}
+  catch{return '';}
+ };
+ const team=read('TeamIdentifier.0');
+ const appId=read('Entitlements.com\\.apple\\.application-identifier');
  if(!team||appId!==`${team}.${bundleId}`)throw Error(`The provisioning profile is for ${appId||'another app'}, not ${team}.${bundleId}.`);
- if(profile.ProvisionsAllDevices||profile.ProvisionedDevices)throw Error('Use a Mac App Store Connect (distribution) profile, not a development profile.');
- if(new Date(profile.ExpirationDate)<=new Date())throw Error('The provisioning profile has expired.');
- return {team,appId,name:profile.Name};
+ if(read('ProvisionsAllDevices')==='true'||read('ProvisionedDevices','json'))throw Error('Use a Mac App Store Connect (distribution) profile, not a development profile.');
+ const expires=new Date(read('ExpirationDate'));
+ if(!(expires>new Date()))throw Error('The provisioning profile has expired.');
+ return {team,appId,name:read('Name'),expires};
 }
 
 /** The signing identity's Team ID, from "Apple Distribution: Name (TEAMID)". */
@@ -32,9 +38,18 @@ export async function prepareStoreSigning(app,profilePath,identity,baseEntitleme
  return {entitlements,cleanup:()=>rm(directory,{recursive:true,force:true})};
 }
 
+/** Check that the installer-signing certificate is named right and installed. */
+export function assertInstallerIdentity(installerIdentity){
+ if(!/^(3rd Party Mac Developer Installer:|Mac Installer Distribution:)/.test(installerIdentity||''))throw Error('Set APPLE_INSTALLER_IDENTITY to the installed "3rd Party Mac Developer Installer" (Mac Installer Distribution) certificate.');
+ // Installer certificates are not code-signing identities, so list them all.
+ const identities=execFileSync('security',['find-identity','-v'],{encoding:'utf8'});
+ if(!identities.includes('"'+installerIdentity+'"'))throw Error('The installer signing identity is not installed or is not valid.');
+ return installerIdentity;
+}
+
 /** Wrap the signed app in the installer package App Store Connect accepts. */
 export function buildStorePackage(app,output,installerIdentity){
- if(!/^(3rd Party Mac Developer Installer:|Mac Installer Distribution:)/.test(installerIdentity))throw Error('Set APPLE_INSTALLER_IDENTITY to the installed "3rd Party Mac Developer Installer" (Mac Installer Distribution) certificate.');
+ assertInstallerIdentity(installerIdentity);
  execFileSync('productbuild',['--sign',installerIdentity,'--component',resolve(app),'/Applications',resolve(output)],{stdio:'inherit'});
  execFileSync('pkgutil',['--check-signature',resolve(output)],{stdio:'inherit'});
 }

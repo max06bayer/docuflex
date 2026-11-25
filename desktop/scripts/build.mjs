@@ -1,7 +1,7 @@
 import { distributionProfile } from './distribution.mjs';
 import { inspectStoreResources, assertStoreSigning } from './check-app-store.mjs';
 import { signSandboxApp } from './sign-macos-sandbox.mjs';
-import { buildStorePackage, identityTeam, prepareStoreSigning, readProvisioningProfile } from './app-store-package.mjs';
+import { assertInstallerIdentity, buildStorePackage, identityTeam, prepareStoreSigning, readProvisioningProfile } from './app-store-package.mjs';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
@@ -22,6 +22,7 @@ if (profile.store) {
     if (!provisioning) throw new Error('Set DOCUFLEX_PROVISIONING_PROFILE to the Mac App Store provisioning profile for com.docuflex.editor.');
     const {team} = readProvisioningProfile(provisioning);
     if (identityTeam(signingIdentity) !== team) throw new Error('The signing identity and provisioning profile belong to different teams.');
+    if (identityTeam(assertInstallerIdentity(process.env.APPLE_INSTALLER_IDENTITY)) !== team) throw new Error('The installer identity and provisioning profile belong to different teams.');
     if (!/^\d+(\.\d+){0,2}$/.test(process.env.DOCUFLEX_STORE_BUILD_NUMBER || '')) throw new Error('Set DOCUFLEX_STORE_BUILD_NUMBER to a number higher than every earlier upload.');
   }
   // tauri-build copies resources next to the executable before bundling. Clear
