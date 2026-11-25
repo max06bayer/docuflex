@@ -36,7 +36,14 @@ export async function downloadRuntimeFile(file,path,signal,progress) {
   let received=await stat(path).then(info=>info.size).catch(()=>0);
   if(received===file.size && await sha256(path)===file.sha256){progress(received);return;}
   if(received>=file.size){await rm(path,{force:true});received=0;}
-  const requestSignal=AbortSignal.any([signal,AbortSignal.timeout(30*60*1000)]);
+  // A stall limit, not a total one: the Windows runtime is about 1.6 GB and a
+  // slow connection must be able to finish it in one go.
+  const STALL_MS=2*60*1000;
+  const stalled=new AbortController();
+  let stallTimer=setTimeout(()=>stalled.abort(),STALL_MS);
+  const alive=()=>{clearTimeout(stallTimer);stallTimer=setTimeout(()=>stalled.abort(),STALL_MS);};
+  const requestSignal=AbortSignal.any([signal,stalled.signal]);
+  try {
   let response=await fetch(file.url,{headers:received?{Range:`bytes=${received}-`}:{},signal:requestSignal});
   if(received && [416,501].includes(response.status)){
     await response.body?.cancel();received=0;
@@ -57,9 +64,13 @@ export async function downloadRuntimeFile(file,path,signal,progress) {
       if(received+value.length>file.size)throw new Error('The runtime archive exceeds its expected size.');
       let offset=0;
       while(offset<value.length){const result=await handle.write(value,offset,value.length-offset);if(!result.bytesWritten)throw new Error('Could not save the runtime download.');offset+=result.bytesWritten;}
-      received+=value.length;progress(received);
+      received+=value.length;progress(received);alive();
     }
   } finally {await handle.close();await reader.cancel().catch(()=>{});}
+  } catch(error){
+    if(stalled.signal.aborted && !signal.aborted)throw new Error('The runtime download stalled. Check your connection and choose Resume to continue.');
+    throw error;
+  } finally {clearTimeout(stallTimer);}
   if(received!==file.size)throw new Error('The runtime download ended early. Choose Resume to continue.');
   if(await sha256(path)!==file.sha256){await rm(path,{force:true});throw new Error('The runtime checksum did not match. Download it again.');}
 }

@@ -556,7 +556,10 @@ function createWindow() {
 if (!app.requestSingleInstanceLock()) {
   app.exit(0);
 } else {
-  pendingPdf = pdfPathFromArguments(process.argv.slice(app.isPackaged ? 0 : 1), process.cwd());
+  // `electron .` (development) puts the app folder in argv[1]. Not app.isPackaged:
+  // the Linux packages run a binary named "electron", which Electron treats as
+  // unpackaged even when installed.
+  pendingPdf = pdfPathFromArguments(process.argv.slice(process.defaultApp ? 1 : 0), process.cwd());
 
   app.on('second-instance', (_event, argv, workingDirectory) => {
     const file = pdfPathFromArguments(argv, workingDirectory);

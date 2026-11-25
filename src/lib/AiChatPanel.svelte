@@ -1406,7 +1406,7 @@
               <button type="button" aria-label={`Remove ${file.name}`} onclick={() => (documentAttachments = documentAttachments.filter((_, item) => item !== index))}></button>
             </div>
           {/each}
-          {#each attachments as image, index (image)}
+          {#each attachments as image, index (index)}
             <button class="ai-chip image" type="button" aria-label="Remove image" onclick={() => (attachments = attachments.filter((_, item) => item !== index))}>
               <img src={image} alt="" />
               <span class="ai-image-remove" aria-hidden="true">

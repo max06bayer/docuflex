@@ -8,9 +8,11 @@ let timer;
 
 /** @param {any} status */
 function apply(status) {
-  const previouslyReady = get(qwenDownload).ready;
+  const previous = get(qwenDownload);
   qwenDownload.update((state) => ({ ...state, ...status, ready: Boolean(status.ready), phase: status.phase || (status.ready ? 'ready' : 'available') }));
-  if (status.ready && !previouslyReady) {
+  // Switch to Qwen only when a download finishes, never because a status
+  // check found an existing install: that would override the user's model.
+  if (status.ready && !previous.ready && previous.phase === 'downloading') {
     try { localStorage.setItem('docuflex-ai-model', QWEN_MODEL_ID); } catch {}
     window.dispatchEvent(new CustomEvent('docuflex:qwen-ready'));
   }
