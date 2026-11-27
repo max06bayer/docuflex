@@ -179,6 +179,15 @@ async function preparePythonRuntime() {
   } else {
     await cp(source, destination, { recursive: true, dereference: process.platform === 'win32' });
   }
+  if (profile.store) {
+    // Tk is never used. App Review flags _tkinter's Tcl references as
+    // non-public API, so the Store runtime leaves out every Tk module.
+    const library = join(destination, 'lib', 'python3.12');
+    for (const entry of ['tkinter', 'idlelib', 'turtledemo', 'turtle.py']) await rm(join(library, entry), { recursive: true, force: true });
+    for (const entry of await readdir(join(library, 'lib-dynload'))) {
+      if (entry.startsWith('_tkinter')) await rm(join(library, 'lib-dynload', entry), { force: true });
+    }
+  }
   if (process.platform === 'linux') {
     // setup-python's interpreter depends on a shared library without a
     // relocatable RUNPATH. Scope its library path to Python, never the GUI.
@@ -221,7 +230,23 @@ async function prepareMacOffice() {
       await rm(mount, { recursive: true, force: true });
     }
   }
-  await cp(cachedApp, join(resourcesRoot, 'runtime', 'office', 'LibreOffice.app'), { recursive: true, verbatimSymlinks: true });
+  const office = join(resourcesRoot, 'runtime', 'office', 'LibreOffice.app');
+  await cp(cachedApp, office, { recursive: true, verbatimSymlinks: true });
+  // LibreOffice's Quick Look extensions are only Finder previews. App Store
+  // Connect requires every nested extension to carry Docuflex's own version.
+  if (profile.store) {
+    await rm(join(office, 'Contents', 'PlugIns'), { recursive: true, force: true });
+    // The Aqua plug-in (needed even headless) links Apple's private CoreUI
+    // framework without importing any symbol from it. App Review rejects the
+    // link, so point that unused entry at a public framework instead.
+    const plugin = join(office, 'Contents', 'Frameworks', 'libvclplug_osxlo.dylib');
+    const coreUi = '/System/Library/PrivateFrameworks/CoreUI.framework/Versions/A/CoreUI';
+    if (execFileSync('nm', ['-um', plugin], { encoding: 'utf8' }).includes('(from CoreUI)')) throw new Error('LibreOffice now imports CoreUI symbols; the Store relink is no longer safe.');
+    run('install_name_tool', ['-change', coreUi, '/System/Library/Frameworks/Security.framework/Versions/A/Security', plugin]);
+    // Relinking invalidates the signature and Apple Silicon kills unsigned
+    // code. Sign ad hoc for the smoke tests; the final build re-signs it.
+    run('codesign', ['--force', '--sign', '-', plugin]);
+  }
 }
 
 async function copyRuntime(name, environmentName, fallback) {

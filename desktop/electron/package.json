@@ -1,7 +1,7 @@
 {
   "name": "docuflex-desktop",
   "productName": "Docuflex",
-  "version": "0.9.6",
+  "version": "0.9.7",
   "description": "Docuflex offline PDF editor (Linux and Windows shell)",
   "private": true,
   "main": "main.cjs",

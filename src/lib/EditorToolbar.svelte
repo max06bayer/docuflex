@@ -676,8 +676,15 @@
      The black square gets a faint light edge so it reads on the dark toolbar. */
   :global(:root[data-theme="dark"]) .primary-tool.active.light-selection { border-color: #b8b8b8; background: #e9e9e9; }
   :global(:root[data-theme="dark"]) img[src$="/blackout.svg"] { filter: drop-shadow(0 0 0.6px rgba(255, 255, 255, 0.85)); }
+  /* On the dark, unselected button their black "str" letters vanish, so they switch to
+     artwork with white letters; the square keeps the color it paints. */
+  :global(:root[data-theme="dark"]) .primary-tool:not(.active) > img.tool-icon[src$="/redesign/tools/blackout.svg"] { content: url('/redesign/tools/blackout-dark.svg'); filter: none; }
+  :global(:root[data-theme="dark"]) .primary-tool:not(.active) > img.tool-icon[src$="/redesign/tools/whiteout.svg"] { content: url('/redesign/tools/whiteout-dark.svg'); }
   :global(:root[data-theme="dark"]) .primary-tool.active > img.tool-icon,
   :global(:root[data-theme="dark"]) .primary-tool.active .design-icon:not(.design-icon-select) { filter: none; }
+  /* Their wrapper already inverts design icons, so the global "hovered icons turn white"
+     rule from theme-dark.css would flip them to black on the dark button. */
+  :global(:root[data-theme="dark"]) .primary-tool:hover .design-icon:not(.design-icon-select) img { filter: none; }
   /* The select cursor is a white glyph: white while unselected, black when selected. */
   :global(:root[data-theme="dark"]) .primary-tool:not(.active) .design-icon-select img { filter: none; }
   :global(:root[data-theme="dark"]) .primary-tool.active .design-icon-select img { filter: invert(1); }
