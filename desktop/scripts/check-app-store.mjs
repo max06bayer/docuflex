@@ -24,7 +24,7 @@ export async function inspectStoreResources(resources){
  const zip=join(resources,'runtime/tectonic/texlive-v33.zip');
  if(!await exists(zip))problem('tex','Bundle the offline TeX resources.');
  else if(await sha256File(zip)!=='eab6e0f384907a63634cab1b1050b99e1c1acac5fb592a7ef27bad110022073c')problem('tex','Offline TeX bundle checksum mismatch.');
- async function visit(directory){for(const e of await readdir(directory,{withFileTypes:true})){if(e.isSymbolicLink())continue;const p=join(directory,e.name);if(e.isDirectory()){if(/\.appex$/i.test(e.name)){problem('extension','App extensions must not be nested in the Store resources: '+p.slice(resources.length+1));continue;}await visit(p);}else if(/\.(jar|class)$/i.test(e.name))problem('java-bytecode','Java bytecode is not part of the Store package: '+p.slice(resources.length+1));}}
+ async function visit(directory){for(const e of await readdir(directory,{withFileTypes:true})){if(e.isSymbolicLink())continue;const p=join(directory,e.name);if(e.isDirectory()){if(/\.appex$/i.test(e.name)){problem('extension','App extensions must not be nested in the Store resources: '+p.slice(resources.length+1));continue;}await visit(p);}else if(/^_tkinter\..*\.so$/.test(e.name))problem('private-api','Tk references non-public Tcl APIs: '+p.slice(resources.length+1));else if(/\.(dylib|so)$/.test(e.name)&&execFileSync('otool',['-L',p],{encoding:'utf8'}).includes('/PrivateFrameworks/'))problem('private-api','This library links a private Apple framework: '+p.slice(resources.length+1));else if(/\.(jar|class)$/i.test(e.name))problem('java-bytecode','Java bytecode is not part of the Store package: '+p.slice(resources.length+1));}}
  await visit(resources);
  return issues;
 }
