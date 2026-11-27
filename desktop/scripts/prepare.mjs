@@ -243,6 +243,9 @@ async function prepareMacOffice() {
     const coreUi = '/System/Library/PrivateFrameworks/CoreUI.framework/Versions/A/CoreUI';
     if (execFileSync('nm', ['-um', plugin], { encoding: 'utf8' }).includes('(from CoreUI)')) throw new Error('LibreOffice now imports CoreUI symbols; the Store relink is no longer safe.');
     run('install_name_tool', ['-change', coreUi, '/System/Library/Frameworks/Security.framework/Versions/A/Security', plugin]);
+    // Relinking invalidates the signature and Apple Silicon kills unsigned
+    // code. Sign ad hoc for the smoke tests; the final build re-signs it.
+    run('codesign', ['--force', '--sign', '-', plugin]);
   }
 }
 
